@@ -18,6 +18,7 @@ from .device import (
     Device,
     DeviceDescriptor,
     Interface,
+    Option,
     RateControl,
     RateMode,
     Sink,
@@ -41,12 +42,15 @@ class BaseDevice(Device):
         primary_source: Optional[str] = None,
         hardware_id: Optional[str] = None,
         model: Optional[str] = None,
+        options: Sequence[Option] = (),
     ):
         self._instance_id = instance_id
         self._name = name
         self._interface = interface
         self._sources = list(sources)
         self._sinks = list(sinks)
+        self._options = list(options)
+        self._option_values = {o.key: o.value for o in self._options}
         self._rate = rate
         self._primary_source = primary_source
         self._hardware_id = hardware_id
@@ -98,6 +102,8 @@ class BaseDevice(Device):
             firmware=self._firmware,
             sources=list(self._sources),
             sinks=sinks,
+            options=[replace(o, value=self._option_values.get(o.key, o.value))
+                     for o in self._options],
             rate=self._rate,
             rate_hz=self._rate_hz,
             primary_source=self._primary_source,
@@ -144,6 +150,19 @@ class BaseDevice(Device):
         lo = self._rate.min_hz if self._rate.min_hz is not None else 1e-3
         hi = self._rate.max_hz if self._rate.max_hz is not None else float(hz)
         self._rate_hz = max(lo, min(hi, float(hz)))
+
+    # -- configuration --------------------------------------------------------
+    def set_option(self, key: str, value) -> None:
+        for o in self._options:
+            if o.key == key:
+                if o.choices and value not in [c[0] for c in o.choices]:
+                    return
+                self._option_values[key] = value
+                self._on_option(key, value)
+                return
+
+    def _on_option(self, key: str, value) -> None:
+        """Hook: react to an option change (e.g. reconfigure hardware)."""
 
     def _sink_schema(self, sink_id: str) -> Optional[Sink]:
         for s in self._sinks:

@@ -161,6 +161,14 @@ class DeviceManager(QObject):
         device.set_rate_hz(hz)
         self.active_changed.emit()
 
+    def set_option(self, instance_id: str, key: str, value) -> None:
+        device = self._active.get(instance_id) or self._available.get(instance_id)
+        if device is None or not hasattr(device, "set_option"):
+            return
+        device.set_option(key, value)
+        self.active_changed.emit()
+        self.available_changed.emit()
+
     def rename(self, instance_id: str, name: str) -> None:
         device = self._active.get(instance_id) or self._available.get(instance_id)
         if device is None or not hasattr(device, "set_name"):

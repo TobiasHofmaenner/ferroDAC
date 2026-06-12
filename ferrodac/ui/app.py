@@ -12,7 +12,7 @@ from .. import __version__
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QColor, QPalette
+from qtpy.QtGui import QColor, QImage, QPalette
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -54,6 +54,7 @@ class SourceCard(QFrame):
         super().__init__(parent)
         self.key = port.key
         self.unit = port.unit or ""
+        self.dtype = port.dtype
         self.setObjectName("SourceCard")
         self.setStyleSheet(
             "#SourceCard { background:#171c26; border:1px solid #232a38;"
@@ -107,6 +108,15 @@ class SourceCard(QFrame):
     def set_value(self, text: str) -> None:
         self.value_label.setText(text)
 
+    def set_live(self, value) -> None:
+        if self.dtype == "image":
+            if isinstance(value, QImage) and not value.isNull():
+                self.value_label.setText(f"▷ {value.width()}×{value.height()}")
+            else:
+                self.value_label.setText("▷ live")
+        else:
+            self.value_label.setText(fmt(value, self.unit))
+
 
 # --------------------------------------------------------------------------- #
 #  Device card (left dock)
@@ -136,7 +146,7 @@ class DeviceCard(QFrame):
         header.addWidget(title)
         header.addWidget(sub)
         header.addStretch(1)
-        if active and on_configure is not None and desc.sinks:
+        if active and on_configure is not None and (desc.sinks or desc.options):
             cfg = QPushButton("Configure…")
             cfg.clicked.connect(lambda: on_configure(desc.instance_id))
             header.addWidget(cfg)
@@ -215,6 +225,23 @@ class ConfigDialog(QDialog):
             srow.addWidget(spin)
             srow.addStretch(1)
             root.addLayout(srow)
+
+        if desc and desc.options:
+            for opt in desc.options:
+                orow = QHBoxLayout()
+                orow.addWidget(QLabel(opt.name))
+                combo = QComboBox()
+                for value, label in opt.choices:
+                    combo.addItem(label, value)
+                ix = combo.findData(opt.value)
+                if ix >= 0:
+                    combo.setCurrentIndex(ix)
+                combo.currentIndexChanged.connect(
+                    lambda _i, c=combo, key=opt.key:
+                    self.manager.set_option(self.instance_id, key, c.currentData())
+                )
+                orow.addWidget(combo, 1)
+                root.addLayout(orow)
 
         if desc and desc.sinks:
             hdr = QLabel("Sinks")
@@ -460,7 +487,7 @@ class SourcesPanel(QWidget):
         for key, card in self._cards.items():
             r = latest.get(key)
             if r is not None:
-                card.set_value(fmt(r.value, card.unit))
+                card.set_live(r.value)
 
 
 # --------------------------------------------------------------------------- #

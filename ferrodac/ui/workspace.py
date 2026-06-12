@@ -166,7 +166,7 @@ class Dashboard(QObject):
             self._sinks[pid] = SinkPort(
                 pid, panel.title, "numeric", "", "display", "display",
                 accepts=getattr(cls, "accepts", frozenset({"float", "bool"})),
-                single_bind=False, panel=panel,
+                single_bind=getattr(cls, "single_bind", False), panel=panel,
             )
             if self.default_sink_id is None and kind == "chart":
                 self.default_sink_id = pid
@@ -229,11 +229,13 @@ class Dashboard(QObject):
         for key, port in new_snk.items():
             self._sinks.setdefault(key, port)
 
-        # default-route new device sources to the default chart
+        # default-route new device sources to the default chart — but only if
+        # datatype-compatible (an image source must not land on a chart).
         for key, port in new_src.items():
             if key not in self._routes:
                 self._routes[key] = set()
-                if self.default_sink_id:
+                default = self._sinks.get(self.default_sink_id)
+                if default is not None and port.dtype in default.accepts:
                     self.set_route(key, self.default_sink_id, True)
         self.ports_changed.emit()
 
@@ -275,10 +277,12 @@ class Dashboard(QObject):
         if sink is None or src is None:
             return
         if on:
-            if sink.single_bind:        # one source owns a control sink
-                for skey, tg in self._routes.items():
-                    if skey != source_key:
+            if sink.single_bind:        # one source owns this sink — displace others
+                for skey, tg in list(self._routes.items()):
+                    if skey != source_key and sink_key in tg:
                         tg.discard(sink_key)
+                        if sink.kind == "display":
+                            sink.panel.remove_source(skey)
             targets.add(sink_key)
             if sink.kind == "display":
                 sink.panel.add_source(source_key, src)

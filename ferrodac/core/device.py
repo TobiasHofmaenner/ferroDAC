@@ -65,6 +65,19 @@ class Param:
 
 
 @dataclass(frozen=True)
+class Option:
+    """A device-level configuration choice (e.g. a camera's capture format).
+
+    Distinct from a Sink: it is not routable, it just parameterises the device.
+    ``choices`` is a tuple of ``(value, label)``; ``value`` is the current value.
+    """
+    key: str
+    name: str
+    choices: tuple = ()
+    value: object = None
+
+
+@dataclass(frozen=True)
 class Source:
     """A data-output endpoint on a device (produces data)."""
     id: str
@@ -118,6 +131,7 @@ class DeviceDescriptor:
     firmware: Optional[str] = None
     sources: list = field(default_factory=list)   # list[Source]
     sinks: list = field(default_factory=list)      # list[Sink]
+    options: list = field(default_factory=list)    # list[Option]
     rate: Optional[RateControl] = None
     rate_hz: Optional[float] = None
     primary_source: Optional[str] = None
@@ -169,6 +183,11 @@ class Device(ABC):
         """Write to a sink: trigger an ACTION or set a value. Implemented by
         BaseDevice; devices with no sinks never receive this."""
         raise NotImplementedError(f"{self.driver} exposes no writable sinks")
+
+    # -- configuration --------------------------------------------------------
+    def set_option(self, key: str, value) -> None:
+        """Set a device configuration option (see DeviceDescriptor.options)."""
+        raise NotImplementedError(f"{self.driver} exposes no options")
 
     # -- data plane (push) ----------------------------------------------------
     def start(self, emit) -> None:

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import Qt, Signal
-from qtpy.QtGui import QPalette
+from qtpy.QtCore import QRect, Qt, Signal
+from qtpy.QtGui import QColor, QImage, QPainter, QPalette
 from qtpy.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -88,6 +88,8 @@ class ChartPanel(Panel):
             buf = self._buf.get(r.key)
             if buf is None:
                 continue
+            if not isinstance(r.value, (int, float)):
+                continue
             if self._t0 is None:
                 self._t0 = r.t
             xs, ys = buf
@@ -122,7 +124,7 @@ class _Readout(QFrame):
         lay.addWidget(u)
 
     def set_value(self, value, status):
-        if status == 0 and value == value:
+        if status == 0 and isinstance(value, (int, float)) and value == value:
             self.lcd.display(f"{value:.4g}")
         else:
             self.lcd.display("----")
@@ -163,6 +165,88 @@ class NumericPanel(Panel):
             ro = self._readouts.get(r.key)
             if ro is not None:
                 ro.set_value(r.value, r.status)
+
+
+# --------------------------------------------------------------------------- #
+#  Image display — a virtual SINK for an "image" source (e.g. a camera)
+# --------------------------------------------------------------------------- #
+class VideoView(QWidget):
+    """Paints the latest QImage, scaled to fit while keeping aspect ratio.
+
+    Exposes ``content_rect()`` (the on-screen frame rectangle) and the source
+    image size so an overlay can map widget coordinates to image pixels — the
+    foundation the CV ROI editor builds on.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._img: QImage | None = None
+        self.setMinimumSize(160, 120)
+
+    def set_image(self, img) -> None:
+        self._img = img
+        self.update()
+
+    def image_size(self):
+        if self._img is None or self._img.isNull():
+            return None
+        return self._img.width(), self._img.height()
+
+    def content_rect(self) -> QRect:
+        """The rectangle the image currently occupies (centred, aspect-fit)."""
+        if self._img is None or self._img.isNull():
+            return self.rect()
+        iw, ih = self._img.width(), self._img.height()
+        if iw == 0 or ih == 0:
+            return self.rect()
+        scale = min(self.width() / iw, self.height() / ih)
+        w, h = int(iw * scale), int(ih * scale)
+        return QRect((self.width() - w) // 2, (self.height() - h) // 2, w, h)
+
+    def paintEvent(self, _ev):  # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#0b0e13"))
+        if self._img is None or self._img.isNull():
+            p.setPen(QColor("#5b6b7f"))
+            p.drawText(self.rect(), Qt.AlignCenter, "no video — route a camera here")
+            return
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(self.content_rect(), self._img)
+
+
+class ImagePanel(Panel):
+    """A single-bind display sink: shows the frames of one routed image source."""
+
+    kind = "image"
+    accepts = frozenset({"image"})
+    single_bind = True
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.view = VideoView()
+        lay.addWidget(self.view)
+        self._src_key = None
+        self._last_img = None
+
+    def add_source(self, key, source):
+        self._src_key = key
+
+    def remove_source(self, key):
+        if key == self._src_key:
+            self._src_key = None
+            self._last_img = None
+            self.view.set_image(None)
+
+    def feed(self, batch):
+        img = None
+        for r in batch:
+            if r.key == self._src_key and isinstance(r.value, QImage):
+                img = r.value
+        if img is not None:
+            self._last_img = img
+            self.view.set_image(img)
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +332,7 @@ class TogglePanel(InputPanel):
 PANEL_TYPES = {
     "chart": ("Chart", ChartPanel),
     "numeric": ("7-seg display", NumericPanel),
+    "image": ("Camera view", ImagePanel),
     "slider": ("Slider", SliderPanel),
     "button": ("Button", ButtonPanel),
     "toggle": ("Toggle", TogglePanel),
