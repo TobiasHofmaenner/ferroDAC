@@ -45,7 +45,14 @@ class FakeGaugeController(BaseSource):
                 Control(id="zero", name="Zero", kind=ControlKind.ACTION),
                 Control(id="setpoint", name="Setpoint", kind=ControlKind.SETPOINT,
                         params=(Param("threshold", "float64", "mbar",
-                                      minimum=1e-9, maximum=1000.0),)),
+                                      minimum=1e-9, maximum=1000.0),),
+                        value=1e-5),
+                Control(id="filter", name="Filter", kind=ControlKind.ENUM,
+                        params=(Param("mode", "str",
+                                      options=("fast", "standard", "slow")),),
+                        value="standard"),
+                Control(id="emission", name="Emission", kind=ControlKind.TOGGLE,
+                        value=False),
             ]
             out.append(cls(
                 instance_id=f"sim:gauge:{tag}",

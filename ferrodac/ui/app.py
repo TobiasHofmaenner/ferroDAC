@@ -14,10 +14,15 @@ from qtpy.QtCore import Qt
 from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -27,7 +32,7 @@ from qtpy.QtWidgets import (
 
 from ..core.manager import SourceManager
 from ..core.registry import load_builtin_drivers
-from ..core.source import SourceDescriptor, Status
+from ..core.source import ControlKind, RateMode, SourceDescriptor, Status
 
 CHANNEL_COLORS = ["#4fc3f7", "#ff8a65", "#81c784", "#ba68c8", "#ffd54f", "#e57373"]
 
@@ -89,7 +94,8 @@ class SourceCard(QFrame):
     """Renders a SourceDescriptor. `active=False` shows an Add button; `active=True`
     shows status, the primary value, nested channel cards, and a Remove button."""
 
-    def __init__(self, desc: SourceDescriptor, active: bool, on_action, parent=None):
+    def __init__(self, desc: SourceDescriptor, active: bool, on_action,
+                 on_configure=None, parent=None):
         super().__init__(parent)
         self.setObjectName("SourceCard")
         self.setStyleSheet(
@@ -113,6 +119,11 @@ class SourceCard(QFrame):
         header.addWidget(title)
         header.addWidget(sub)
         header.addStretch(1)
+
+        if active and on_configure is not None and desc.controls:
+            cfg = QPushButton("Configure…")
+            cfg.clicked.connect(lambda: on_configure(desc.instance_id))
+            header.addWidget(cfg)
 
         btn = QPushButton("Add" if not active else "Remove")
         btn.setFixedWidth(84)
@@ -167,6 +178,200 @@ class SourceCard(QFrame):
 
 
 # --------------------------------------------------------------------------- #
+#  Configuration dialog (generated from the descriptor)
+# --------------------------------------------------------------------------- #
+class ConfigDialog(QDialog):
+    """A device's configuration view, generated from its descriptor: editable
+    name, read-only identity, sampling rate, and a form of declared controls."""
+
+    def __init__(self, manager: SourceManager, instance_id: str, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.instance_id = instance_id
+        self.setWindowTitle("Configure source")
+        self.setMinimumWidth(440)
+        self._setpoint_labels: dict[str, tuple] = {}
+        self._control_widgets: dict[str, QWidget] = {}
+        self._info = QLabel()
+        self._info.setStyleSheet("color:#8b95a4; font-size:11px;")
+        self._info.setWordWrap(True)
+
+        self._build(manager.descriptor(instance_id))
+        manager.active_changed.connect(self._refresh)
+
+    def _build(self, desc: SourceDescriptor) -> None:
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+
+        title = QLabel(desc.name if desc else self.instance_id)
+        title.setStyleSheet("font-size:15px; font-weight:700;")
+        root.addWidget(title)
+
+        # editable display name
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Name"))
+        self._name_edit = QLineEdit(desc.name if desc else "")
+        name_row.addWidget(self._name_edit, 1)
+        rn = QPushButton("Rename")
+        rn.clicked.connect(
+            lambda: self.manager.rename(
+                self.instance_id, self._name_edit.text().strip() or self.instance_id
+            )
+        )
+        name_row.addWidget(rn)
+        root.addLayout(name_row)
+
+        root.addWidget(self._info)
+
+        # sampling rate (only when the driver says it's settable)
+        if desc and desc.rate and desc.rate.mode == RateMode.SETTABLE:
+            srow = QHBoxLayout()
+            srow.addWidget(QLabel("Sample rate"))
+            spin = QDoubleSpinBox()
+            spin.setRange(desc.rate.min_hz or 0.01, desc.rate.max_hz or 1000.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.1)
+            spin.setSuffix(" Hz")
+            spin.setValue(desc.rate_hz or desc.rate.default_hz or 1.0)
+            spin.valueChanged.connect(
+                lambda hz: self.manager.set_rate(self.instance_id, hz)
+            )
+            srow.addWidget(spin)
+            srow.addStretch(1)
+            root.addLayout(srow)
+
+        # controls form (generated)
+        if desc and desc.controls:
+            hdr = QLabel("Controls")
+            hdr.setStyleSheet("font-weight:700; margin-top:2px;")
+            root.addWidget(hdr)
+            card = QFrame()
+            card.setObjectName("CtrlCard")
+            card.setStyleSheet(
+                "#CtrlCard { background:#171c26; border:1px solid #232a38;"
+                " border-radius:8px; }"
+            )
+            grid = QGridLayout(card)
+            grid.setContentsMargins(10, 8, 10, 8)
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(8)
+            for r, c in enumerate(desc.controls):
+                lbl = QLabel(c.name)
+                lbl.setStyleSheet("font-weight:600;")
+                grid.addWidget(lbl, r, 0)
+                grid.addWidget(self._control_widget(c), r, 1)
+            root.addWidget(card)
+
+        btnrow = QHBoxLayout()
+        btnrow.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        btnrow.addWidget(close)
+        root.addLayout(btnrow)
+
+        self._update_info(desc)
+
+    def _control_widget(self, c) -> QWidget:
+        iid = self.instance_id
+        if c.kind == ControlKind.ACTION:
+            b = QPushButton(f"Trigger {c.name}")
+            b.clicked.connect(lambda _=False, cid=c.id: self.manager.invoke(iid, cid))
+            return b
+        if c.kind == ControlKind.TOGGLE:
+            chk = QCheckBox("on")
+            chk.setChecked(bool(c.value))
+            chk.toggled.connect(lambda on, cid=c.id: self.manager.invoke(iid, cid, on))
+            self._control_widgets[c.id] = chk
+            return chk
+        if c.kind == ControlKind.ENUM:
+            combo = QComboBox()
+            opts = list(c.params[0].options) if c.params else []
+            combo.addItems(opts)
+            if c.value in opts:
+                combo.setCurrentText(c.value)
+            combo.currentTextChanged.connect(
+                lambda txt, cid=c.id: self.manager.invoke(iid, cid, txt)
+            )
+            self._control_widgets[c.id] = combo
+            return combo
+        # SETPOINT
+        unit = c.params[0].unit if c.params else ""
+        edit = QLineEdit("" if c.value is None else f"{c.value:g}")
+        edit.setFixedWidth(110)
+        apply = QPushButton("Apply")
+        cur = QLabel()
+        cur.setStyleSheet("color:#8b95a4; font-size:11px;")
+        self._setpoint_labels[c.id] = (cur, unit)
+        self._set_current_label(cur, c.value, unit)
+
+        def _apply(_=False, cid=c.id, e=edit):
+            try:
+                val = float(e.text())
+            except ValueError:
+                return
+            self.manager.invoke(iid, cid, val)
+
+        apply.clicked.connect(_apply)
+        edit.returnPressed.connect(_apply)
+        host = QWidget()
+        cell = QHBoxLayout(host)
+        cell.setContentsMargins(0, 0, 0, 0)
+        cell.addWidget(edit)
+        cell.addWidget(QLabel(unit))
+        cell.addWidget(apply)
+        cell.addWidget(cur)
+        cell.addStretch(1)
+        return host
+
+    @staticmethod
+    def _set_current_label(label: QLabel, value, unit: str) -> None:
+        v = "—" if value is None else f"{value:g}"
+        label.setText(f"current: {v} {unit}".rstrip())
+
+    def _update_info(self, desc: SourceDescriptor) -> None:
+        if desc is None:
+            return
+        bits = [f"driver {desc.driver}", f"iface {desc.interface.kind}"]
+        if desc.interface.params:
+            bits.append(", ".join(f"{k}={v}" for k, v in desc.interface.params.items()))
+        if desc.hardware_id:
+            bits.append(desc.hardware_id)
+        if desc.firmware:
+            bits.append(f"fw {desc.firmware}")
+        bits.append(f"status: {desc.status.value}")
+        self._info.setText("   ·   ".join(bits))
+
+    def _refresh(self) -> None:
+        if not self.manager.is_active(self.instance_id):
+            self.close()
+            return
+        desc = self.manager.descriptor(self.instance_id)
+        if desc is None:
+            return
+        self._update_info(desc)
+        for c in desc.controls:
+            w = self._control_widgets.get(c.id)
+            if c.kind == ControlKind.SETPOINT and c.id in self._setpoint_labels:
+                lbl, unit = self._setpoint_labels[c.id]
+                self._set_current_label(lbl, c.value, unit)
+            elif c.kind == ControlKind.TOGGLE and w is not None:
+                w.blockSignals(True)
+                w.setChecked(bool(c.value))
+                w.blockSignals(False)
+            elif c.kind == ControlKind.ENUM and w is not None and c.value:
+                w.blockSignals(True)
+                w.setCurrentText(c.value)
+                w.blockSignals(False)
+
+    def closeEvent(self, event):  # noqa: N802
+        try:
+            self.manager.active_changed.disconnect(self._refresh)
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+# --------------------------------------------------------------------------- #
 #  Main window
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
@@ -175,6 +380,7 @@ class MainWindow(QMainWindow):
         self.manager = manager
         self.setWindowTitle("ferroDAC")
         self.resize(1040, 680)
+        self._dialogs: dict[str, ConfigDialog] = {}
 
         self._available_box = self._build_column("Available sources")
         self._active_box = self._build_column("Active sources")
@@ -229,15 +435,29 @@ class MainWindow(QMainWindow):
 
     def _rebuild_active(self) -> None:
         self._rebuild(self._active_box, self.manager.active_descriptors(),
-                      active=True, on_action=self.manager.remove)
+                      active=True, on_action=self.manager.remove,
+                      on_configure=self._open_config)
 
-    def _rebuild(self, box: dict, descriptors, active: bool, on_action) -> None:
+    def _rebuild(self, box: dict, descriptors, active: bool, on_action,
+                 on_configure=None) -> None:
         layout = box["layout"]
         _clear(layout)
         for desc in sorted(descriptors, key=lambda d: d.name):
-            layout.addWidget(SourceCard(desc, active, on_action))
+            layout.addWidget(SourceCard(desc, active, on_action, on_configure))
         layout.addStretch(1)
         box["label"].setText(f"{box['title']}  ({len(descriptors)})")
+
+    def _open_config(self, instance_id: str) -> None:
+        dlg = self._dialogs.get(instance_id)
+        if dlg is not None:
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        dlg = ConfigDialog(self.manager, instance_id, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.destroyed.connect(lambda *_: self._dialogs.pop(instance_id, None))
+        self._dialogs[instance_id] = dlg
+        dlg.show()
 
     def closeEvent(self, event):  # noqa: N802 (Qt signature)
         self.manager.stop()

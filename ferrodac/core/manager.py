@@ -144,6 +144,39 @@ class SourceManager(QObject):
         self.active_changed.emit()
         self._run_async(source.disconnect)
 
+    # -- configuration / controls -------------------------------------------
+    def invoke(self, instance_id: str, control_id: str, value=None) -> None:
+        """Invoke a control on an active source (off-thread; may hit hardware)."""
+        source = self._active.get(instance_id)
+        if source is None:
+            return
+        self._run_async(
+            lambda: source.invoke(control_id, value),
+            on_finished=self.active_changed.emit,
+        )
+
+    def set_rate(self, instance_id: str, hz: float) -> None:
+        source = self._active.get(instance_id)
+        if source is None or not hasattr(source, "set_rate_hz"):
+            return
+        source.set_rate_hz(hz)
+        self.active_changed.emit()
+
+    def rename(self, instance_id: str, name: str) -> None:
+        source = self._active.get(instance_id) or self._available.get(instance_id)
+        if source is None or not hasattr(source, "set_name"):
+            return
+        source.set_name(name)
+        self.active_changed.emit()
+        self.available_changed.emit()
+
+    def is_active(self, instance_id: str) -> bool:
+        return instance_id in self._active
+
+    def descriptor(self, instance_id: str) -> SourceDescriptor | None:
+        source = self._active.get(instance_id) or self._available.get(instance_id)
+        return source.describe() if source else None
+
     # -- descriptors for the UI ---------------------------------------------
     def available_descriptors(self) -> list[SourceDescriptor]:
         return [s.describe() for s in self._available.values()]

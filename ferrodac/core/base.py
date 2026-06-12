@@ -1,19 +1,23 @@
 """BaseSource — a convenience base implementing the common Source machinery.
 
 Drivers usually subclass this rather than :class:`Source` directly: it holds the
-descriptor fields + a small status state-machine, so a driver only has to build
-its channels/controls and implement `_connect()` / `_disconnect()`.
+descriptor fields, a small status state-machine, current control values, and the
+configured sample rate. A driver only has to build its channels/controls and
+implement ``_connect`` / ``_disconnect`` (and ``_invoke`` if it has controls).
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional, Sequence
 
 from .source import (
     Channel,
     Control,
+    ControlKind,
     Interface,
     RateControl,
+    RateMode,
     Source,
     SourceDescriptor,
     Status,
@@ -48,6 +52,13 @@ class BaseSource(Source):
         self._status = Status.DISCOVERED
         self._last_error: Optional[str] = None
 
+        # current value of every non-action control (seeded from its declared value)
+        self._control_values = {
+            c.id: c.value for c in self._controls if c.kind != ControlKind.ACTION
+        }
+        # currently configured sample rate
+        self._rate_hz = rate.default_hz if rate else None
+
     # -- identity / description ----------------------------------------------
     @property
     def instance_id(self) -> str:
@@ -66,6 +77,12 @@ class BaseSource(Source):
         return self._status
 
     def describe(self) -> SourceDescriptor:
+        controls = []
+        for c in self._controls:
+            if c.kind == ControlKind.ACTION:
+                controls.append(c)
+            else:
+                controls.append(replace(c, value=self._control_values.get(c.id, c.value)))
         return SourceDescriptor(
             instance_id=self._instance_id,
             driver=self.driver,
@@ -76,8 +93,9 @@ class BaseSource(Source):
             model=self._model,
             firmware=self._firmware,
             channels=list(self._channels),
-            controls=list(self._controls),
+            controls=controls,
             rate=self._rate,
+            rate_hz=self._rate_hz,
             primary_channel=self._primary_channel,
             last_error=self._last_error,
         )
@@ -106,9 +124,58 @@ class BaseSource(Source):
         finally:
             self._status = Status.DISCONNECTED
 
+    # -- control / configuration ---------------------------------------------
+    def invoke(self, control_id: str, value=None) -> None:
+        schema = self._control_schema(control_id)
+        if schema is None:
+            raise KeyError(f"no control {control_id!r} on {self._instance_id}")
+        if schema.kind != ControlKind.ACTION:
+            value = self._coerce(schema, value)
+        self._invoke(schema, value)              # hardware hook
+        if schema.kind != ControlKind.ACTION:
+            self._control_values[control_id] = value
+
+    def set_rate_hz(self, hz: float) -> None:
+        if self._rate is None or self._rate.mode != RateMode.SETTABLE:
+            return
+        lo = self._rate.min_hz if self._rate.min_hz is not None else 1e-3
+        hi = self._rate.max_hz if self._rate.max_hz is not None else float(hz)
+        self._rate_hz = max(lo, min(hi, float(hz)))
+
+    def _control_schema(self, control_id: str) -> Optional[Control]:
+        for c in self._controls:
+            if c.id == control_id:
+                return c
+        return None
+
+    @staticmethod
+    def _coerce(schema: Control, value):
+        """Validate/coerce a value against the control schema."""
+        if schema.kind == ControlKind.TOGGLE:
+            return bool(value)
+        if schema.kind == ControlKind.ENUM:
+            options = schema.params[0].options if schema.params else ()
+            if options and value not in options:
+                raise ValueError(f"{value!r} not in {options}")
+            return value
+        if schema.kind == ControlKind.SETPOINT:
+            v = float(value)
+            p = schema.params[0] if schema.params else None
+            if p is not None:
+                if p.minimum is not None:
+                    v = max(p.minimum, v)
+                if p.maximum is not None:
+                    v = min(p.maximum, v)
+            return v
+        return value
+
     # -- hooks for subclasses -------------------------------------------------
     def _connect(self) -> None:
         """Confirm/open the device; may set self._firmware etc. Override."""
 
     def _disconnect(self) -> None:
         """Release the device. Override."""
+
+    def _invoke(self, control: Control, value) -> None:
+        """Send the control to the hardware. Default no-op (store-only).
+        Real drivers override to talk to the device."""

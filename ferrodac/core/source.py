@@ -88,12 +88,17 @@ class Channel:
 
 @dataclass(frozen=True)
 class Control:
-    """A writable operation. Declared in v1, invoked later (reserved slot)."""
+    """A writable operation (a command or a setting).
+
+    The schema (id/name/kind/params) is declared by the driver; `value` is the
+    *current* value, filled into the snapshot by the source (None for ACTIONs).
+    """
     id: str
     name: str
     kind: ControlKind = ControlKind.ACTION
     params: tuple = ()               # tuple[Param, ...]
     required_permission: str = "command"   # reserved for RBAC
+    value: object = None             # current value snapshot
 
 
 @dataclass(frozen=True)
@@ -129,8 +134,9 @@ class SourceDescriptor:
     model: Optional[str] = None
     firmware: Optional[str] = None
     channels: list = field(default_factory=list)   # list[Channel] (after connect)
-    controls: list = field(default_factory=list)   # list[Control] (declared)
-    rate: Optional[RateControl] = None
+    controls: list = field(default_factory=list)   # list[Control] (declared, w/ values)
+    rate: Optional[RateControl] = None             # rate capability
+    rate_hz: Optional[float] = None                # currently configured rate
     primary_channel: Optional[str] = None          # id of the headline channel
     last_error: Optional[str] = None
 
@@ -197,10 +203,18 @@ class Source(ABC):
     def disconnect(self) -> None:
         """Release the device."""
 
+    # -- control / configuration ---------------------------------------------
+    def invoke(self, control_id: str, value=None) -> None:
+        """Invoke a declared control: trigger an ACTION or set a value.
+
+        Implemented by :class:`~ferrodac.core.base.BaseSource`. Sources that
+        declare no controls never receive this.
+        """
+        raise NotImplementedError(f"{self.driver} exposes no invokable controls")
+
     # -- reserved for the data plane (NOT implemented in v1) -----------------
     # def start(self, on_reading: "Callable[[Reading], None]") -> None: ...
     # def stop(self) -> None: ...
-    # def invoke(self, control_id: str, value=None): ...
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<{type(self).__name__} {self.instance_id!r}>"
