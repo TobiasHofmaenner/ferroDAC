@@ -47,11 +47,13 @@ from .workspace import Dashboard, WorkspaceArea
 #  Source card (right dock) — live value + routing dropdown
 # --------------------------------------------------------------------------- #
 class SourceCard(QFrame):
-    def __init__(self, key, source, device_name, color, panels, routed, on_route,
-                 parent=None):
+    """One source port (device output or virtual input), with a Route dropdown
+    listing datatype-compatible sinks."""
+
+    def __init__(self, port, color, sinks, routed, on_route, parent=None):
         super().__init__(parent)
-        self.key = key
-        self.unit = source.unit or ""
+        self.key = port.key
+        self.unit = port.unit or ""
         self.setObjectName("SourceCard")
         self.setStyleSheet(
             "#SourceCard { background:#171c26; border:1px solid #232a38;"
@@ -66,7 +68,7 @@ class SourceCard(QFrame):
         swatch = QLabel()
         swatch.setFixedSize(10, 10)
         swatch.setStyleSheet(f"background:{color}; border-radius:5px;")
-        name = QLabel(source.name)
+        name = QLabel(port.name)
         name.setStyleSheet("font-weight:700;")
         top.addWidget(swatch)
         top.addWidget(name)
@@ -76,14 +78,14 @@ class SourceCard(QFrame):
         route.setText("Route ▾")
         route.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(route)
-        if panels:
-            for pid, title in panels:
+        if sinks:
+            for skey, title in sinks:
                 act = menu.addAction(title)
                 act.setCheckable(True)
-                act.setChecked(pid in routed)
-                act.toggled.connect(lambda on, pid=pid: on_route(pid, on))
+                act.setChecked(skey in routed)
+                act.toggled.connect(lambda on, skey=skey: on_route(skey, on))
         else:
-            a = menu.addAction("(add a panel first)")
+            a = menu.addAction("(no compatible sinks)")
             a.setEnabled(False)
         route.setMenu(menu)
         top.addWidget(route)
@@ -95,8 +97,10 @@ class SourceCard(QFrame):
         )
         lay.addWidget(self.value_label)
 
-        dtype = getattr(source, "dtype", "float")
-        sub = QLabel(f"{device_name}  ·  {dtype}{' · ' + self.unit if self.unit else ''}")
+        bits = [port.origin, port.dtype]
+        if self.unit:
+            bits.append(self.unit)
+        sub = QLabel("  ·  ".join(bits))
         sub.setStyleSheet("color:#7f8a99; font-size:10px;")
         lay.addWidget(sub)
 
@@ -406,7 +410,6 @@ class SourcesPanel(QWidget):
         self.manager = manager
         self.dashboard = dashboard
         self._cards: dict[str, SourceCard] = {}
-        self._keys: list[str] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -422,7 +425,7 @@ class SourcesPanel(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(6)
         self._placeholder = QLabel(
-            "No active devices yet.\nOpen Devices (toolbar / View menu) to add one."
+            "No sources yet.\nAdd a device (Devices) or an input (Add menu)."
         )
         self._placeholder.setStyleSheet("color:#7f8a99;")
         self._placeholder.setWordWrap(True)
@@ -431,54 +434,138 @@ class SourcesPanel(QWidget):
         scroll.setWidget(host)
         root.addWidget(scroll, 1)
 
-        manager.active_changed.connect(self._on_active_changed)
-        dashboard.panels_changed.connect(self._refresh_routes)
+        dashboard.ports_changed.connect(self._rebuild)
+        self._rebuild()
 
-    def _items(self):
-        out = []
-        for d in self.manager.active_descriptors():
-            for s in d.sources:
-                out.append((f"{d.instance_id}/{s.id}", s, d.name))
-        return out
-
-    def _on_active_changed(self):
-        items = self._items()
-        keys = [k for k, _, _ in items]
-        smap = {k: s for k, s, _ in items}
-        prev, cur = set(self._keys), set(keys)
-        for k in prev - cur:
-            self.dashboard.remove_source(k)
-        for k in cur - prev:
-            self.dashboard.ensure_source(k, smap[k])
-        if keys != self._keys:
-            self._rebuild(items)
-            self._keys = keys
-
-    def _refresh_routes(self):
-        self._rebuild(self._items())
-
-    def _rebuild(self, items):
+    def _rebuild(self):
         clear_layout(self._layout)
         self._cards = {}
-        if not items:
+        ports = self.dashboard.source_ports()
+        if not ports:
             self._layout.addWidget(self._placeholder)
             self._placeholder.setVisible(True)
-        panels = self.dashboard.panels()
-        for key, src, dev in items:
+        for port in ports:
             card = SourceCard(
-                key, src, dev, color_for(key), panels, self.dashboard.routed(key),
-                lambda pid, on, key=key, src=src: self.dashboard.set_route(key, src, pid, on),
+                port, color_for(port.key),
+                self.dashboard.compatible_sinks(port.key),
+                self.dashboard.routed(port.key),
+                lambda skey, on, key=port.key: self.dashboard.set_route(key, skey, on),
             )
-            self._cards[key] = card
+            self._cards[port.key] = card
             self._layout.addWidget(card)
         self._layout.addStretch(1)
-        self._label.setText(f"Sources  ({len(items)})")
+        self._label.setText(f"Sources  ({len(ports)})")
 
     def update_live(self, latest: dict):
         for key, card in self._cards.items():
             r = latest.get(key)
             if r is not None:
                 card.set_value(fmt(r.value, card.unit))
+
+
+# --------------------------------------------------------------------------- #
+#  Sinks panel (right dock) — data consumers (device controls + displays)
+# --------------------------------------------------------------------------- #
+class SinkCard(QFrame):
+    def __init__(self, port, value_text, bound, color, parent=None):
+        super().__init__(parent)
+        self.setObjectName("SinkCardItem")
+        self.setStyleSheet(
+            "#SinkCardItem { background:#171c26; border:1px solid #232a38;"
+            " border-radius:8px; }"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(2)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        swatch = QLabel()
+        swatch.setFixedSize(10, 10)
+        swatch.setStyleSheet(f"background:{color}; border-radius:5px;")
+        name = QLabel(port.name)
+        name.setStyleSheet("font-weight:700;")
+        top.addWidget(swatch)
+        top.addWidget(name)
+        top.addStretch(1)
+        lay.addLayout(top)
+
+        self.value_label = QLabel(value_text)
+        self.value_label.setStyleSheet(
+            f"color:{color}; font-family:monospace; font-size:14px;"
+        )
+        lay.addWidget(self.value_label)
+
+        bits = [port.origin, port.dtype]
+        if port.unit:
+            bits.append(port.unit)
+        sub = QLabel("  ·  ".join(bits) + (f"   ←  {bound}" if bound else ""))
+        sub.setStyleSheet("color:#7f8a99; font-size:10px;")
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
+
+    def set_value(self, text: str) -> None:
+        self.value_label.setText(text)
+
+
+class SinksPanel(QWidget):
+    def __init__(self, manager: DeviceManager, dashboard: Dashboard, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.dashboard = dashboard
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self._label = QLabel("Sinks")
+        self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
+        root.addWidget(self._label)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        host = QWidget()
+        self._layout = QVBoxLayout(host)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(6)
+        self._layout.addStretch(1)
+        scroll.setWidget(host)
+        root.addWidget(scroll, 1)
+
+        self._cards: dict = {}      # sink_key -> (SinkCard, port)
+        dashboard.ports_changed.connect(self._rebuild)
+        self._rebuild()
+
+    def _device_value(self, port):
+        desc = self.manager.descriptor(port.device_id)
+        if desc is None:
+            return "—"
+        for sk in desc.sinks:
+            if sk.id == port.sink_id:
+                return "(action)" if sk.value is None else fmt(sk.value, port.unit)
+        return "—"
+
+    def _rebuild(self):
+        clear_layout(self._layout)
+        self._cards = {}
+        ports = self.dashboard.sink_ports()
+        for port in ports:
+            if port.kind == "device":
+                value_text = self._device_value(port)
+                bound = self.dashboard.source_bound_to(port.key)
+                bound = f"from {bound}" if bound else "unbound"
+            else:
+                srcs = self.dashboard.sources_into(port.key)
+                value_text = f"{len(srcs)} source{'s' if len(srcs) != 1 else ''}"
+                bound = ", ".join(srcs) if srcs else None
+            card = SinkCard(port, value_text, bound, color_for("sink:" + port.key))
+            self._cards[port.key] = (card, port)
+            self._layout.addWidget(card)
+        self._layout.addStretch(1)
+        self._label.setText(f"Sinks  ({len(ports)})")
+
+    def update_live(self):
+        for card, port in self._cards.values():
+            if port.kind == "device":
+                card.set_value(self._device_value(port))
 
 
 # --------------------------------------------------------------------------- #
@@ -505,6 +592,15 @@ class MainWindow(QMainWindow):
         self.sources_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.RightDockWidgetArea, self.sources_dock)
 
+        self.sinks_panel = SinksPanel(manager, self.dashboard)
+        self.sinks_dock = QDockWidget("Sinks", self)
+        self.sinks_dock.setObjectName("SinksDock")
+        self.sinks_dock.setWidget(self.sinks_panel)
+        self.sinks_dock.setMinimumWidth(280)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.sinks_dock)
+        self.tabifyDockWidget(self.sources_dock, self.sinks_dock)
+        self.sources_dock.raise_()
+
         self.devices_panel = DevicesPanel(manager, self._open_config)
         self.devices_dock = QDockWidget("Devices", self)
         self.devices_dock.setObjectName("DevicesDock")
@@ -525,6 +621,7 @@ class MainWindow(QMainWindow):
         view = self.menuBar().addMenu("&View")
         view.addAction(self.devices_dock.toggleViewAction())
         view.addAction(self.sources_dock.toggleViewAction())
+        view.addAction(self.sinks_dock.toggleViewAction())
         view.addSeparator()
         self.edit_action = view.addAction("Edit layout")
         self.edit_action.setCheckable(True)
@@ -543,6 +640,7 @@ class MainWindow(QMainWindow):
 
     def _on_tick(self):
         self.sources_panel.update_live(self.engine.latest())
+        self.sinks_panel.update_live()
 
     def _open_config(self, instance_id: str) -> None:
         dlg = self._dialogs.get(instance_id)

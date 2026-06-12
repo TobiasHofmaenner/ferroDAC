@@ -9,11 +9,10 @@ from __future__ import annotations
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QPalette
 from qtpy.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -26,7 +25,6 @@ from qtpy.QtWidgets import (
 
 import pyqtgraph as pg
 
-from ..core.device import SinkKind
 from ._common import color_for, fmt
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
@@ -51,6 +49,7 @@ class Panel(QWidget):
 
 class ChartPanel(Panel):
     kind = "chart"
+    accepts = frozenset({"float", "bool"})
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -131,6 +130,7 @@ class _Readout(QFrame):
 
 class NumericPanel(Panel):
     kind = "numeric"
+    accepts = frozenset({"float", "bool"})
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -166,64 +166,30 @@ class NumericPanel(Panel):
 
 
 # --------------------------------------------------------------------------- #
-#  Input panels — virtual sources that drive a device Sink
+#  Input panels — virtual SOURCES (emit a value; routed to sinks via the dock)
 # --------------------------------------------------------------------------- #
 class InputPanel(Panel):
     is_input = True
-    sink_kind = None   # which SinkKind this input targets
+    source_dtype = "float"
 
-    def __init__(self, manager, parent=None):
+    emitted = Signal(object)   # value (None = trigger, for actions)
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.manager = manager
-        self.target = None          # (device_id, sink_id)
-        self._options: list = []    # (device_id, sink_id, sink, device_name)
-
         self._lay = QVBoxLayout(self)
         self._lay.setContentsMargins(10, 8, 10, 8)
         self._lay.setSpacing(8)
-        self._combo = QComboBox()
-        self._combo.currentIndexChanged.connect(self._on_target_changed)
-        self._lay.addWidget(self._combo)
         self._build_body()
         self._lay.addStretch(1)
 
     def _build_body(self) -> None: ...
-    def _configure_for_target(self) -> None: ...
-
-    def set_options(self, options: list) -> None:
-        prev = self.target
-        self._options = options
-        self._combo.blockSignals(True)
-        self._combo.clear()
-        self._combo.addItem("— select target —", None)
-        sel = 0
-        for i, (did, sid, sink, dev) in enumerate(options, start=1):
-            self._combo.addItem(f"{dev} · {sink.name}", (did, sid))
-            if prev == (did, sid):
-                sel = i
-        self._combo.setCurrentIndex(sel)
-        self._combo.blockSignals(False)
-        self.target = self._combo.currentData()
-        self._configure_for_target()
-
-    def _on_target_changed(self, _idx):
-        self.target = self._combo.currentData()
-        self._configure_for_target()
-
-    def _sink(self):
-        for did, sid, sink, dev in self._options:
-            if (did, sid) == self.target:
-                return sink
+    def current_value(self):
         return None
-
-    def _apply(self, value):
-        if self.target is not None:
-            self.manager.write(self.target[0], self.target[1], value)
 
 
 class SliderPanel(InputPanel):
     kind = "slider"
-    sink_kind = SinkKind.SETPOINT
+    source_dtype = "float"
 
     def _build_body(self):
         self._min, self._max, self._unit = 0.0, 1.0, ""
@@ -239,62 +205,44 @@ class SliderPanel(InputPanel):
         host = QWidget()
         host.setLayout(row)
         self._lay.addWidget(host)
+        self._val.setText(fmt(self.current_value(), self._unit))
 
-    def _configure_for_target(self):
-        sink = self._sink()
-        self._slider.setEnabled(sink is not None)
-        if sink is not None and sink.params:
-            p = sink.params[0]
-            self._min = p.minimum if p.minimum is not None else 0.0
-            self._max = p.maximum if p.maximum is not None else 1.0
-            self._unit = p.unit
-            cur = sink.value if sink.value is not None else self._min
-            self._slider.blockSignals(True)
-            span = self._max - self._min
-            self._slider.setValue(int((cur - self._min) / span * 1000) if span else 0)
-            self._slider.blockSignals(False)
-            self._val.setText(fmt(cur, self._unit))
-        else:
-            self._val.setText("—")
+    def set_range(self, lo, hi, unit):
+        self._min, self._max, self._unit = lo, hi, unit
+        self._val.setText(fmt(self.current_value(), self._unit))
 
-    def _on_slide(self, v):
-        val = self._min + (v / 1000.0) * (self._max - self._min)
+    def current_value(self):
+        span = self._max - self._min
+        return self._min + (self._slider.value() / 1000.0) * span
+
+    def _on_slide(self, _v):
+        val = self.current_value()
         self._val.setText(fmt(val, self._unit))
-        self._apply(val)
+        self.emitted.emit(val)
 
 
 class ButtonPanel(InputPanel):
     kind = "button"
-    sink_kind = SinkKind.ACTION
+    source_dtype = "action"
 
     def _build_body(self):
         self._btn = QPushButton("Trigger")
         self._btn.setMinimumHeight(40)
-        self._btn.clicked.connect(lambda: self._apply(None))
+        self._btn.clicked.connect(lambda: self.emitted.emit(None))
         self._lay.addWidget(self._btn)
-
-    def _configure_for_target(self):
-        sink = self._sink()
-        self._btn.setEnabled(sink is not None)
-        self._btn.setText(f"Trigger {sink.name}" if sink else "Trigger")
 
 
 class TogglePanel(InputPanel):
     kind = "toggle"
-    sink_kind = SinkKind.TOGGLE
+    source_dtype = "bool"
 
     def _build_body(self):
         self._chk = QCheckBox("On")
-        self._chk.toggled.connect(self._apply)
+        self._chk.toggled.connect(lambda on: self.emitted.emit(on))
         self._lay.addWidget(self._chk)
 
-    def _configure_for_target(self):
-        sink = self._sink()
-        self._chk.setEnabled(sink is not None)
-        if sink is not None:
-            self._chk.blockSignals(True)
-            self._chk.setChecked(bool(sink.value))
-            self._chk.blockSignals(False)
+    def current_value(self):
+        return self._chk.isChecked()
 
 
 PANEL_TYPES = {

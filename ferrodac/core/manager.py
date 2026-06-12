@@ -143,13 +143,15 @@ class DeviceManager(QObject):
         self._run_async(_stop_and_disconnect)
 
     # -- sinks (control) -----------------------------------------------------
-    def write(self, instance_id: str, sink_id: str, value=None) -> None:
+    def write(self, instance_id: str, sink_id: str, value=None, silent: bool = False) -> None:
+        """Write to a device sink (off-thread). `silent` skips the active_changed
+        refresh — used for high-rate routed writes (the UI polls values on tick)."""
         device = self._active.get(instance_id)
         if device is None:
             return
         self._run_async(
             lambda: device.write(sink_id, value),
-            on_finished=self.active_changed.emit,
+            on_finished=None if silent else self.active_changed.emit,
         )
 
     def set_rate(self, instance_id: str, hz: float) -> None:

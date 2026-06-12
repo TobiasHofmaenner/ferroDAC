@@ -1,25 +1,77 @@
-"""The dashboard workspace: a dockable area of panels + a routing controller.
+"""The dashboard workspace + the routing graph (a patch bay).
 
-WorkspaceArea is a nested QMainWindow (the central area of the shell) whose dock
-widgets are the user's panels — so they move/resize/tile natively. An Edit toggle
-locks them and hides their title bars for a clean, interactive view.
+WorkspaceArea is a nested QMainWindow whose dock widgets are the user's panels.
 
-Dashboard owns the panels and the channel→panel routing, and wires panels to the
-engine.
+Dashboard is the **router**. Everything is a port:
+  - **Sources** (produce data): device data-outputs + virtual inputs (sliders…).
+  - **Sinks** (consume data): device control-inputs + virtual displays (charts…).
+A Source may be routed to any **datatype-compatible** Sink. Device control sinks
+are single-bind; display sinks accept many. Device-source → device-sink is raw
+passthrough (transforms come with the scripting layer).
+
+Data flow is uniform: every source emits Readings into the engine; display sinks
+subscribe and render their routed sources; the router (an engine sink) writes
+routed source values to device sinks.
 """
 
 from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
 from qtpy.QtCore import QObject, Qt, Signal
 from qtpy.QtWidgets import QDockWidget, QMainWindow, QWidget
 
+from ..core.device import SinkKind
+from ..core.reading import Reading
 from .panels import PANEL_TYPES, Panel
 
+_SINK_DTYPE = {
+    SinkKind.SETPOINT: "float",
+    SinkKind.TOGGLE: "bool",
+    SinkKind.ENUM: "enum",
+    SinkKind.ACTION: "action",
+}
 
+
+# --------------------------------------------------------------------------- #
+#  Ports
+# --------------------------------------------------------------------------- #
+@dataclass
+class SourcePort:
+    key: str
+    name: str
+    dtype: str
+    unit: str
+    origin: str          # device name, or "input"
+    kind: str            # "device" | "virtual"
+    panel: object = None
+
+
+@dataclass
+class SinkPort:
+    key: str
+    name: str
+    dtype: str           # float / bool / enum / action / numeric
+    unit: str
+    origin: str          # device name, or "display"
+    kind: str            # "device" | "display"
+    accepts: frozenset = field(default_factory=frozenset)
+    single_bind: bool = False
+    device_id: str = ""
+    sink_id: str = ""
+    panel: object = None
+    smin: float = 0.0
+    smax: float = 1.0
+
+
+# --------------------------------------------------------------------------- #
+#  Workspace area (dockable panels)
+# --------------------------------------------------------------------------- #
 class PanelDock(QDockWidget):
-    closed = Signal(object)   # emits the panel when the user closes the dock
+    closed = Signal(object)
 
     def __init__(self, title: str, panel: Panel, parent=None):
         super().__init__(title, parent)
@@ -63,111 +115,213 @@ class WorkspaceArea(QMainWindow):
                 | QDockWidget.DockWidgetFloatable
                 | QDockWidget.DockWidgetClosable
             )
-            dock.setTitleBarWidget(None)            # restore default (draggable) title bar
+            dock.setTitleBarWidget(None)
         else:
             dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
             bar = QWidget()
             bar.setFixedHeight(0)
-            dock.setTitleBarWidget(bar)             # hide the title bar
+            dock.setTitleBarWidget(bar)
 
 
+# --------------------------------------------------------------------------- #
+#  Dashboard / router
+# --------------------------------------------------------------------------- #
 class Dashboard(QObject):
-    """Owns panels + channel→panel routing; wires panels to the engine."""
-
-    panels_changed = Signal()
+    ports_changed = Signal()     # ports or routes changed (docks refresh)
 
     def __init__(self, area: WorkspaceArea, engine, manager, parent=None):
         super().__init__(parent)
         self.area = area
         self.engine = engine
         self.manager = manager
-        self._panels: dict = {}            # panel_id -> Panel
-        self._input_panels: set = set()    # input panels (refresh control options)
-        self._routes: dict = {}            # channel key -> set(panel_id)
+        self._panels: dict = {}                 # panel_id -> Panel
+        self._sources: dict[str, SourcePort] = {}
+        self._sinks: dict[str, SinkPort] = {}
+        self._routes: dict[str, set] = {}        # source_key -> set(sink_key)
         self._counter = 0
-        self.default_id = None
-        manager.active_changed.connect(self._refresh_inputs)
+        self.default_sink_id = None              # default chart panel id
+
+        engine.subscribe(self._on_batch)
+        manager.active_changed.connect(self._rebuild_device_ports)
+        self._rebuild_device_ports()
 
     # -- panels --------------------------------------------------------------
     def add_panel(self, kind: str) -> str:
         self._counter += 1
         label, cls = PANEL_TYPES[kind]
-        if getattr(cls, "is_input", False):
-            panel = cls(self.manager)
-            self._input_panels.add(panel)
-            panel.set_options(self._sink_options(panel.sink_kind))
-        else:
-            panel = cls()
-            panel._unsub = self.engine.subscribe(panel.feed)
         pid = f"{kind}-{self._counter}"
+        panel = cls()
         panel.panel_id = pid
         panel.title = f"{label} {self._counter}"
         self._panels[pid] = panel
+
+        if getattr(cls, "is_input", False):
+            key = f"ui/{pid}"
+            self._sources[key] = SourcePort(
+                key, panel.title, cls.source_dtype, "", "input", "virtual", panel
+            )
+            panel.emitted.connect(lambda val, key=key: self._on_virtual_emit(key, val))
+        else:
+            panel._unsub = self.engine.subscribe(panel.feed)
+            self._sinks[pid] = SinkPort(
+                pid, panel.title, "numeric", "", "display", "display",
+                accepts=getattr(cls, "accepts", frozenset({"float", "bool"})),
+                single_bind=False, panel=panel,
+            )
+            if self.default_sink_id is None and kind == "chart":
+                self.default_sink_id = pid
+
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
-        if self.default_id is None and kind == "chart":
-            self.default_id = pid
-        self.panels_changed.emit()
+        self.ports_changed.emit()
         return pid
 
     def remove_panel(self, pid: str) -> None:
         panel = self._panels.pop(pid, None)
         if panel is None:
             return
-        self._input_panels.discard(panel)
-        if panel._unsub:
-            panel._unsub()
+        if getattr(panel, "is_input", False):
+            key = f"ui/{pid}"
+            self._sources.pop(key, None)
+            self._routes.pop(key, None)
+        else:
+            self._sinks.pop(pid, None)
+            if panel._unsub:
+                panel._unsub()
+            for targets in self._routes.values():
+                targets.discard(pid)
+            if self.default_sink_id == pid:
+                charts = [k for k, sp in self._sinks.items() if sp.kind == "display"]
+                self.default_sink_id = charts[0] if charts else None
         self.area.remove_panel(panel)
-        for targets in self._routes.values():
-            targets.discard(pid)
-        if self.default_id == pid:
-            charts = [p for p, pn in self._panels.items() if pn.kind == "chart"]
-            self.default_id = charts[0] if charts else None
-        self.panels_changed.emit()
+        self.ports_changed.emit()
 
-    def _sink_options(self, kind):
-        out = []
+    # -- device ports --------------------------------------------------------
+    def _rebuild_device_ports(self):
+        new_src, new_snk = {}, {}
         for d in self.manager.active_descriptors():
-            for s in d.sinks:
-                if s.kind == kind:
-                    out.append((d.instance_id, s.id, s, d.name))
+            for s in d.sources:
+                key = f"{d.instance_id}/{s.id}"
+                new_src[key] = SourcePort(key, s.name, getattr(s, "dtype", "float"),
+                                          s.unit, d.name, "device")
+            for sk in d.sinks:
+                key = f"{d.instance_id}#{sk.id}"
+                dt = _SINK_DTYPE.get(sk.kind, "float")
+                p = sk.params[0] if sk.params else None
+                new_snk[key] = SinkPort(
+                    key, sk.name, dt, p.unit if p else "", d.name, "device",
+                    accepts=frozenset({dt}), single_bind=True,
+                    device_id=d.instance_id, sink_id=sk.id,
+                    smin=(p.minimum if p and p.minimum is not None else 0.0),
+                    smax=(p.maximum if p and p.maximum is not None else 1.0),
+                )
+
+        for key in [k for k, p in self._sources.items() if p.kind == "device" and k not in new_src]:
+            del self._sources[key]
+            self._routes.pop(key, None)
+        for key, port in new_src.items():
+            self._sources.setdefault(key, port)
+
+        for key in [k for k, p in self._sinks.items() if p.kind == "device" and k not in new_snk]:
+            del self._sinks[key]
+            for targets in self._routes.values():
+                targets.discard(key)
+        for key, port in new_snk.items():
+            self._sinks.setdefault(key, port)
+
+        # default-route new device sources to the default chart
+        for key, port in new_src.items():
+            if key not in self._routes:
+                self._routes[key] = set()
+                if self.default_sink_id:
+                    self.set_route(key, self.default_sink_id, True)
+        self.ports_changed.emit()
+
+    # -- queries for the docks ----------------------------------------------
+    def source_ports(self) -> list:
+        return sorted(self._sources.values(), key=lambda p: (p.kind != "device", p.name))
+
+    def sink_ports(self) -> list:
+        return sorted(self._sinks.values(), key=lambda p: (p.kind != "device", p.name))
+
+    def compatible_sinks(self, source_key: str) -> list:
+        src = self._sources.get(source_key)
+        if src is None:
+            return []
+        return [(sp.key, sp.name) for sp in self.sink_ports() if src.dtype in sp.accepts]
+
+    def routed(self, source_key: str) -> set:
+        return set(self._routes.get(source_key, set()))
+
+    def sources_into(self, sink_key: str) -> list:
+        """Names of the sources routed into a sink — used by the Sinks dock."""
+        out = []
+        for skey, targets in self._routes.items():
+            if sink_key in targets:
+                sp = self._sources.get(skey)
+                out.append(sp.name if sp else skey)
         return out
 
-    def _refresh_inputs(self):
-        for panel in self._input_panels:
-            panel.set_options(self._sink_options(panel.sink_kind))
-
-    def panels(self) -> list:
-        return [(pid, p.title) for pid, p in self._panels.items()]
+    def source_bound_to(self, sink_key: str):
+        """Single bound source name (control sinks are single-bind), or None."""
+        names = self.sources_into(sink_key)
+        return names[0] if names else None
 
     # -- routing -------------------------------------------------------------
-    def routed(self, key: str) -> set:
-        return set(self._routes.get(key, set()))
-
-    def set_route(self, key: str, source, pid: str, on: bool) -> None:
-        targets = self._routes.setdefault(key, set())
-        panel = self._panels.get(pid)
-        if panel is None:
+    def set_route(self, source_key: str, sink_key: str, on: bool) -> None:
+        targets = self._routes.setdefault(source_key, set())
+        sink = self._sinks.get(sink_key)
+        src = self._sources.get(source_key)
+        if sink is None or src is None:
             return
         if on:
-            targets.add(pid)
-            panel.add_source(key, source)
+            if sink.single_bind:        # one source owns a control sink
+                for skey, tg in self._routes.items():
+                    if skey != source_key:
+                        tg.discard(sink_key)
+            targets.add(sink_key)
+            if sink.kind == "display":
+                sink.panel.add_source(source_key, src)
+            elif sink.kind == "device":
+                if src.kind == "virtual" and hasattr(src.panel, "set_range") \
+                        and sink.dtype == "float":
+                    src.panel.set_range(sink.smin, sink.smax, sink.unit)
+                # sync the device sink to the source's current value now
+                if src.kind == "virtual" and src.dtype in ("float", "bool"):
+                    self._write_to_device(sink, src.panel.current_value())
         else:
-            targets.discard(pid)
-            panel.remove_source(key)
+            targets.discard(sink_key)
+            if sink.kind == "display":
+                sink.panel.remove_source(source_key)
+        self.ports_changed.emit()
 
-    def ensure_source(self, key: str, source) -> None:
-        """First time a source appears, default-route it to the default chart."""
-        if key not in self._routes:
-            self._routes[key] = set()
-            if self.default_id:
-                self.set_route(key, source, self.default_id, True)
+    # -- data flow -----------------------------------------------------------
+    def _on_batch(self, batch):
+        """Engine sink: write routed source values to *device* sinks."""
+        for r in batch:
+            for sink_key in self._routes.get(r.key, ()):
+                sp = self._sinks.get(sink_key)
+                if sp is not None and sp.kind == "device":
+                    self._write_to_device(sp, r.value)
 
-    def remove_source(self, key: str) -> None:
-        for pid in self._routes.pop(key, set()):
-            panel = self._panels.get(pid)
-            if panel is not None:
-                panel.remove_source(key)
+    def _on_virtual_emit(self, source_key: str, value):
+        src = self._sources.get(source_key)
+        if src is None:
+            return
+        if src.dtype == "action":         # button: trigger routed device action sinks
+            for sink_key in self._routes.get(source_key, ()):
+                sp = self._sinks.get(sink_key)
+                if sp is not None and sp.kind == "device":
+                    self.manager.write(sp.device_id, sp.sink_id, None, silent=True)
+            return
+        # slider/toggle: publish as a reading so displays show it; _on_batch then
+        # writes it to any routed device sinks.
+        self.engine.publish(
+            Reading("ui", source_key.split("/", 1)[1], time.time(), float(value))
+        )
+
+    def _write_to_device(self, sink: SinkPort, value) -> None:
+        self.manager.write(sink.device_id, sink.sink_id, value, silent=True)
 
     # -- edit mode -----------------------------------------------------------
     def set_edit_mode(self, on: bool) -> None:

@@ -51,7 +51,11 @@ class Engine(QObject):
             pass
 
     def _ingest(self, reading: Reading) -> None:
-        """Called from a source's acquisition thread — must stay cheap & safe."""
+        """Called from a device's acquisition thread — must stay cheap & safe."""
+        self._inbox.append(reading)
+
+    def publish(self, reading: Reading) -> None:
+        """Inject a reading from a non-device source (e.g. a virtual UI source)."""
         self._inbox.append(reading)
 
     # -- sinks ---------------------------------------------------------------
