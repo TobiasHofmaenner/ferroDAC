@@ -1,0 +1,96 @@
+# ferroDAC — Roadmap & open decisions
+
+[DESIGN.md](DESIGN.md) is the **north star** (the full ideal). This document is
+the **scale-back**: the order we'd actually build it (smallest-useful-first), and
+the decisions still open. This file is expected to churn; DESIGN.md is stable.
+
+> Method (agreed): *design the best version, then scale back to a manageable
+> scope.* So every phase below only **implements** a slice — the **slots** for
+> the rest already exist in the design.
+
+---
+
+## Phasing (smallest-useful-first)
+
+### Phase 0 — Unified local core (MVP)
+
+The goal: replace **both** existing tools with one extensible app, at the bench,
+no server, no auth, no remote.
+
+- Core model: `Channel`, `Reading` (scalar only), catalog, the **ingest
+  contract** (running against a local embedded hub).
+- **Orchestrator** (basic spawn + supervise) + **driver SDK**.
+- Two first drivers proving both tiers:
+  - **Modbus temp** → pure **YAML** driver.
+  - **TPG-256A** → **code** driver (and a stress-test of the YAML schema).
+- **Qt app**: Explore + a single chart Workspace, reusing the TPG-256A ChartPanel
+  (sci axis, secondary axis, notes, title, dark theme).
+- **Record → folder**: one aggregated telemetry CSV + `meta.yaml`
+  (auto-provenance) + `log.md` with annotations→notes. Append-only.
+- Local-only (embedded hub); no waveform, video, auth, or remote.
+
+*Exit criterion:* a bench user runs both instruments, builds a chart, hits
+Record, and gets a portable project folder — using one app.
+
+### Phase 1 — Persistence & docs polish
+
+- Bounded-retention **live store**; **pre-roll** Record.
+- **Workspace** save/load + file share; viewer-neutral JSON.
+- Markdown docs + templates + passive **nudges**.
+- **Python SDK** (`load_run`, `subscribe`) + **scaffolded notebook** per run.
+
+### Phase 2 — Remote (read-mostly)
+
+- Networked hub; subscribe over the network; **Qt remote mode** (a
+  `RemoteSubscription` feed).
+- **AuthN/AuthZ** v1: 3 roles + per-workspace sharing (Keycloak + OpenFGA/Keto).
+- **Grafana** on the telemetry TSDB for zero-build read-only glances.
+- Custom-source path documented (third parties implement the ingest contract).
+
+### Phase 3 — Media
+
+- Snapshots + recorded clips into `media/`; phone capture via web upload.
+- Then **live video** (WebRTC via MediaMTX/LiveKit) as a video panel.
+
+### Phase 4 — Waveform plane (only if the requirement is real)
+
+- Block transport on the contract; **HDF5** records; **scope** renderer
+  (decimated live). Triggered capture + pre-trigger.
+
+### Phase 5 — Control
+
+- Implement the reserved command path end-to-end: driver `commands()` →
+  command bus → authz (`command` action / Operator role) → UI controls.
+- Declarative **command grammar** for YAML drivers.
+
+### Phase 6 — Scale & hardening
+
+- Multi-station aggregation; deeper Nextcloud (WebDAV, sharing/versioning);
+  packaging/installers; community driver library.
+
+---
+
+## Open decisions (with current leaning)
+
+| # | Decision | Leaning | Notes |
+|---|---|---|---|
+| 1 | **Remote viewer tech** (Qt-primary vs web vs both) | Qt-primary + Grafana for read-only glances | Hard-tilts to Qt if the waveform plane is in scope. Deferrable — most swappable layer. |
+| 2 | **Fast/waveform plane in scope?** | TBD — *needs the requirement* | How many fast channels, what rate, continuous-display vs triggered-capture, and which digitizer/SDK? Decides Phase 4's size (or removal). |
+| 3 | **Multi-rate → one CSV aggregation rule** | forward-fill at a configurable record cadence | vs interpolate vs row-per-sample-with-blanks. |
+| 4 | **What one Record captures** | the active dashboard's channels (with explicit add/remove) | one synchronized file per run. |
+| 5 | **Live-store tech** | VictoriaMetrics or TimescaleDB (telemetry); HDF5 (waveform) | Swappable by definition (not the record). |
+| 6 | **Identity provider** | Keycloak/OIDC, with local-accounts fallback | Doesn't block Phase 0–1. |
+| 7 | **Nextcloud access** | folder-first (desktop sync) now; WebDAV later | WebDAV unlocks headless agents + sharing. |
+| 8 | **YAML command grammar timing** | telemetry-only YAML now; add command grammar in Phase 5 | Code drivers can do commands earlier. |
+| 9 | **Pre-roll default** | configurable per project; small fixed default (e.g. 60 s) | Determines hot-history retention. |
+| 10 | **Repo / GitHub** | local for now (`/home/kali/ferroDAC`) | Offer: push as a private repo (as with the other two projects). |
+| 11 | **License** | TBD | Business decision (Ferrovac). |
+| 12 | **Name** | `ferroDAC` (working) | "Data Acquisition & Control". |
+
+---
+
+## Explicitly deferred (designed, not built yet)
+
+Control · multi-station · waveform/video planes · web viewer · auth · WebDAV ·
+community driver library. All have **slots** in [DESIGN.md](DESIGN.md); none is
+implemented before its phase.
