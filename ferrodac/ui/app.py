@@ -1,12 +1,9 @@
 """ferroDAC UI — an IDE-style dockable shell.
 
-Layout:
-  - central : a dockable **workspace** of panels (charts / 7-seg displays …).
-    Panels move/resize/tile natively; an "Edit layout" toggle locks them and
-    hides their title bars for clean interaction.
-  - left dock "Sources" : device management (hidden by default; toolbar button).
-  - right dock "Channels" : one card per channel of every active device, each
-    with a "Route ▾" dropdown selecting which panel(s) it feeds.
+  - central : a dockable **workspace** of panels (charts / 7-seg / inputs).
+  - left dock "Devices" : device management (hidden by default; toolbar button).
+  - right dock "Sources" : one card per data-output Source of every active
+    device, each with a "Route ▾" dropdown selecting which panel(s) it feeds.
 """
 
 from __future__ import annotations
@@ -38,26 +35,26 @@ from qtpy.QtWidgets import (
 )
 
 from ..core.engine import Engine
-from ..core.manager import SourceManager
+from ..core.manager import DeviceManager
 from ..core.registry import load_builtin_drivers
-from ..core.source import ControlKind, RateMode, SourceDescriptor
+from ..core.device import DeviceDescriptor, RateMode, SinkKind
 from ._common import STATUS_COLORS, clear_layout, color_for, fmt
 from .panels import PANEL_TYPES
 from .workspace import Dashboard, WorkspaceArea
 
 
 # --------------------------------------------------------------------------- #
-#  Channel card (right dock) — live value + routing dropdown
+#  Source card (right dock) — live value + routing dropdown
 # --------------------------------------------------------------------------- #
-class ChannelCard(QFrame):
-    def __init__(self, key, channel, device_name, color, panels, routed, on_route,
+class SourceCard(QFrame):
+    def __init__(self, key, source, device_name, color, panels, routed, on_route,
                  parent=None):
         super().__init__(parent)
         self.key = key
-        self.unit = channel.unit or ""
-        self.setObjectName("ChannelCard")
+        self.unit = source.unit or ""
+        self.setObjectName("SourceCard")
         self.setStyleSheet(
-            "#ChannelCard { background:#171c26; border:1px solid #232a38;"
+            "#SourceCard { background:#171c26; border:1px solid #232a38;"
             " border-radius:8px; }"
         )
         lay = QVBoxLayout(self)
@@ -69,7 +66,7 @@ class ChannelCard(QFrame):
         swatch = QLabel()
         swatch.setFixedSize(10, 10)
         swatch.setStyleSheet(f"background:{color}; border-radius:5px;")
-        name = QLabel(channel.name)
+        name = QLabel(source.name)
         name.setStyleSheet("font-weight:700;")
         top.addWidget(swatch)
         top.addWidget(name)
@@ -98,7 +95,8 @@ class ChannelCard(QFrame):
         )
         lay.addWidget(self.value_label)
 
-        sub = QLabel(f"{device_name}  ·  {self.unit}".rstrip(" ·"))
+        dtype = getattr(source, "dtype", "float")
+        sub = QLabel(f"{device_name}  ·  {dtype}{' · ' + self.unit if self.unit else ''}")
         sub.setStyleSheet("color:#7f8a99; font-size:10px;")
         lay.addWidget(sub)
 
@@ -110,7 +108,7 @@ class ChannelCard(QFrame):
 #  Device card (left dock)
 # --------------------------------------------------------------------------- #
 class DeviceCard(QFrame):
-    def __init__(self, desc: SourceDescriptor, active: bool, on_action,
+    def __init__(self, desc: DeviceDescriptor, active: bool, on_action,
                  on_configure=None, parent=None):
         super().__init__(parent)
         self.setObjectName("DeviceCard")
@@ -134,7 +132,7 @@ class DeviceCard(QFrame):
         header.addWidget(title)
         header.addWidget(sub)
         header.addStretch(1)
-        if active and on_configure is not None and desc.controls:
+        if active and on_configure is not None and desc.sinks:
             cfg = QPushButton("Configure…")
             cfg.clicked.connect(lambda: on_configure(desc.instance_id))
             header.addWidget(cfg)
@@ -151,9 +149,9 @@ class DeviceCard(QFrame):
             bits.append(desc.hardware_id)
         if desc.last_error:
             bits.append(f"⚠ {desc.last_error}")
-        n = len(desc.channels)
+        n = len(desc.sources)
         if n:
-            bits.append(f"{n} channel{'s' if n != 1 else ''}")
+            bits.append(f"{n} source{'s' if n != 1 else ''}")
         info = QLabel("   ·   ".join(bits))
         info.setStyleSheet("color:#8b95a4; font-size:11px;")
         lay.addWidget(info)
@@ -163,21 +161,21 @@ class DeviceCard(QFrame):
 #  Configuration dialog (generated from the descriptor)
 # --------------------------------------------------------------------------- #
 class ConfigDialog(QDialog):
-    def __init__(self, manager: SourceManager, instance_id: str, parent=None):
+    def __init__(self, manager: DeviceManager, instance_id: str, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.instance_id = instance_id
-        self.setWindowTitle("Configure source")
+        self.setWindowTitle("Configure device")
         self.setMinimumWidth(440)
         self._setpoint_labels: dict[str, tuple] = {}
-        self._control_widgets: dict[str, QWidget] = {}
+        self._sink_widgets: dict[str, QWidget] = {}
         self._info = QLabel()
         self._info.setStyleSheet("color:#8b95a4; font-size:11px;")
         self._info.setWordWrap(True)
         self._build(manager.descriptor(instance_id))
         manager.active_changed.connect(self._refresh)
 
-    def _build(self, desc: SourceDescriptor) -> None:
+    def _build(self, desc: DeviceDescriptor) -> None:
         root = QVBoxLayout(self)
         root.setSpacing(10)
         title = QLabel(desc.name if desc else self.instance_id)
@@ -214,25 +212,25 @@ class ConfigDialog(QDialog):
             srow.addStretch(1)
             root.addLayout(srow)
 
-        if desc and desc.controls:
-            hdr = QLabel("Controls")
+        if desc and desc.sinks:
+            hdr = QLabel("Sinks")
             hdr.setStyleSheet("font-weight:700; margin-top:2px;")
             root.addWidget(hdr)
             card = QFrame()
-            card.setObjectName("CtrlCard")
+            card.setObjectName("SinkCard")
             card.setStyleSheet(
-                "#CtrlCard { background:#171c26; border:1px solid #232a38;"
+                "#SinkCard { background:#171c26; border:1px solid #232a38;"
                 " border-radius:8px; }"
             )
             grid = QGridLayout(card)
             grid.setContentsMargins(10, 8, 10, 8)
             grid.setHorizontalSpacing(10)
             grid.setVerticalSpacing(8)
-            for r, c in enumerate(desc.controls):
-                lbl = QLabel(c.name)
+            for r, s in enumerate(desc.sinks):
+                lbl = QLabel(s.name)
                 lbl.setStyleSheet("font-weight:600;")
                 grid.addWidget(lbl, r, 0)
-                grid.addWidget(self._control_widget(c), r, 1)
+                grid.addWidget(self._sink_widget(s), r, 1)
             root.addWidget(card)
 
         btnrow = QHBoxLayout()
@@ -243,44 +241,44 @@ class ConfigDialog(QDialog):
         root.addLayout(btnrow)
         self._update_info(desc)
 
-    def _control_widget(self, c) -> QWidget:
+    def _sink_widget(self, s) -> QWidget:
         iid = self.instance_id
-        if c.kind == ControlKind.ACTION:
-            b = QPushButton(f"Trigger {c.name}")
-            b.clicked.connect(lambda _=False, cid=c.id: self.manager.invoke(iid, cid))
+        if s.kind == SinkKind.ACTION:
+            b = QPushButton(f"Trigger {s.name}")
+            b.clicked.connect(lambda _=False, sid=s.id: self.manager.write(iid, sid))
             return b
-        if c.kind == ControlKind.TOGGLE:
+        if s.kind == SinkKind.TOGGLE:
             chk = QCheckBox("on")
-            chk.setChecked(bool(c.value))
-            chk.toggled.connect(lambda on, cid=c.id: self.manager.invoke(iid, cid, on))
-            self._control_widgets[c.id] = chk
+            chk.setChecked(bool(s.value))
+            chk.toggled.connect(lambda on, sid=s.id: self.manager.write(iid, sid, on))
+            self._sink_widgets[s.id] = chk
             return chk
-        if c.kind == ControlKind.ENUM:
+        if s.kind == SinkKind.ENUM:
             combo = QComboBox()
-            opts = list(c.params[0].options) if c.params else []
+            opts = list(s.params[0].options) if s.params else []
             combo.addItems(opts)
-            if c.value in opts:
-                combo.setCurrentText(c.value)
+            if s.value in opts:
+                combo.setCurrentText(s.value)
             combo.currentTextChanged.connect(
-                lambda txt, cid=c.id: self.manager.invoke(iid, cid, txt)
+                lambda txt, sid=s.id: self.manager.write(iid, sid, txt)
             )
-            self._control_widgets[c.id] = combo
+            self._sink_widgets[s.id] = combo
             return combo
-        unit = c.params[0].unit if c.params else ""
-        edit = QLineEdit("" if c.value is None else f"{c.value:g}")
+        unit = s.params[0].unit if s.params else ""
+        edit = QLineEdit("" if s.value is None else f"{s.value:g}")
         edit.setFixedWidth(110)
         apply = QPushButton("Apply")
         cur = QLabel()
         cur.setStyleSheet("color:#8b95a4; font-size:11px;")
-        self._setpoint_labels[c.id] = (cur, unit)
-        self._set_current_label(cur, c.value, unit)
+        self._setpoint_labels[s.id] = (cur, unit)
+        self._set_current_label(cur, s.value, unit)
 
-        def _apply(_=False, cid=c.id, e=edit):
+        def _apply(_=False, sid=s.id, e=edit):
             try:
                 val = float(e.text())
             except ValueError:
                 return
-            self.manager.invoke(iid, cid, val)
+            self.manager.write(iid, sid, val)
 
         apply.clicked.connect(_apply)
         edit.returnPressed.connect(_apply)
@@ -299,7 +297,7 @@ class ConfigDialog(QDialog):
         v = "—" if value is None else f"{value:g}"
         label.setText(f"current: {v} {unit}".rstrip())
 
-    def _update_info(self, desc: SourceDescriptor) -> None:
+    def _update_info(self, desc: DeviceDescriptor) -> None:
         if desc is None:
             return
         bits = [f"driver {desc.driver}", f"iface {desc.interface.kind}"]
@@ -320,18 +318,18 @@ class ConfigDialog(QDialog):
         if desc is None:
             return
         self._update_info(desc)
-        for c in desc.controls:
-            w = self._control_widgets.get(c.id)
-            if c.kind == ControlKind.SETPOINT and c.id in self._setpoint_labels:
-                lbl, unit = self._setpoint_labels[c.id]
-                self._set_current_label(lbl, c.value, unit)
-            elif c.kind == ControlKind.TOGGLE and w is not None:
+        for s in desc.sinks:
+            w = self._sink_widgets.get(s.id)
+            if s.kind == SinkKind.SETPOINT and s.id in self._setpoint_labels:
+                lbl, unit = self._setpoint_labels[s.id]
+                self._set_current_label(lbl, s.value, unit)
+            elif s.kind == SinkKind.TOGGLE and w is not None:
                 w.blockSignals(True)
-                w.setChecked(bool(c.value))
+                w.setChecked(bool(s.value))
                 w.blockSignals(False)
-            elif c.kind == ControlKind.ENUM and w is not None and c.value:
+            elif s.kind == SinkKind.ENUM and w is not None and s.value:
                 w.blockSignals(True)
-                w.setCurrentText(c.value)
+                w.setCurrentText(s.value)
                 w.blockSignals(False)
 
     def closeEvent(self, event):  # noqa: N802
@@ -343,10 +341,10 @@ class ConfigDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- #
-#  Sources panel (left dock)
+#  Devices panel (left dock)
 # --------------------------------------------------------------------------- #
-class SourcesPanel(QWidget):
-    def __init__(self, manager: SourceManager, on_configure, parent=None):
+class DevicesPanel(QWidget):
+    def __init__(self, manager: DeviceManager, on_configure, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.on_configure = on_configure
@@ -400,20 +398,20 @@ class SourcesPanel(QWidget):
 
 
 # --------------------------------------------------------------------------- #
-#  Channels panel (right dock)
+#  Sources panel (right dock) — data outputs
 # --------------------------------------------------------------------------- #
-class ChannelsPanel(QWidget):
-    def __init__(self, manager: SourceManager, dashboard: Dashboard, parent=None):
+class SourcesPanel(QWidget):
+    def __init__(self, manager: DeviceManager, dashboard: Dashboard, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.dashboard = dashboard
-        self._cards: dict[str, ChannelCard] = {}
+        self._cards: dict[str, SourceCard] = {}
         self._keys: list[str] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
-        self._label = QLabel("Channels")
+        self._label = QLabel("Sources")
         self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
         root.addWidget(self._label)
         scroll = QScrollArea()
@@ -424,7 +422,7 @@ class ChannelsPanel(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(6)
         self._placeholder = QLabel(
-            "No active sources yet.\nOpen Sources (toolbar / View menu) to add a device."
+            "No active devices yet.\nOpen Devices (toolbar / View menu) to add one."
         )
         self._placeholder.setStyleSheet("color:#7f8a99;")
         self._placeholder.setWordWrap(True)
@@ -439,19 +437,19 @@ class ChannelsPanel(QWidget):
     def _items(self):
         out = []
         for d in self.manager.active_descriptors():
-            for ch in d.channels:
-                out.append((f"{d.instance_id}/{ch.id}", ch, d.name))
+            for s in d.sources:
+                out.append((f"{d.instance_id}/{s.id}", s, d.name))
         return out
 
     def _on_active_changed(self):
         items = self._items()
         keys = [k for k, _, _ in items]
-        chmap = {k: ch for k, ch, _ in items}
+        smap = {k: s for k, s, _ in items}
         prev, cur = set(self._keys), set(keys)
         for k in prev - cur:
-            self.dashboard.remove_channel(k)
+            self.dashboard.remove_source(k)
         for k in cur - prev:
-            self.dashboard.ensure_channel(k, chmap[k])
+            self.dashboard.ensure_source(k, smap[k])
         if keys != self._keys:
             self._rebuild(items)
             self._keys = keys
@@ -466,15 +464,15 @@ class ChannelsPanel(QWidget):
             self._layout.addWidget(self._placeholder)
             self._placeholder.setVisible(True)
         panels = self.dashboard.panels()
-        for key, ch, dev in items:
-            card = ChannelCard(
-                key, ch, dev, color_for(key), panels, self.dashboard.routed(key),
-                lambda pid, on, key=key, ch=ch: self.dashboard.set_route(key, ch, pid, on),
+        for key, src, dev in items:
+            card = SourceCard(
+                key, src, dev, color_for(key), panels, self.dashboard.routed(key),
+                lambda pid, on, key=key, src=src: self.dashboard.set_route(key, src, pid, on),
             )
             self._cards[key] = card
             self._layout.addWidget(card)
         self._layout.addStretch(1)
-        self._label.setText(f"Channels  ({len(items)})")
+        self._label.setText(f"Sources  ({len(items)})")
 
     def update_live(self, latest: dict):
         for key, card in self._cards.items():
@@ -487,7 +485,7 @@ class ChannelsPanel(QWidget):
 #  Main window — dockable shell
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
-    def __init__(self, manager: SourceManager, engine: Engine, parent=None):
+    def __init__(self, manager: DeviceManager, engine: Engine, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.engine = engine
@@ -495,41 +493,38 @@ class MainWindow(QMainWindow):
         self.resize(1320, 840)
         self._dialogs: dict[str, ConfigDialog] = {}
 
-        # central = dockable workspace of panels
         self.workspace = WorkspaceArea()
         self.setCentralWidget(self.workspace)
         self.dashboard = Dashboard(self.workspace, engine, manager)
-        self.dashboard.add_panel("chart")     # a default chart to route into
+        self.dashboard.add_panel("chart")
 
-        # right dock: channels
-        self.channels_panel = ChannelsPanel(manager, self.dashboard)
-        self.channels_dock = QDockWidget("Channels", self)
-        self.channels_dock.setObjectName("ChannelsDock")
-        self.channels_dock.setWidget(self.channels_panel)
-        self.channels_dock.setMinimumWidth(280)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.channels_dock)
-
-        # left dock: sources (hidden by default)
-        self.sources_panel = SourcesPanel(manager, self._open_config)
+        self.sources_panel = SourcesPanel(manager, self.dashboard)
         self.sources_dock = QDockWidget("Sources", self)
         self.sources_dock.setObjectName("SourcesDock")
         self.sources_dock.setWidget(self.sources_panel)
-        self.sources_dock.setMinimumWidth(300)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.sources_dock)
-        self.sources_dock.setVisible(False)
+        self.sources_dock.setMinimumWidth(280)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.sources_dock)
+
+        self.devices_panel = DevicesPanel(manager, self._open_config)
+        self.devices_dock = QDockWidget("Devices", self)
+        self.devices_dock.setObjectName("DevicesDock")
+        self.devices_dock.setWidget(self.devices_panel)
+        self.devices_dock.setMinimumWidth(300)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.devices_dock)
+        self.devices_dock.setVisible(False)
 
         self._build_menus()
 
         self.engine.tick.connect(self._on_tick)
         self.statusBar().showMessage(
-            "Scanning for sources…  ·  open “Sources” to add a device"
+            "Scanning for devices…  ·  open “Devices” to add one"
         )
         self.manager.start()
 
     def _build_menus(self):
         view = self.menuBar().addMenu("&View")
+        view.addAction(self.devices_dock.toggleViewAction())
         view.addAction(self.sources_dock.toggleViewAction())
-        view.addAction(self.channels_dock.toggleViewAction())
         view.addSeparator()
         self.edit_action = view.addAction("Edit layout")
         self.edit_action.setCheckable(True)
@@ -543,11 +538,11 @@ class MainWindow(QMainWindow):
 
         tb = self.addToolBar("Main")
         tb.setMovable(False)
-        tb.addAction(self.sources_dock.toggleViewAction())
+        tb.addAction(self.devices_dock.toggleViewAction())
         tb.addAction(self.edit_action)
 
     def _on_tick(self):
-        self.channels_panel.update_live(self.engine.latest())
+        self.sources_panel.update_live(self.engine.latest())
 
     def _open_config(self, instance_id: str) -> None:
         dlg = self._dialogs.get(instance_id)
@@ -613,7 +608,7 @@ def main(argv=None) -> int:
 
     drivers = load_builtin_drivers()
     engine = Engine()
-    manager = SourceManager(drivers, engine=engine)
+    manager = DeviceManager(drivers, engine=engine)
     win = MainWindow(manager, engine)
     win.show()
     return app.exec()

@@ -1,9 +1,4 @@
-"""Reading — one sample on a channel, pushed through the data plane.
-
-This is the unit of the *stream* path (push), distinct from the *snapshot* path
-(`describe()` → SourceDescriptor, pull). Sources emit Readings; the engine fans
-them out to sinks.
-"""
+"""Reading — one sample on a Source, pushed through the data plane."""
 
 from __future__ import annotations
 
@@ -12,13 +7,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Reading:
-    source: str        # source instance_id
-    channel: str       # channel id within the source
+    device: str        # device instance_id
+    source: str        # source id within the device
     t: float           # wall-clock timestamp (seconds)
-    value: float       # scalar value (NaN if unavailable)
-    status: int = 0    # 0 = ok, non-zero = error/underrange/etc.
+    value: float
+    status: int = 0    # 0 = ok
 
     @property
     def key(self) -> str:
-        """Global channel key: 'source_instance/channel'."""
-        return f"{self.source}/{self.channel}"
+        """Global source key: 'device_instance/source'."""
+        return f"{self.device}/{self.source}"

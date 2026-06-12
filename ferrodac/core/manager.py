@@ -1,14 +1,4 @@
-"""SourceManager — background discovery + available/active source state.
-
-Responsibilities (v1):
-  - periodically scan all discoverable driver types on a worker thread;
-  - maintain `available` (discovered, not active) and `active` (connected)
-    sets, **deduped by `instance_id`**;
-  - let the UI add (connect) / remove (disconnect) sources without blocking.
-
-The manager exposes everything to the UI as **descriptors**, never as Source
-objects.
-"""
+"""DeviceManager — background discovery + available/active device state."""
 
 from __future__ import annotations
 
@@ -17,15 +7,13 @@ from typing import Callable, Sequence
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 from qtpy.QtCore import QObject, QThread, Signal
 
-from .source import Source, SourceDescriptor, Status
+from .device import Device, DeviceDescriptor
 
 
 class _DiscoveryWorker(QThread):
-    """Periodically calls `discover()` on every discoverable driver."""
+    found = Signal(list)  # list[Device]
 
-    found = Signal(list)  # list[Source]
-
-    def __init__(self, drivers: Sequence[type[Source]], interval: float, parent=None):
+    def __init__(self, drivers: Sequence[type[Device]], interval: float, parent=None):
         super().__init__(parent)
         self._drivers = list(drivers)
         self._interval = interval
@@ -37,12 +25,12 @@ class _DiscoveryWorker(QThread):
     def run(self) -> None:
         self._running = True
         while self._running:
-            found: list[Source] = []
+            found: list[Device] = []
             for drv in self._drivers:
                 try:
                     found.extend(drv.discover())
                 except Exception:
-                    pass  # a flaky driver must not kill the scan
+                    pass
             if self._running:
                 self.found.emit(found)
             slept = 0.0
@@ -52,8 +40,6 @@ class _DiscoveryWorker(QThread):
 
 
 class _OpWorker(QThread):
-    """Runs one blocking source operation (connect/disconnect) off the UI thread."""
-
     done = Signal()
     failed = Signal(str)
 
@@ -69,21 +55,21 @@ class _OpWorker(QThread):
             self.failed.emit(str(exc))
 
 
-class SourceManager(QObject):
+class DeviceManager(QObject):
     available_changed = Signal()
     active_changed = Signal()
 
     def __init__(
         self,
-        drivers: Sequence[type[Source]],
+        drivers: Sequence[type[Device]],
         scan_interval: float = 2.0,
         engine=None,
         parent=None,
     ):
         super().__init__(parent)
         self._discoverable = [d for d in drivers if getattr(d, "discoverable", False)]
-        self._available: dict[str, Source] = {}
-        self._active: dict[str, Source] = {}
+        self._available: dict[str, Device] = {}
+        self._active: dict[str, Device] = {}
         self._workers: list[_OpWorker] = []
         self._engine = engine
 
@@ -98,11 +84,11 @@ class SourceManager(QObject):
     def stop(self) -> None:
         self._scan.stop()
         self._scan.wait(3000)
-        for s in list(self._active.values()):
+        for d in list(self._active.values()):
             try:
                 if self._engine is not None:
-                    self._engine.stop_source(s)
-                s.disconnect()
+                    self._engine.stop_device(d)
+                d.disconnect()
             except Exception:
                 pass
         for w in list(self._workers):
@@ -110,97 +96,89 @@ class SourceManager(QObject):
 
     # -- discovery merge -----------------------------------------------------
     def _merge_found(self, found: list) -> None:
-        seen = {s.instance_id for s in found}
+        seen = {d.instance_id for d in found}
         changed = False
-
-        for s in found:
-            iid = s.instance_id
+        for d in found:
+            iid = d.instance_id
             if iid in self._active or iid in self._available:
-                continue  # keep the existing object (and its state)
-            self._available[iid] = s
+                continue
+            self._available[iid] = d
             changed = True
-
-        # Drop available sources that vanished (and aren't active).
         for iid in list(self._available):
             if iid not in seen:
                 del self._available[iid]
                 changed = True
-
         if changed:
             self.available_changed.emit()
 
     # -- user actions --------------------------------------------------------
     def add(self, instance_id: str) -> None:
-        """Promote a discovered source to active and connect it."""
-        source = self._available.pop(instance_id, None)
-        if source is None:
+        device = self._available.pop(instance_id, None)
+        if device is None:
             return
-        self._active[instance_id] = source
-        if hasattr(source, "mark_connecting"):
-            source.mark_connecting()
+        self._active[instance_id] = device
+        if hasattr(device, "mark_connecting"):
+            device.mark_connecting()
         self.available_changed.emit()
         self.active_changed.emit()
 
         def _connect_and_stream():
-            source.connect()
+            device.connect()
             if self._engine is not None:
-                self._engine.start_source(source)   # begin pushing readings
+                self._engine.start_device(device)
 
         self._run_async(_connect_and_stream, on_finished=self.active_changed.emit)
 
     def remove(self, instance_id: str) -> None:
-        """Disconnect an active source; it will reappear on the next scan."""
-        source = self._active.pop(instance_id, None)
-        if source is None:
+        device = self._active.pop(instance_id, None)
+        if device is None:
             return
         self.active_changed.emit()
 
         def _stop_and_disconnect():
             if self._engine is not None:
-                self._engine.stop_source(source)    # stop streaming first
-            source.disconnect()
+                self._engine.stop_device(device)
+            device.disconnect()
 
         self._run_async(_stop_and_disconnect)
 
-    # -- configuration / controls -------------------------------------------
-    def invoke(self, instance_id: str, control_id: str, value=None) -> None:
-        """Invoke a control on an active source (off-thread; may hit hardware)."""
-        source = self._active.get(instance_id)
-        if source is None:
+    # -- sinks (control) -----------------------------------------------------
+    def write(self, instance_id: str, sink_id: str, value=None) -> None:
+        device = self._active.get(instance_id)
+        if device is None:
             return
         self._run_async(
-            lambda: source.invoke(control_id, value),
+            lambda: device.write(sink_id, value),
             on_finished=self.active_changed.emit,
         )
 
     def set_rate(self, instance_id: str, hz: float) -> None:
-        source = self._active.get(instance_id)
-        if source is None or not hasattr(source, "set_rate_hz"):
+        device = self._active.get(instance_id)
+        if device is None or not hasattr(device, "set_rate_hz"):
             return
-        source.set_rate_hz(hz)
+        device.set_rate_hz(hz)
         self.active_changed.emit()
 
     def rename(self, instance_id: str, name: str) -> None:
-        source = self._active.get(instance_id) or self._available.get(instance_id)
-        if source is None or not hasattr(source, "set_name"):
+        device = self._active.get(instance_id) or self._available.get(instance_id)
+        if device is None or not hasattr(device, "set_name"):
             return
-        source.set_name(name)
+        device.set_name(name)
         self.active_changed.emit()
         self.available_changed.emit()
 
     def is_active(self, instance_id: str) -> bool:
         return instance_id in self._active
 
-    def descriptor(self, instance_id: str) -> SourceDescriptor | None:
-        source = self._active.get(instance_id) or self._available.get(instance_id)
-        return source.describe() if source else None
+    def descriptor(self, instance_id: str) -> DeviceDescriptor | None:
+        device = self._active.get(instance_id) or self._available.get(instance_id)
+        return device.describe() if device else None
 
-    # -- descriptors for the UI ---------------------------------------------
-    def available_descriptors(self) -> list[SourceDescriptor]:
-        return [s.describe() for s in self._available.values()]
+    def available_descriptors(self) -> list[DeviceDescriptor]:
+        return [d.describe() for d in self._available.values()]
 
-    def active_descriptors(self) -> list[SourceDescriptor]:
-        return [s.describe() for s in self._active.values()]
+    def active_descriptors(self) -> list[DeviceDescriptor]:
+        return [d.describe() for d in self._active.values()]
 
     # -- helpers -------------------------------------------------------------
     def _run_async(self, fn: Callable[[], None], on_finished=None) -> None:

@@ -95,7 +95,7 @@ class Dashboard(QObject):
         if getattr(cls, "is_input", False):
             panel = cls(self.manager)
             self._input_panels.add(panel)
-            panel.set_options(self._control_options(panel.control_kind))
+            panel.set_options(self._sink_options(panel.sink_kind))
         else:
             panel = cls()
             panel._unsub = self.engine.subscribe(panel.feed)
@@ -125,17 +125,17 @@ class Dashboard(QObject):
             self.default_id = charts[0] if charts else None
         self.panels_changed.emit()
 
-    def _control_options(self, kind):
+    def _sink_options(self, kind):
         out = []
         for d in self.manager.active_descriptors():
-            for c in d.controls:
-                if c.kind == kind:
-                    out.append((d.instance_id, c.id, c, d.name))
+            for s in d.sinks:
+                if s.kind == kind:
+                    out.append((d.instance_id, s.id, s, d.name))
         return out
 
     def _refresh_inputs(self):
         for panel in self._input_panels:
-            panel.set_options(self._control_options(panel.control_kind))
+            panel.set_options(self._sink_options(panel.sink_kind))
 
     def panels(self) -> list:
         return [(pid, p.title) for pid, p in self._panels.items()]
@@ -144,30 +144,30 @@ class Dashboard(QObject):
     def routed(self, key: str) -> set:
         return set(self._routes.get(key, set()))
 
-    def set_route(self, key: str, channel, pid: str, on: bool) -> None:
+    def set_route(self, key: str, source, pid: str, on: bool) -> None:
         targets = self._routes.setdefault(key, set())
         panel = self._panels.get(pid)
         if panel is None:
             return
         if on:
             targets.add(pid)
-            panel.add_channel(key, channel)
+            panel.add_source(key, source)
         else:
             targets.discard(pid)
-            panel.remove_channel(key)
+            panel.remove_source(key)
 
-    def ensure_channel(self, key: str, channel) -> None:
-        """First time a channel appears, default-route it to the default chart."""
+    def ensure_source(self, key: str, source) -> None:
+        """First time a source appears, default-route it to the default chart."""
         if key not in self._routes:
             self._routes[key] = set()
             if self.default_id:
-                self.set_route(key, channel, self.default_id, True)
+                self.set_route(key, source, self.default_id, True)
 
-    def remove_channel(self, key: str) -> None:
+    def remove_source(self, key: str) -> None:
         for pid in self._routes.pop(key, set()):
             panel = self._panels.get(pid)
             if panel is not None:
-                panel.remove_channel(key)
+                panel.remove_source(key)
 
     # -- edit mode -----------------------------------------------------------
     def set_edit_mode(self, on: bool) -> None:

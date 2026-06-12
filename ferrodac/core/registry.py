@@ -1,9 +1,4 @@
-"""Driver registry: load source modules and collect their Source subclasses.
-
-In v1 the "library" is just Python modules in :mod:`ferrodac.sources`. Later the
-same registration hook serves YAML-described drivers and user-supplied module
-directories.
-"""
+"""Driver registry: load device modules and collect their Device subclasses."""
 
 from __future__ import annotations
 
@@ -11,10 +6,9 @@ import importlib
 import pkgutil
 from types import ModuleType
 
-from .source import Source
+from .device import Device
 
-# Base classes that are not themselves selectable drivers.
-_BASE_DRIVER_IDS = {None, "source", "base"}
+_BASE_DRIVER_IDS = {None, "device", "base"}
 
 
 def _all_subclasses(cls) -> set[type]:
@@ -25,26 +19,23 @@ def _all_subclasses(cls) -> set[type]:
 
 
 def load_package(package: ModuleType) -> None:
-    """Import every module in a package so its Source subclasses register."""
     for info in pkgutil.iter_modules(package.__path__):
         importlib.import_module(f"{package.__name__}.{info.name}")
 
 
-def driver_types() -> list[type[Source]]:
-    """All concrete, selectable Source subclasses currently imported."""
-    out: list[type[Source]] = []
-    for cls in _all_subclasses(Source):
+def driver_types() -> list[type[Device]]:
+    out: list[type[Device]] = []
+    for cls in _all_subclasses(Device):
         if getattr(cls, "__abstractmethods__", None):
-            continue  # still-abstract intermediates
+            continue
         if getattr(cls, "driver", None) in _BASE_DRIVER_IDS:
-            continue  # base/helper classes
+            continue
         out.append(cls)
     return sorted(out, key=lambda c: c.driver)
 
 
-def load_builtin_drivers() -> list[type[Source]]:
-    """Convenience: import the built-in sources package and return its drivers."""
-    from ferrodac import sources
+def load_builtin_drivers() -> list[type[Device]]:
+    from ferrodac import devices
 
-    load_package(sources)
+    load_package(devices)
     return driver_types()

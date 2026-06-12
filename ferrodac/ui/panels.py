@@ -1,11 +1,8 @@
-"""Dashboard panels — display sinks.
+"""Dashboard panels.
 
-Each panel is a data-plane SINK: it subscribes to the engine (via the Dashboard)
-and renders the channels routed to it. Panels are uniform: `add_channel` /
-`remove_channel` to (un)assign a channel, and `feed(batch)` to consume readings.
-
-v1 panel types: ChartPanel (live plot) and NumericPanel (7-segment readouts).
-Input-source panels (sliders/buttons → controls) will land as more types.
+Display panels are sinks (virtual): they subscribe to the engine and render the
+Sources routed to them. Input panels are sources (virtual): they drive a device
+Sink via ``manager.write``.
 """
 
 from __future__ import annotations
@@ -29,26 +26,26 @@ from qtpy.QtWidgets import (
 
 import pyqtgraph as pg
 
-from ..core.source import ControlKind
+from ..core.device import SinkKind
 from ._common import color_for, fmt
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
 
 
 class Panel(QWidget):
-    """Base class: a sink that shows a routed set of channels."""
+    """Base class: a display panel that shows a routed set of Sources."""
 
     kind = "panel"
-    is_input = False           # display sink; input panels override to True
+    is_input = False
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.panel_id = ""
         self.title = ""
-        self._unsub = None     # set by the Dashboard
+        self._unsub = None
 
-    def add_channel(self, key: str, channel) -> None: ...
-    def remove_channel(self, key: str) -> None: ...
+    def add_source(self, key: str, source) -> None: ...
+    def remove_source(self, key: str) -> None: ...
     def feed(self, batch: list) -> None: ...
 
 
@@ -73,15 +70,15 @@ class ChartPanel(Panel):
         self._buf: dict = {}
         self._t0 = None
 
-    def add_channel(self, key, channel):
+    def add_source(self, key, source):
         if key in self._curves:
             return
         self._curves[key] = self.plot.plot(
-            [], [], pen=pg.mkPen(color_for(key), width=2), name=channel.name
+            [], [], pen=pg.mkPen(color_for(key), width=2), name=source.name
         )
         self._buf[key] = ([], [])
 
-    def remove_channel(self, key):
+    def remove_source(self, key):
         curve = self._curves.pop(key, None)
         if curve is not None:
             self.plot.removeItem(curve)
@@ -102,15 +99,13 @@ class ChartPanel(Panel):
 
 
 class _Readout(QFrame):
-    """One 7-segment readout: coloured name + LCD + unit."""
-
-    def __init__(self, channel, color: str, parent=None):
+    def __init__(self, source, color: str, parent=None):
         super().__init__(parent)
-        self.unit = channel.unit or ""
+        self.unit = source.unit or ""
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(2)
-        name = QLabel(channel.name)
+        name = QLabel(source.name)
         name.setStyleSheet(f"color:{color}; font-weight:700;")
         lay.addWidget(name)
         self.lcd = QLCDNumber()
@@ -118,8 +113,8 @@ class _Readout(QFrame):
         self.lcd.setSegmentStyle(QLCDNumber.Flat)
         self.lcd.setMinimumHeight(48)
         self.lcd.display("----")
-        pal = self.lcd.palette()
         from qtpy.QtGui import QColor
+        pal = self.lcd.palette()
         pal.setColor(QPalette.WindowText, QColor(color))
         self.lcd.setPalette(pal)
         lay.addWidget(self.lcd)
@@ -143,20 +138,20 @@ class NumericPanel(Panel):
         self._outer.setContentsMargins(6, 6, 6, 6)
         self._outer.setSpacing(6)
         self._readouts: dict = {}
-        self._placeholder = QLabel("Route channels here.")
+        self._placeholder = QLabel("Route sources here.")
         self._placeholder.setStyleSheet("color:#7f8a99;")
         self._outer.addWidget(self._placeholder)
         self._outer.addStretch(1)
 
-    def add_channel(self, key, channel):
+    def add_source(self, key, source):
         if key in self._readouts:
             return
-        ro = _Readout(channel, color_for(key))
+        ro = _Readout(source, color_for(key))
         self._readouts[key] = ro
         self._outer.insertWidget(self._outer.count() - 1, ro)
         self._placeholder.setVisible(False)
 
-    def remove_channel(self, key):
+    def remove_source(self, key):
         ro = self._readouts.pop(key, None)
         if ro is not None:
             ro.setParent(None)
@@ -171,20 +166,17 @@ class NumericPanel(Panel):
 
 
 # --------------------------------------------------------------------------- #
-#  Input panels — bound to a device control; drive invoke()
+#  Input panels — virtual sources that drive a device Sink
 # --------------------------------------------------------------------------- #
 class InputPanel(Panel):
-    """Base for input sources. Bound to a (device, control) chosen from a
-    dropdown of matching controls; the widget drives ``manager.invoke``."""
-
     is_input = True
-    control_kind = None   # which ControlKind this input targets
+    sink_kind = None   # which SinkKind this input targets
 
     def __init__(self, manager, parent=None):
         super().__init__(parent)
         self.manager = manager
-        self.target = None          # (device_id, control_id)
-        self._options: list = []    # (device_id, control_id, control, device_name)
+        self.target = None          # (device_id, sink_id)
+        self._options: list = []    # (device_id, sink_id, sink, device_name)
 
         self._lay = QVBoxLayout(self)
         self._lay.setContentsMargins(10, 8, 10, 8)
@@ -195,7 +187,6 @@ class InputPanel(Panel):
         self._build_body()
         self._lay.addStretch(1)
 
-    # subclasses
     def _build_body(self) -> None: ...
     def _configure_for_target(self) -> None: ...
 
@@ -206,9 +197,9 @@ class InputPanel(Panel):
         self._combo.clear()
         self._combo.addItem("— select target —", None)
         sel = 0
-        for i, (did, cid, ctrl, dev) in enumerate(options, start=1):
-            self._combo.addItem(f"{dev} · {ctrl.name}", (did, cid))
-            if prev == (did, cid):
+        for i, (did, sid, sink, dev) in enumerate(options, start=1):
+            self._combo.addItem(f"{dev} · {sink.name}", (did, sid))
+            if prev == (did, sid):
                 sel = i
         self._combo.setCurrentIndex(sel)
         self._combo.blockSignals(False)
@@ -219,20 +210,20 @@ class InputPanel(Panel):
         self.target = self._combo.currentData()
         self._configure_for_target()
 
-    def _control(self):
-        for did, cid, ctrl, dev in self._options:
-            if (did, cid) == self.target:
-                return ctrl
+    def _sink(self):
+        for did, sid, sink, dev in self._options:
+            if (did, sid) == self.target:
+                return sink
         return None
 
     def _apply(self, value):
         if self.target is not None:
-            self.manager.invoke(self.target[0], self.target[1], value)
+            self.manager.write(self.target[0], self.target[1], value)
 
 
 class SliderPanel(InputPanel):
     kind = "slider"
-    control_kind = ControlKind.SETPOINT
+    sink_kind = SinkKind.SETPOINT
 
     def _build_body(self):
         self._min, self._max, self._unit = 0.0, 1.0, ""
@@ -250,14 +241,14 @@ class SliderPanel(InputPanel):
         self._lay.addWidget(host)
 
     def _configure_for_target(self):
-        ctrl = self._control()
-        self._slider.setEnabled(ctrl is not None)
-        if ctrl is not None and ctrl.params:
-            p = ctrl.params[0]
+        sink = self._sink()
+        self._slider.setEnabled(sink is not None)
+        if sink is not None and sink.params:
+            p = sink.params[0]
             self._min = p.minimum if p.minimum is not None else 0.0
             self._max = p.maximum if p.maximum is not None else 1.0
             self._unit = p.unit
-            cur = ctrl.value if ctrl.value is not None else self._min
+            cur = sink.value if sink.value is not None else self._min
             self._slider.blockSignals(True)
             span = self._max - self._min
             self._slider.setValue(int((cur - self._min) / span * 1000) if span else 0)
@@ -274,7 +265,7 @@ class SliderPanel(InputPanel):
 
 class ButtonPanel(InputPanel):
     kind = "button"
-    control_kind = ControlKind.ACTION
+    sink_kind = SinkKind.ACTION
 
     def _build_body(self):
         self._btn = QPushButton("Trigger")
@@ -283,14 +274,14 @@ class ButtonPanel(InputPanel):
         self._lay.addWidget(self._btn)
 
     def _configure_for_target(self):
-        ctrl = self._control()
-        self._btn.setEnabled(ctrl is not None)
-        self._btn.setText(f"Trigger {ctrl.name}" if ctrl else "Trigger")
+        sink = self._sink()
+        self._btn.setEnabled(sink is not None)
+        self._btn.setText(f"Trigger {sink.name}" if sink else "Trigger")
 
 
 class TogglePanel(InputPanel):
     kind = "toggle"
-    control_kind = ControlKind.TOGGLE
+    sink_kind = SinkKind.TOGGLE
 
     def _build_body(self):
         self._chk = QCheckBox("On")
@@ -298,15 +289,14 @@ class TogglePanel(InputPanel):
         self._lay.addWidget(self._chk)
 
     def _configure_for_target(self):
-        ctrl = self._control()
-        self._chk.setEnabled(ctrl is not None)
-        if ctrl is not None:
+        sink = self._sink()
+        self._chk.setEnabled(sink is not None)
+        if sink is not None:
             self._chk.blockSignals(True)
-            self._chk.setChecked(bool(ctrl.value))
+            self._chk.setChecked(bool(sink.value))
             self._chk.blockSignals(False)
 
 
-#: panel kinds available in the "Add" menu
 PANEL_TYPES = {
     "chart": ("Chart", ChartPanel),
     "numeric": ("7-seg display", NumericPanel),

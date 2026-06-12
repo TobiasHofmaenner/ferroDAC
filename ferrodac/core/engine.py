@@ -30,7 +30,7 @@ class Engine(QObject):
 
     def __init__(self, drain_ms: int = 50, parent=None):
         super().__init__(parent)
-        self._sources: dict[str, object] = {}
+        self._devices: dict[str, object] = {}
         self._inbox: deque = deque()        # thread-safe append / popleft
         self._latest: dict[str, Reading] = {}
         self._sinks: list[Sink] = []
@@ -38,15 +38,15 @@ class Engine(QObject):
         self._timer.timeout.connect(self._drain)
         self._timer.start(drain_ms)
 
-    # -- source streaming ----------------------------------------------------
-    def start_source(self, source) -> None:
-        self._sources[source.instance_id] = source
-        source.start(self._ingest)
+    # -- device streaming ----------------------------------------------------
+    def start_device(self, device) -> None:
+        self._devices[device.instance_id] = device
+        device.start(self._ingest)
 
-    def stop_source(self, source) -> None:
-        self._sources.pop(source.instance_id, None)
+    def stop_device(self, device) -> None:
+        self._devices.pop(device.instance_id, None)
         try:
-            source.stop()
+            device.stop()
         except Exception:
             pass
 
@@ -90,8 +90,8 @@ class Engine(QObject):
 
     def shutdown(self) -> None:
         self._timer.stop()
-        for s in list(self._sources.values()):
+        for d in list(self._devices.values()):
             try:
-                s.stop()
+                d.stop()
             except Exception:
                 pass

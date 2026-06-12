@@ -1,9 +1,9 @@
-"""BaseSource — a convenience base implementing the common Source machinery.
+"""BaseDevice — convenience base implementing the common Device machinery.
 
-Drivers usually subclass this rather than :class:`Source` directly: it holds the
-descriptor fields, a small status state-machine, current control values, and the
-configured sample rate. A driver only has to build its channels/controls and
-implement ``_connect`` / ``_disconnect`` (and ``_invoke`` if it has controls).
+Drivers usually subclass this: it holds the descriptor fields, a status
+state-machine, current sink values, the configured sample rate, and the
+acquisition loop. A driver implements `discover` + `_connect`/`_disconnect`
+(+ `_read` for sources, `_write` for sinks).
 """
 
 from __future__ import annotations
@@ -14,20 +14,20 @@ from dataclasses import replace
 from typing import Optional, Sequence
 
 from .reading import Reading
-from .source import (
-    Channel,
-    Control,
-    ControlKind,
+from .device import (
+    Device,
+    DeviceDescriptor,
     Interface,
     RateControl,
     RateMode,
+    Sink,
+    SinkKind,
     Source,
-    SourceDescriptor,
     Status,
 )
 
 
-class BaseSource(Source):
+class BaseDevice(Device):
     driver = "base"   # registry skips this; real drivers override
 
     def __init__(
@@ -35,34 +35,31 @@ class BaseSource(Source):
         instance_id: str,
         name: str,
         interface: Interface,
-        channels: Sequence[Channel] = (),
-        controls: Sequence[Control] = (),
+        sources: Sequence[Source] = (),
+        sinks: Sequence[Sink] = (),
         rate: Optional[RateControl] = None,
-        primary_channel: Optional[str] = None,
+        primary_source: Optional[str] = None,
         hardware_id: Optional[str] = None,
         model: Optional[str] = None,
     ):
         self._instance_id = instance_id
         self._name = name
         self._interface = interface
-        self._channels = list(channels)
-        self._controls = list(controls)
+        self._sources = list(sources)
+        self._sinks = list(sinks)
         self._rate = rate
-        self._primary_channel = primary_channel
+        self._primary_source = primary_source
         self._hardware_id = hardware_id
         self._model = model
         self._firmware: Optional[str] = None
         self._status = Status.DISCOVERED
         self._last_error: Optional[str] = None
 
-        # current value of every non-action control (seeded from its declared value)
-        self._control_values = {
-            c.id: c.value for c in self._controls if c.kind != ControlKind.ACTION
+        self._sink_values = {
+            s.id: s.value for s in self._sinks if s.kind != SinkKind.ACTION
         }
-        # currently configured sample rate
         self._rate_hz = rate.default_hz if rate else None
 
-        # streaming state (data plane)
         self._streaming = False
         self._thread: Optional[threading.Thread] = None
         self._emit = None
@@ -77,21 +74,20 @@ class BaseSource(Source):
         return self._name
 
     def set_name(self, name: str) -> None:
-        """In-memory display rename (persistence comes with workspaces)."""
         self._name = name
 
     @property
     def status(self) -> Status:
         return self._status
 
-    def describe(self) -> SourceDescriptor:
-        controls = []
-        for c in self._controls:
-            if c.kind == ControlKind.ACTION:
-                controls.append(c)
+    def describe(self) -> DeviceDescriptor:
+        sinks = []
+        for s in self._sinks:
+            if s.kind == SinkKind.ACTION:
+                sinks.append(s)
             else:
-                controls.append(replace(c, value=self._control_values.get(c.id, c.value)))
-        return SourceDescriptor(
+                sinks.append(replace(s, value=self._sink_values.get(s.id, s.value)))
+        return DeviceDescriptor(
             instance_id=self._instance_id,
             driver=self.driver,
             name=self._name,
@@ -100,18 +96,16 @@ class BaseSource(Source):
             hardware_id=self._hardware_id,
             model=self._model,
             firmware=self._firmware,
-            channels=list(self._channels),
-            controls=controls,
+            sources=list(self._sources),
+            sinks=sinks,
             rate=self._rate,
             rate_hz=self._rate_hz,
-            primary_channel=self._primary_channel,
+            primary_source=self._primary_source,
             last_error=self._last_error,
         )
 
-    # -- lifecycle (template methods) ----------------------------------------
+    # -- lifecycle ------------------------------------------------------------
     def mark_connecting(self) -> None:
-        """Optimistically flip to CONNECTING (so the UI shows it before the
-        blocking `connect()` runs on a worker)."""
         self._status = Status.CONNECTING
         self._last_error = None
 
@@ -133,6 +127,50 @@ class BaseSource(Source):
         finally:
             self._status = Status.DISCONNECTED
 
+    # -- sinks (control) ------------------------------------------------------
+    def write(self, sink_id: str, value=None) -> None:
+        schema = self._sink_schema(sink_id)
+        if schema is None:
+            raise KeyError(f"no sink {sink_id!r} on {self._instance_id}")
+        if schema.kind != SinkKind.ACTION:
+            value = self._coerce(schema, value)
+        self._write(schema, value)
+        if schema.kind != SinkKind.ACTION:
+            self._sink_values[sink_id] = value
+
+    def set_rate_hz(self, hz: float) -> None:
+        if self._rate is None or self._rate.mode != RateMode.SETTABLE:
+            return
+        lo = self._rate.min_hz if self._rate.min_hz is not None else 1e-3
+        hi = self._rate.max_hz if self._rate.max_hz is not None else float(hz)
+        self._rate_hz = max(lo, min(hi, float(hz)))
+
+    def _sink_schema(self, sink_id: str) -> Optional[Sink]:
+        for s in self._sinks:
+            if s.id == sink_id:
+                return s
+        return None
+
+    @staticmethod
+    def _coerce(schema: Sink, value):
+        if schema.kind == SinkKind.TOGGLE:
+            return bool(value)
+        if schema.kind == SinkKind.ENUM:
+            options = schema.params[0].options if schema.params else ()
+            if options and value not in options:
+                raise ValueError(f"{value!r} not in {options}")
+            return value
+        if schema.kind == SinkKind.SETPOINT:
+            v = float(value)
+            p = schema.params[0] if schema.params else None
+            if p is not None:
+                if p.minimum is not None:
+                    v = max(p.minimum, v)
+                if p.maximum is not None:
+                    v = min(p.maximum, v)
+            return v
+        return value
+
     # -- data plane (push) ----------------------------------------------------
     def start(self, emit) -> None:
         if self._streaming:
@@ -152,19 +190,17 @@ class BaseSource(Source):
         self._emit = None
 
     def _poll_loop(self) -> None:
-        """The single acquisition loop. Reads every channel each tick at the
-        configured rate and pushes a Reading per channel."""
         while self._streaming:
             cycle = time.monotonic()
             now = time.time()
             emit = self._emit
-            for ch in self._channels:
+            for src in self._sources:
                 try:
-                    value, status = self._read(ch)
+                    value, status = self._read(src)
                 except Exception:
                     value, status = float("nan"), 1
                 if emit is not None:
-                    emit(Reading(self._instance_id, ch.id, now, value, status))
+                    emit(Reading(self._instance_id, src.id, now, value, status))
             interval = 1.0 / (self._rate_hz or 1.0)
             remaining = interval - (time.monotonic() - cycle)
             while self._streaming and remaining > 0:
@@ -172,62 +208,14 @@ class BaseSource(Source):
                 time.sleep(chunk)
                 remaining -= chunk
 
-    # -- control / configuration ---------------------------------------------
-    def invoke(self, control_id: str, value=None) -> None:
-        schema = self._control_schema(control_id)
-        if schema is None:
-            raise KeyError(f"no control {control_id!r} on {self._instance_id}")
-        if schema.kind != ControlKind.ACTION:
-            value = self._coerce(schema, value)
-        self._invoke(schema, value)              # hardware hook
-        if schema.kind != ControlKind.ACTION:
-            self._control_values[control_id] = value
-
-    def set_rate_hz(self, hz: float) -> None:
-        if self._rate is None or self._rate.mode != RateMode.SETTABLE:
-            return
-        lo = self._rate.min_hz if self._rate.min_hz is not None else 1e-3
-        hi = self._rate.max_hz if self._rate.max_hz is not None else float(hz)
-        self._rate_hz = max(lo, min(hi, float(hz)))
-
-    def _control_schema(self, control_id: str) -> Optional[Control]:
-        for c in self._controls:
-            if c.id == control_id:
-                return c
-        return None
-
-    @staticmethod
-    def _coerce(schema: Control, value):
-        """Validate/coerce a value against the control schema."""
-        if schema.kind == ControlKind.TOGGLE:
-            return bool(value)
-        if schema.kind == ControlKind.ENUM:
-            options = schema.params[0].options if schema.params else ()
-            if options and value not in options:
-                raise ValueError(f"{value!r} not in {options}")
-            return value
-        if schema.kind == ControlKind.SETPOINT:
-            v = float(value)
-            p = schema.params[0] if schema.params else None
-            if p is not None:
-                if p.minimum is not None:
-                    v = max(p.minimum, v)
-                if p.maximum is not None:
-                    v = min(p.maximum, v)
-            return v
-        return value
-
     # -- hooks for subclasses -------------------------------------------------
-    def _connect(self) -> None:
-        """Confirm/open the device; may set self._firmware etc. Override."""
+    def _connect(self) -> None: ...
 
-    def _disconnect(self) -> None:
-        """Release the device. Override."""
+    def _disconnect(self) -> None: ...
 
-    def _invoke(self, control: Control, value) -> None:
-        """Send the control to the hardware. Default no-op (store-only).
-        Real drivers override to talk to the device."""
+    def _write(self, sink: Sink, value) -> None:
+        """Send the value to hardware. Default no-op (store-only)."""
 
-    def _read(self, channel: Channel):
-        """Read one channel: return ``(value, status)``. Override in drivers."""
+    def _read(self, source: Source):
+        """Read one source: return ``(value, status)``. Override in drivers."""
         raise NotImplementedError(f"{self.driver} has no _read()")

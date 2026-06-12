@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..core.source import Status
+from ..core.device import Status
 
 CHANNEL_COLORS = [
     "#4fc3f7", "#ff8a65", "#81c784", "#ba68c8", "#ffd54f", "#e57373",
