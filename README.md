@@ -15,10 +15,11 @@ extensible platform.
 
 ## Status
 
-**v0.1 — source-management MVP.** The first vertical slice of Phase 0: the
-`Source` contract, a module-based driver registry, background discovery, and a
-minimal Qt UI to add/remove sources (no plotting, no server yet). Two fake
-discoverable sources prove the loop end-to-end with no hardware.
+**v0.2 — Phase 0 core.** The `Source` contract + driver registry + background
+discovery + source-management UI, a generated **configuration UI** (see/edit a
+device's declared controls), and the **data plane**: sources push `Reading`s, an
+`Engine` fans them out to sinks, and live values stream to the cards and a chart.
+Two fake discoverable sources prove it end-to-end with no hardware.
 
 ```bash
 pip install -r requirements.txt
@@ -35,11 +36,13 @@ Design docs:
 ```
 ferrodac/
   core/source.py     the Source contract (descriptor + ABC) — the deliverable
-  core/base.py       BaseSource convenience base (status state-machine)
+  core/base.py       BaseSource convenience base (state machine + poll loop)
+  core/reading.py    Reading — the unit of the push stream
+  core/engine.py     data-plane hub: fan-out to sinks, latest cache, drain timer
   core/registry.py   loads source modules, collects Source subclasses
-  core/manager.py    background discovery + available/active state
-  sources/fake.py    hardware-free example sources
-  ui/app.py          minimal source-management UI (nested source/channel cards)
+  core/manager.py    background discovery + available/active + streaming wiring
+  sources/fake.py    hardware-free example sources (with simulated data)
+  ui/app.py          source-management + config dialog + live cards + chart sink
 ```
 
 ## Guiding principles (short version)

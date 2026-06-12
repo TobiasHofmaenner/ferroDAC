@@ -26,13 +26,19 @@ from qtpy.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
+import pyqtgraph as pg
+
+from ..core.engine import Engine
 from ..core.manager import SourceManager
 from ..core.registry import load_builtin_drivers
 from ..core.source import ControlKind, RateMode, SourceDescriptor, Status
+
+pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
 
 CHANNEL_COLORS = ["#4fc3f7", "#ff8a65", "#81c784", "#ba68c8", "#ffd54f", "#e57373"]
 
@@ -43,6 +49,14 @@ STATUS_COLORS = {
     Status.ERROR: "#ff6b6b",
     Status.DISCONNECTED: "#7f8a99",
 }
+
+
+def _fmt(value, unit: str = "") -> str:
+    if value is None or value != value:        # None / NaN
+        return "—"
+    a = abs(value)
+    s = f"{value:.3e}" if (a != 0 and (a < 1e-3 or a >= 1e4)) else f"{value:.4g}"
+    return f"{s} {unit}".rstrip()
 
 
 def _clear(layout) -> None:
@@ -60,6 +74,7 @@ def _clear(layout) -> None:
 class ChannelCard(QFrame):
     def __init__(self, channel, color: str, parent=None):
         super().__init__(parent)
+        self.unit = channel.unit or ""
         self.setObjectName("ChannelCard")
         self.setStyleSheet(
             "#ChannelCard { background:#1c2230; border:1px solid #2a3340;"
@@ -81,13 +96,18 @@ class ChannelCard(QFrame):
         top.addStretch(1)
         lay.addLayout(top)
 
-        value = QLabel("—")
-        value.setStyleSheet(f"color:{color}; font-family:monospace; font-size:14px;")
-        lay.addWidget(value)
+        self.value_label = QLabel("—")
+        self.value_label.setStyleSheet(
+            f"color:{color}; font-family:monospace; font-size:14px;"
+        )
+        lay.addWidget(self.value_label)
 
-        unit = QLabel(channel.unit or "")
+        unit = QLabel(self.unit)
         unit.setStyleSheet("color:#7f8a99; font-size:10px;")
         lay.addWidget(unit)
+
+    def set_value(self, text: str) -> None:
+        self.value_label.setText(text)
 
 
 class SourceCard(QFrame):
@@ -97,6 +117,12 @@ class SourceCard(QFrame):
     def __init__(self, desc: SourceDescriptor, active: bool, on_action,
                  on_configure=None, parent=None):
         super().__init__(parent)
+        self.instance_id = desc.instance_id
+        self._channel_cards: dict = {}
+        self._primary_label = None
+        self._primary_id = None
+        self._primary_name = ""
+        self._primary_unit = ""
         self.setObjectName("SourceCard")
         self.setStyleSheet(
             "#SourceCard { background:#171c26; border:1px solid #232a38;"
@@ -149,8 +175,12 @@ class SourceCard(QFrame):
             pcolor = CHANNEL_COLORS[
                 self._channel_index(desc, primary.id) % len(CHANNEL_COLORS)
             ]
-            pv = QLabel(f"{primary.name}:  —  {primary.unit}".rstrip())
+            self._primary_id = primary.id
+            self._primary_name = primary.name
+            self._primary_unit = primary.unit
+            pv = QLabel(f"{primary.name}:  —")
             pv.setStyleSheet(f"color:{pcolor}; font-family:monospace; font-size:15px;")
+            self._primary_label = pv
             lay.addWidget(pv)
 
         # -- channel sub-cards (active cards only) --
@@ -161,13 +191,28 @@ class SourceCard(QFrame):
             grid.setSpacing(6)
             for i, ch in enumerate(desc.channels):
                 color = CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
-                grid.addWidget(ChannelCard(ch, color), i // 3, i % 3)
+                card = ChannelCard(ch, color)
+                self._channel_cards[ch.id] = card
+                grid.addWidget(card, i // 3, i % 3)
             lay.addWidget(grid_host)
         elif not active and desc.channels:
             n = len(desc.channels)
             chl = QLabel(f"{n} channel{'s' if n != 1 else ''}")
             chl.setStyleSheet("color:#7f8a99; font-size:11px;")
             lay.addWidget(chl)
+
+    def apply_latest(self, latest: dict) -> None:
+        """Update live values from the engine's latest-reading cache (push sink)."""
+        for chid, card in self._channel_cards.items():
+            r = latest.get(f"{self.instance_id}/{chid}")
+            if r is not None:
+                card.set_value(_fmt(r.value, card.unit))
+        if self._primary_label is not None and self._primary_id is not None:
+            r = latest.get(f"{self.instance_id}/{self._primary_id}")
+            if r is not None:
+                self._primary_label.setText(
+                    f"{self._primary_name}:  {_fmt(r.value, self._primary_unit)}"
+                )
 
     @staticmethod
     def _channel_index(desc: SourceDescriptor, channel_id: str) -> int:
@@ -372,15 +417,79 @@ class ConfigDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- #
+#  Live chart — a data-plane SINK (subscribes to the engine)
+# --------------------------------------------------------------------------- #
+class ChartPanel(QWidget):
+    """A live plot fed by pushed Readings. Registers itself as an engine sink;
+    appends to per-channel buffers and redraws — repaint is decoupled from the
+    sample rate (this is just another sink, same as a CSV/network sink would be).
+
+    NB: v1 plots every channel on one shared log axis to prove the stream;
+    per-unit / per-axis assignment is the Workspace feature (later).
+    """
+
+    def __init__(self, engine: Engine, parent=None):
+        super().__init__(parent)
+        self.engine = engine
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.plot = pg.PlotWidget()
+        self.plot.showGrid(x=True, y=True, alpha=0.25)
+        self.plot.setLabel("bottom", "Time", units="s")
+        self.plot.getAxis("bottom").enableAutoSIPrefix(False)
+        self.plot.setLogMode(x=False, y=True)
+        self.plot.addLegend(offset=(-10, 10))
+        item = self.plot.getPlotItem()
+        item.setDownsampling(auto=True, mode="peak")
+        item.setClipToView(True)
+        lay.addWidget(self.plot)
+
+        self._curves: dict = {}
+        self._buf: dict = {}
+        self._allowed: set = set()           # source ids currently active
+        self._t0 = None
+        self._color_idx = 0
+        engine.subscribe(self._feed)
+
+    def _feed(self, batch: list) -> None:    # called on the GUI thread (engine drain)
+        for r in batch:
+            if r.source not in self._allowed:
+                continue                     # ignore late readings from removed sources
+            if self._t0 is None:
+                self._t0 = r.t
+            xs, ys = self._buf.setdefault(r.key, ([], []))
+            xs.append(r.t - self._t0)
+            ok = r.status == 0 and r.value == r.value and r.value > 0
+            ys.append(r.value if ok else float("nan"))
+            curve = self._curves.get(r.key)
+            if curve is None:
+                color = CHANNEL_COLORS[self._color_idx % len(CHANNEL_COLORS)]
+                self._color_idx += 1
+                curve = self.plot.plot([], [], pen=pg.mkPen(color, width=2), name=r.key)
+                self._curves[r.key] = curve
+            curve.setData(xs, ys, connect="finite")
+
+    def prune(self, active_ids: set) -> None:
+        """Set the authoritative active-source set and drop stale curves."""
+        self._allowed = set(active_ids)
+        for key in list(self._curves):
+            if key.split("/", 1)[0] not in self._allowed:
+                self.plot.removeItem(self._curves.pop(key))
+                self._buf.pop(key, None)
+
+
+# --------------------------------------------------------------------------- #
 #  Main window
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
-    def __init__(self, manager: SourceManager, parent=None):
+    def __init__(self, manager: SourceManager, engine: Engine, parent=None):
         super().__init__(parent)
         self.manager = manager
+        self.engine = engine
         self.setWindowTitle("ferroDAC")
-        self.resize(1040, 680)
+        self.resize(1120, 860)
         self._dialogs: dict[str, ConfigDialog] = {}
+        self._active_cards: dict[str, SourceCard] = {}
 
         self._available_box = self._build_column("Available sources")
         self._active_box = self._build_column("Active sources")
@@ -395,14 +504,25 @@ class MainWindow(QMainWindow):
         head.setStyleSheet("font-size:16px; font-weight:700;")
         outer.addWidget(head)
 
-        cols = QHBoxLayout()
+        cols_host = QWidget()
+        cols = QHBoxLayout(cols_host)
+        cols.setContentsMargins(0, 0, 0, 0)
         cols.setSpacing(12)
         cols.addWidget(self._available_box["frame"], 1)
         cols.addWidget(self._active_box["frame"], 1)
-        outer.addLayout(cols)
+
+        self.chart = ChartPanel(self.engine)
+        split = QSplitter(Qt.Vertical)
+        split.addWidget(cols_host)
+        split.addWidget(self.chart)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([320, 480])
+        outer.addWidget(split, 1)
 
         self.manager.available_changed.connect(self._rebuild_available)
-        self.manager.active_changed.connect(self._rebuild_active)
+        self.manager.active_changed.connect(self._on_active_changed)
+        self.engine.tick.connect(self._update_live)
         self.statusBar().showMessage("Scanning for sources…")
         self._rebuild_available()
         self._rebuild_active()
@@ -442,10 +562,25 @@ class MainWindow(QMainWindow):
                  on_configure=None) -> None:
         layout = box["layout"]
         _clear(layout)
+        if active:
+            self._active_cards = {}
         for desc in sorted(descriptors, key=lambda d: d.name):
-            layout.addWidget(SourceCard(desc, active, on_action, on_configure))
+            card = SourceCard(desc, active, on_action, on_configure)
+            if active:
+                self._active_cards[desc.instance_id] = card
+            layout.addWidget(card)
         layout.addStretch(1)
         box["label"].setText(f"{box['title']}  ({len(descriptors)})")
+
+    def _on_active_changed(self) -> None:
+        self._rebuild_active()
+        active_ids = {d.instance_id for d in self.manager.active_descriptors()}
+        self.chart.prune(active_ids)
+
+    def _update_live(self) -> None:
+        latest = self.engine.latest()
+        for card in self._active_cards.values():
+            card.apply_latest(latest)
 
     def _open_config(self, instance_id: str) -> None:
         dlg = self._dialogs.get(instance_id)
@@ -461,6 +596,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 (Qt signature)
         self.manager.stop()
+        self.engine.shutdown()
         super().closeEvent(event)
 
 
@@ -506,7 +642,8 @@ def main(argv=None) -> int:
     apply_dark_theme(app)
 
     drivers = load_builtin_drivers()
-    manager = SourceManager(drivers)
-    win = MainWindow(manager)
+    engine = Engine()
+    manager = SourceManager(drivers, engine=engine)
+    win = MainWindow(manager, engine)
     win.show()
     return app.exec()

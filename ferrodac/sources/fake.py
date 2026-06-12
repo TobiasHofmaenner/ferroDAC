@@ -7,6 +7,8 @@ meaningful. Real device drivers (TPG-256A, Modbus) drop in alongside these.
 
 from __future__ import annotations
 
+import math
+import random
 import time
 
 from ..core.base import BaseSource
@@ -68,9 +70,20 @@ class FakeGaugeController(BaseSource):
             ))
         return out
 
+    _BASES = {"ch1": 8e2, "ch2": 9e-1, "ch3": 5e-8}   # pressure scale per channel
+
     def _connect(self) -> None:
         time.sleep(0.4)            # simulate a handshake (shows CONNECTING)
         self._firmware = "SIMv1.0"
+        self._t0 = time.time()
+
+    def _read(self, channel):
+        t = time.time() - getattr(self, "_t0", time.time())
+        i = list(self._BASES).index(channel.id) if channel.id in self._BASES else 0
+        base = self._BASES.get(channel.id, 1.0)
+        val = base * (1 + 0.3 * math.sin(t / (3 + i))) * math.exp(-t / 180) + base * 1e-3
+        val *= 1 + 0.02 * random.uniform(-1, 1)
+        return val, 0
 
 
 class FakeThermometer(BaseSource):
@@ -100,3 +113,8 @@ class FakeThermometer(BaseSource):
     def _connect(self) -> None:
         time.sleep(0.3)
         self._firmware = "T1"
+        self._t0 = time.time()
+
+    def _read(self, channel):
+        t = time.time() - getattr(self, "_t0", time.time())
+        return 25.0 + 3.0 * math.sin(t / 10.0) + random.uniform(-0.1, 0.1), 0

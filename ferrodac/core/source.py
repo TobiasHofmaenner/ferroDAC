@@ -212,9 +212,19 @@ class Source(ABC):
         """
         raise NotImplementedError(f"{self.driver} exposes no invokable controls")
 
-    # -- reserved for the data plane (NOT implemented in v1) -----------------
-    # def start(self, on_reading: "Callable[[Reading], None]") -> None: ...
-    # def stop(self) -> None: ...
+    # -- data plane (push) ----------------------------------------------------
+    def start(self, emit) -> None:
+        """Begin streaming: call ``emit(reading)`` for every sample.
+
+        The source owns the *one* acquisition loop (poll-type drivers run an
+        internal timer at the configured rate; streamer-type forward what the
+        device pushes). Implemented by BaseSource.
+        """
+        raise NotImplementedError(f"{self.driver} does not stream")
+
+    def stop(self) -> None:
+        """Stop streaming."""
+        raise NotImplementedError(f"{self.driver} does not stream")
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<{type(self).__name__} {self.instance_id!r}>"

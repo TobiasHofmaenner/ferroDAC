@@ -89,6 +89,41 @@ Record, and gets a portable project folder — using one app.
 
 ---
 
+## Feature: embedded Python console / scripting (added 2026-06-12)
+
+An in-app Python console + script editor where **every object has a generated
+handle** (from its descriptor), so users can read data, set values, and inject
+**middleware** into the live pipeline — analysis, data conditioning, or
+closed-loop control (e.g. read a gauge, set a PSU) — in plain Python.
+
+This is the **Explore/SDK surface made live**: the same facade should work in-app
+(against the running engine) and standalone (against a recorded folder/stream).
+
+How it maps onto the architecture (mostly falls out of existing pieces):
+- **Handles** are generated from `SourceDescriptor.channels` / `.controls` /
+  config — same self-describing mechanism as the config UI.
+- **Setters** (`psu.voltage = 5`) route through `manager.invoke(...)` — already
+  built.
+- **Middleware** = user-registered **sinks** (read/condition) and **virtual
+  sources** (emit derived signals) on the data plane; **closed-loop** = a sink
+  that calls `invoke`.
+
+Implications / constraints:
+- **The data plane must expose a general `subscribe(sink)` + uniform emit path**
+  (not a chart-only consumer) so scripts hook the same door. *(Honoured in the
+  Phase-0 data-plane build.)*
+- **Thread-safety:** user callbacks are delivered on the engine's drain thread,
+  never the acquisition thread.
+- **Security:** arbitrary Python = RCE. Local scripting is fine (it's the user's
+  machine, like Jupyter); **remote** scripting must be gated by a `script` /
+  `configure` permission and is off by default. Closed-loop actuation needs the
+  `command` permission.
+- **Persistence:** middleware scripts can later be saved with the project /
+  workspace so they re-run.
+
+Lands after the data plane + a viewer exist (roughly Phase 1–2), but the data
+plane is being shaped now so it slots straight in.
+
 ## Explicitly deferred (designed, not built yet)
 
 Control · multi-station · waveform/video planes · web viewer · auth · WebDAV ·

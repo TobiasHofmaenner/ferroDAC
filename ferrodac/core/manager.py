@@ -77,6 +77,7 @@ class SourceManager(QObject):
         self,
         drivers: Sequence[type[Source]],
         scan_interval: float = 2.0,
+        engine=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -84,6 +85,7 @@ class SourceManager(QObject):
         self._available: dict[str, Source] = {}
         self._active: dict[str, Source] = {}
         self._workers: list[_OpWorker] = []
+        self._engine = engine
 
         self._scan = _DiscoveryWorker(self._discoverable, scan_interval)
         self._scan.found.connect(self._merge_found)
@@ -98,9 +100,13 @@ class SourceManager(QObject):
         self._scan.wait(3000)
         for s in list(self._active.values()):
             try:
+                if self._engine is not None:
+                    self._engine.stop_source(s)
                 s.disconnect()
             except Exception:
                 pass
+        for w in list(self._workers):
+            w.wait(2000)
 
     # -- discovery merge -----------------------------------------------------
     def _merge_found(self, found: list) -> None:
@@ -134,7 +140,13 @@ class SourceManager(QObject):
             source.mark_connecting()
         self.available_changed.emit()
         self.active_changed.emit()
-        self._run_async(source.connect, on_finished=self.active_changed.emit)
+
+        def _connect_and_stream():
+            source.connect()
+            if self._engine is not None:
+                self._engine.start_source(source)   # begin pushing readings
+
+        self._run_async(_connect_and_stream, on_finished=self.active_changed.emit)
 
     def remove(self, instance_id: str) -> None:
         """Disconnect an active source; it will reappear on the next scan."""
@@ -142,7 +154,13 @@ class SourceManager(QObject):
         if source is None:
             return
         self.active_changed.emit()
-        self._run_async(source.disconnect)
+
+        def _stop_and_disconnect():
+            if self._engine is not None:
+                self._engine.stop_source(source)    # stop streaming first
+            source.disconnect()
+
+        self._run_async(_stop_and_disconnect)
 
     # -- configuration / controls -------------------------------------------
     def invoke(self, instance_id: str, control_id: str, value=None) -> None:

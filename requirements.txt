@@ -1,5 +1,6 @@
-# v1 (source management) runtime deps.
+# runtime deps.
 PySide6>=6.6
 qtpy>=2.4
+pyqtgraph>=0.13
 # Used by real device drivers (TPG-256A, Modbus) as they land:
 pyserial>=3.5

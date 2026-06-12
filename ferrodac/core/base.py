@@ -8,9 +8,12 @@ implement ``_connect`` / ``_disconnect`` (and ``_invoke`` if it has controls).
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import replace
 from typing import Optional, Sequence
 
+from .reading import Reading
 from .source import (
     Channel,
     Control,
@@ -58,6 +61,11 @@ class BaseSource(Source):
         }
         # currently configured sample rate
         self._rate_hz = rate.default_hz if rate else None
+
+        # streaming state (data plane)
+        self._streaming = False
+        self._thread: Optional[threading.Thread] = None
+        self._emit = None
 
     # -- identity / description ----------------------------------------------
     @property
@@ -119,10 +127,50 @@ class BaseSource(Source):
             raise
 
     def disconnect(self) -> None:
+        self.stop()
         try:
             self._disconnect()
         finally:
             self._status = Status.DISCONNECTED
+
+    # -- data plane (push) ----------------------------------------------------
+    def start(self, emit) -> None:
+        if self._streaming:
+            return
+        self._emit = emit
+        self._streaming = True
+        self._thread = threading.Thread(
+            target=self._poll_loop, name=f"poll-{self._instance_id}", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._streaming = False
+        thread, self._thread = self._thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._emit = None
+
+    def _poll_loop(self) -> None:
+        """The single acquisition loop. Reads every channel each tick at the
+        configured rate and pushes a Reading per channel."""
+        while self._streaming:
+            cycle = time.monotonic()
+            now = time.time()
+            emit = self._emit
+            for ch in self._channels:
+                try:
+                    value, status = self._read(ch)
+                except Exception:
+                    value, status = float("nan"), 1
+                if emit is not None:
+                    emit(Reading(self._instance_id, ch.id, now, value, status))
+            interval = 1.0 / (self._rate_hz or 1.0)
+            remaining = interval - (time.monotonic() - cycle)
+            while self._streaming and remaining > 0:
+                chunk = min(remaining, 0.05)
+                time.sleep(chunk)
+                remaining -= chunk
 
     # -- control / configuration ---------------------------------------------
     def invoke(self, control_id: str, value=None) -> None:
@@ -179,3 +227,7 @@ class BaseSource(Source):
     def _invoke(self, control: Control, value) -> None:
         """Send the control to the hardware. Default no-op (store-only).
         Real drivers override to talk to the device."""
+
+    def _read(self, channel: Channel):
+        """Read one channel: return ``(value, status)``. Override in drivers."""
+        raise NotImplementedError(f"{self.driver} has no _read()")
