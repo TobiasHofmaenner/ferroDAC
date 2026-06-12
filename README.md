@@ -15,10 +15,32 @@ extensible platform.
 
 ## Status
 
-Design phase. This repo currently contains the **north-star design only**:
+**v0.1 — source-management MVP.** The first vertical slice of Phase 0: the
+`Source` contract, a module-based driver registry, background discovery, and a
+minimal Qt UI to add/remove sources (no plotting, no server yet). Two fake
+discoverable sources prove the loop end-to-end with no hardware.
+
+```bash
+pip install -r requirements.txt
+python -m ferrodac
+```
+
+Design docs:
 
 - [docs/DESIGN.md](docs/DESIGN.md) — the full architecture (the ideal we aim at).
 - [docs/ROADMAP.md](docs/ROADMAP.md) — phasing, MVP scope, and open decisions.
+
+### Layout
+
+```
+ferrodac/
+  core/source.py     the Source contract (descriptor + ABC) — the deliverable
+  core/base.py       BaseSource convenience base (status state-machine)
+  core/registry.py   loads source modules, collects Source subclasses
+  core/manager.py    background discovery + available/active state
+  sources/fake.py    hardware-free example sources
+  ui/app.py          minimal source-management UI (nested source/channel cards)
+```
 
 ## Guiding principles (short version)
 
