@@ -1,8 +1,13 @@
-"""Minimal v1 UI: a source-management view with nested source/channel cards.
+"""ferroDAC UI — an IDE-style dockable shell.
 
-Left column = available (discovered) sources you can add; right column = active
-(connected) sources, each showing its channels as sub-cards. No plotting, no
-data plane yet — cards show identity + status; values are placeholders.
+Layout:
+  - central : the live **charts** (the dashboard).
+  - left dock "Sources" : device management (add/remove/configure). Hidden by
+    default; opened via the toolbar button or the View menu.
+  - right dock "Channels" : one card per channel of every active device, with a
+    per-channel **plot** toggle that routes it to (or out of) the chart.
+
+Docks are movable/floatable/closable; the View menu toggles them.
 """
 
 from __future__ import annotations
@@ -10,13 +15,14 @@ from __future__ import annotations
 from .. import __version__
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QColor, QPalette
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDockWidget,
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
@@ -26,7 +32,6 @@ from qtpy.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -40,7 +45,8 @@ from ..core.source import ControlKind, RateMode, SourceDescriptor, Status
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
 
-CHANNEL_COLORS = ["#4fc3f7", "#ff8a65", "#81c784", "#ba68c8", "#ffd54f", "#e57373"]
+CHANNEL_COLORS = ["#4fc3f7", "#ff8a65", "#81c784", "#ba68c8", "#ffd54f", "#e57373",
+                  "#64b5f6", "#a1887f", "#4db6ac", "#f06292"]
 
 STATUS_COLORS = {
     Status.DISCOVERED: "#7f8a99",
@@ -49,6 +55,15 @@ STATUS_COLORS = {
     Status.ERROR: "#ff6b6b",
     Status.DISCONNECTED: "#7f8a99",
 }
+
+# Stable colour per channel key so a channel card and its plot curve always match.
+_COLOR_MAP: dict[str, str] = {}
+
+
+def _color_for(key: str) -> str:
+    if key not in _COLOR_MAP:
+        _COLOR_MAP[key] = CHANNEL_COLORS[len(_COLOR_MAP) % len(CHANNEL_COLORS)]
+    return _COLOR_MAP[key]
 
 
 def _fmt(value, unit: str = "") -> str:
@@ -69,70 +84,72 @@ def _clear(layout) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Cards
+#  Channel card (right dock) — live value + plot routing toggle
 # --------------------------------------------------------------------------- #
 class ChannelCard(QFrame):
-    def __init__(self, channel, color: str, parent=None):
+    plot_toggled = Signal(str, bool)   # (channel key, on)
+
+    def __init__(self, key: str, channel, device_name: str, color: str,
+                 plot_on: bool = True, parent=None):
         super().__init__(parent)
+        self.key = key
         self.unit = channel.unit or ""
         self.setObjectName("ChannelCard")
         self.setStyleSheet(
-            "#ChannelCard { background:#1c2230; border:1px solid #2a3340;"
-            " border-radius:7px; }"
+            "#ChannelCard { background:#171c26; border:1px solid #232a38;"
+            " border-radius:8px; }"
         )
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
-        lay.setSpacing(1)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(2)
 
         top = QHBoxLayout()
         top.setSpacing(6)
         swatch = QLabel()
-        swatch.setFixedSize(9, 9)
-        swatch.setStyleSheet(f"background:{color}; border-radius:4px;")
+        swatch.setFixedSize(10, 10)
+        swatch.setStyleSheet(f"background:{color}; border-radius:5px;")
         name = QLabel(channel.name)
-        name.setStyleSheet("font-weight:600;")
+        name.setStyleSheet("font-weight:700;")
+        self.plot_check = QCheckBox("plot")
+        self.plot_check.setChecked(plot_on)
+        self.plot_check.setToolTip("Route this channel to the chart")
+        self.plot_check.toggled.connect(lambda on: self.plot_toggled.emit(self.key, on))
         top.addWidget(swatch)
         top.addWidget(name)
         top.addStretch(1)
+        top.addWidget(self.plot_check)
         lay.addLayout(top)
 
         self.value_label = QLabel("—")
         self.value_label.setStyleSheet(
-            f"color:{color}; font-family:monospace; font-size:14px;"
+            f"color:{color}; font-family:monospace; font-size:15px;"
         )
         lay.addWidget(self.value_label)
 
-        unit = QLabel(self.unit)
-        unit.setStyleSheet("color:#7f8a99; font-size:10px;")
-        lay.addWidget(unit)
+        sub = QLabel(f"{device_name}  ·  {self.unit}".rstrip(" ·"))
+        sub.setStyleSheet("color:#7f8a99; font-size:10px;")
+        lay.addWidget(sub)
 
     def set_value(self, text: str) -> None:
         self.value_label.setText(text)
 
 
-class SourceCard(QFrame):
-    """Renders a SourceDescriptor. `active=False` shows an Add button; `active=True`
-    shows status, the primary value, nested channel cards, and a Remove button."""
-
+# --------------------------------------------------------------------------- #
+#  Device card (left dock) — identity + status, no values
+# --------------------------------------------------------------------------- #
+class DeviceCard(QFrame):
     def __init__(self, desc: SourceDescriptor, active: bool, on_action,
                  on_configure=None, parent=None):
         super().__init__(parent)
-        self.instance_id = desc.instance_id
-        self._channel_cards: dict = {}
-        self._primary_label = None
-        self._primary_id = None
-        self._primary_name = ""
-        self._primary_unit = ""
-        self.setObjectName("SourceCard")
+        self.setObjectName("DeviceCard")
         self.setStyleSheet(
-            "#SourceCard { background:#171c26; border:1px solid #232a38;"
+            "#DeviceCard { background:#171c26; border:1px solid #232a38;"
             " border-radius:10px; }"
         )
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(6)
+        lay.setSpacing(5)
 
-        # -- header --
         header = QHBoxLayout()
         header.setSpacing(8)
         dot = QLabel("●")
@@ -145,19 +162,16 @@ class SourceCard(QFrame):
         header.addWidget(title)
         header.addWidget(sub)
         header.addStretch(1)
-
         if active and on_configure is not None and desc.controls:
             cfg = QPushButton("Configure…")
             cfg.clicked.connect(lambda: on_configure(desc.instance_id))
             header.addWidget(cfg)
-
         btn = QPushButton("Add" if not active else "Remove")
         btn.setFixedWidth(84)
         btn.clicked.connect(lambda: on_action(desc.instance_id))
         header.addWidget(btn)
         lay.addLayout(header)
 
-        # -- status / provenance line --
         bits = [desc.status.value]
         if desc.firmware:
             bits.append(f"fw {desc.firmware}")
@@ -165,61 +179,12 @@ class SourceCard(QFrame):
             bits.append(desc.hardware_id)
         if desc.last_error:
             bits.append(f"⚠ {desc.last_error}")
+        n = len(desc.channels)
+        if n:
+            bits.append(f"{n} channel{'s' if n != 1 else ''}")
         info = QLabel("   ·   ".join(bits))
         info.setStyleSheet("color:#8b95a4; font-size:11px;")
         lay.addWidget(info)
-
-        # -- primary value (featured) --
-        primary = desc.primary
-        if primary is not None:
-            pcolor = CHANNEL_COLORS[
-                self._channel_index(desc, primary.id) % len(CHANNEL_COLORS)
-            ]
-            self._primary_id = primary.id
-            self._primary_name = primary.name
-            self._primary_unit = primary.unit
-            pv = QLabel(f"{primary.name}:  —")
-            pv.setStyleSheet(f"color:{pcolor}; font-family:monospace; font-size:15px;")
-            self._primary_label = pv
-            lay.addWidget(pv)
-
-        # -- channel sub-cards (active cards only) --
-        if active and desc.channels:
-            grid_host = QWidget()
-            grid = QGridLayout(grid_host)
-            grid.setContentsMargins(0, 4, 0, 0)
-            grid.setSpacing(6)
-            for i, ch in enumerate(desc.channels):
-                color = CHANNEL_COLORS[i % len(CHANNEL_COLORS)]
-                card = ChannelCard(ch, color)
-                self._channel_cards[ch.id] = card
-                grid.addWidget(card, i // 3, i % 3)
-            lay.addWidget(grid_host)
-        elif not active and desc.channels:
-            n = len(desc.channels)
-            chl = QLabel(f"{n} channel{'s' if n != 1 else ''}")
-            chl.setStyleSheet("color:#7f8a99; font-size:11px;")
-            lay.addWidget(chl)
-
-    def apply_latest(self, latest: dict) -> None:
-        """Update live values from the engine's latest-reading cache (push sink)."""
-        for chid, card in self._channel_cards.items():
-            r = latest.get(f"{self.instance_id}/{chid}")
-            if r is not None:
-                card.set_value(_fmt(r.value, card.unit))
-        if self._primary_label is not None and self._primary_id is not None:
-            r = latest.get(f"{self.instance_id}/{self._primary_id}")
-            if r is not None:
-                self._primary_label.setText(
-                    f"{self._primary_name}:  {_fmt(r.value, self._primary_unit)}"
-                )
-
-    @staticmethod
-    def _channel_index(desc: SourceDescriptor, channel_id: str) -> int:
-        for i, ch in enumerate(desc.channels):
-            if ch.id == channel_id:
-                return i
-        return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -252,7 +217,6 @@ class ConfigDialog(QDialog):
         title.setStyleSheet("font-size:15px; font-weight:700;")
         root.addWidget(title)
 
-        # editable display name
         name_row = QHBoxLayout()
         name_row.addWidget(QLabel("Name"))
         self._name_edit = QLineEdit(desc.name if desc else "")
@@ -265,10 +229,8 @@ class ConfigDialog(QDialog):
         )
         name_row.addWidget(rn)
         root.addLayout(name_row)
-
         root.addWidget(self._info)
 
-        # sampling rate (only when the driver says it's settable)
         if desc and desc.rate and desc.rate.mode == RateMode.SETTABLE:
             srow = QHBoxLayout()
             srow.addWidget(QLabel("Sample rate"))
@@ -285,7 +247,6 @@ class ConfigDialog(QDialog):
             srow.addStretch(1)
             root.addLayout(srow)
 
-        # controls form (generated)
         if desc and desc.controls:
             hdr = QLabel("Controls")
             hdr.setStyleSheet("font-weight:700; margin-top:2px;")
@@ -313,7 +274,6 @@ class ConfigDialog(QDialog):
         close.clicked.connect(self.close)
         btnrow.addWidget(close)
         root.addLayout(btnrow)
-
         self._update_info(desc)
 
     def _control_widget(self, c) -> QWidget:
@@ -339,7 +299,6 @@ class ConfigDialog(QDialog):
             )
             self._control_widgets[c.id] = combo
             return combo
-        # SETPOINT
         unit = c.params[0].unit if c.params else ""
         edit = QLineEdit("" if c.value is None else f"{c.value:g}")
         edit.setFixedWidth(110)
@@ -417,17 +376,9 @@ class ConfigDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- #
-#  Live chart — a data-plane SINK (subscribes to the engine)
+#  Live chart — a data-plane SINK; plots only *routed* channels
 # --------------------------------------------------------------------------- #
 class ChartPanel(QWidget):
-    """A live plot fed by pushed Readings. Registers itself as an engine sink;
-    appends to per-channel buffers and redraws — repaint is decoupled from the
-    sample rate (this is just another sink, same as a CSV/network sink would be).
-
-    NB: v1 plots every channel on one shared log axis to prove the stream;
-    per-unit / per-axis assignment is the Workspace feature (later).
-    """
-
     def __init__(self, engine: Engine, parent=None):
         super().__init__(parent)
         self.engine = engine
@@ -446,15 +397,14 @@ class ChartPanel(QWidget):
 
         self._curves: dict = {}
         self._buf: dict = {}
-        self._allowed: set = set()           # source ids currently active
+        self._routed: set = set()    # channel keys allowed on the chart
         self._t0 = None
-        self._color_idx = 0
         engine.subscribe(self._feed)
 
-    def _feed(self, batch: list) -> None:    # called on the GUI thread (engine drain)
+    def _feed(self, batch: list) -> None:    # GUI thread (engine drain)
         for r in batch:
-            if r.source not in self._allowed:
-                continue                     # ignore late readings from removed sources
+            if r.key not in self._routed:
+                continue
             if self._t0 is None:
                 self._t0 = r.t
             xs, ys = self._buf.setdefault(r.key, ([], []))
@@ -463,23 +413,165 @@ class ChartPanel(QWidget):
             ys.append(r.value if ok else float("nan"))
             curve = self._curves.get(r.key)
             if curve is None:
-                color = CHANNEL_COLORS[self._color_idx % len(CHANNEL_COLORS)]
-                self._color_idx += 1
-                curve = self.plot.plot([], [], pen=pg.mkPen(color, width=2), name=r.key)
+                curve = self.plot.plot(
+                    [], [], pen=pg.mkPen(_color_for(r.key), width=2), name=r.key
+                )
                 self._curves[r.key] = curve
             curve.setData(xs, ys, connect="finite")
 
-    def prune(self, active_ids: set) -> None:
-        """Set the authoritative active-source set and drop stale curves."""
-        self._allowed = set(active_ids)
+    def set_routed(self, keys: set) -> None:
+        """Authoritative set of channel keys to plot; drops the rest."""
+        self._routed = set(keys)
         for key in list(self._curves):
-            if key.split("/", 1)[0] not in self._allowed:
+            if key not in self._routed:
                 self.plot.removeItem(self._curves.pop(key))
                 self._buf.pop(key, None)
 
 
 # --------------------------------------------------------------------------- #
-#  Main window
+#  Sources panel (left dock) — device management
+# --------------------------------------------------------------------------- #
+class SourcesPanel(QWidget):
+    def __init__(self, manager: SourceManager, on_configure, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.on_configure = on_configure
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self._avail_label, avail_scroll, self._avail_layout = self._section("Available")
+        self._active_label, active_scroll, self._active_layout = self._section("Active")
+        root.addWidget(self._avail_label)
+        root.addWidget(avail_scroll, 1)
+        root.addWidget(self._active_label)
+        root.addWidget(active_scroll, 2)
+
+        manager.available_changed.connect(self._rebuild_available)
+        manager.active_changed.connect(self._rebuild_active)
+        self._rebuild_available()
+        self._rebuild_active()
+
+    def _section(self, title):
+        label = QLabel(title)
+        label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        host = QWidget()
+        v = QVBoxLayout(host)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        v.addStretch(1)
+        scroll.setWidget(host)
+        return label, scroll, v
+
+    def _rebuild_available(self):
+        descs = self.manager.available_descriptors()
+        self._fill(self._avail_layout, descs, active=False)
+        self._avail_label.setText(f"Available  ({len(descs)})")
+
+    def _rebuild_active(self):
+        descs = self.manager.active_descriptors()
+        self._fill(self._active_layout, descs, active=True)
+        self._active_label.setText(f"Active  ({len(descs)})")
+
+    def _fill(self, layout, descs, active):
+        _clear(layout)
+        on_action = self.manager.remove if active else self.manager.add
+        for desc in sorted(descs, key=lambda d: d.name):
+            layout.addWidget(
+                DeviceCard(desc, active, on_action,
+                           self.on_configure if active else None)
+            )
+        layout.addStretch(1)
+
+
+# --------------------------------------------------------------------------- #
+#  Channels panel (right dock) — auto-populated; routes to the chart
+# --------------------------------------------------------------------------- #
+class ChannelsPanel(QWidget):
+    def __init__(self, manager: SourceManager, chart: ChartPanel, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.chart = chart
+        self._cards: dict[str, ChannelCard] = {}
+        self._routed_state: dict[str, bool] = {}   # persists across rebuilds
+        self._current_keys: list[str] = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self._label = QLabel("Channels")
+        self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
+        root.addWidget(self._label)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        host = QWidget()
+        self._layout = QVBoxLayout(host)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(6)
+        self._placeholder = QLabel(
+            "No active sources yet.\nOpen Sources (toolbar / View menu) to add a device."
+        )
+        self._placeholder.setStyleSheet("color:#7f8a99;")
+        self._placeholder.setWordWrap(True)
+        self._layout.addWidget(self._placeholder)
+        self._layout.addStretch(1)
+        scroll.setWidget(host)
+        root.addWidget(scroll, 1)
+
+        manager.active_changed.connect(self._on_active_changed)
+
+    def _channel_list(self):
+        out = []
+        for d in self.manager.active_descriptors():
+            for ch in d.channels:
+                out.append((f"{d.instance_id}/{ch.id}", ch, d.name))
+        return out
+
+    def _on_active_changed(self):
+        items = self._channel_list()
+        keys = [k for k, _, _ in items]
+        if keys != self._current_keys:    # only rebuild when the channel set changes
+            self._rebuild(items)
+            self._current_keys = keys
+        self._recompute_routed()
+
+    def _rebuild(self, items):
+        _clear(self._layout)
+        self._cards = {}
+        if not items:
+            self._layout.addWidget(self._placeholder)
+            self._placeholder.setVisible(True)
+        for key, ch, dev in items:
+            color = _color_for(key)
+            on = self._routed_state.get(key, True)
+            card = ChannelCard(key, ch, dev, color, plot_on=on)
+            card.plot_toggled.connect(self._on_plot_toggled)
+            self._cards[key] = card
+            self._layout.addWidget(card)
+        self._layout.addStretch(1)
+        self._label.setText(f"Channels  ({len(items)})")
+
+    def _on_plot_toggled(self, key: str, on: bool):
+        self._routed_state[key] = on
+        self._recompute_routed()
+
+    def _recompute_routed(self):
+        routed = {k for k in self._cards if self._routed_state.get(k, True)}
+        self.chart.set_routed(routed)
+
+    def update_live(self, latest: dict):
+        for key, card in self._cards.items():
+            r = latest.get(key)
+            if r is not None:
+                card.set_value(_fmt(r.value, card.unit))
+
+
+# --------------------------------------------------------------------------- #
+#  Main window — dockable shell
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
     def __init__(self, manager: SourceManager, engine: Engine, parent=None):
@@ -487,100 +579,42 @@ class MainWindow(QMainWindow):
         self.manager = manager
         self.engine = engine
         self.setWindowTitle("ferroDAC")
-        self.resize(1120, 860)
+        self.resize(1280, 820)
         self._dialogs: dict[str, ConfigDialog] = {}
-        self._active_cards: dict[str, SourceCard] = {}
 
-        self._available_box = self._build_column("Available sources")
-        self._active_box = self._build_column("Active sources")
+        self.chart = ChartPanel(engine)
+        self.setCentralWidget(self.chart)
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(8)
+        self.channels_panel = ChannelsPanel(manager, self.chart)
+        self.channels_dock = QDockWidget("Channels", self)
+        self.channels_dock.setObjectName("ChannelsDock")
+        self.channels_dock.setWidget(self.channels_panel)
+        self.channels_dock.setMinimumWidth(260)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.channels_dock)
 
-        head = QLabel("Source management")
-        head.setStyleSheet("font-size:16px; font-weight:700;")
-        outer.addWidget(head)
+        self.sources_panel = SourcesPanel(manager, self._open_config)
+        self.sources_dock = QDockWidget("Sources", self)
+        self.sources_dock.setObjectName("SourcesDock")
+        self.sources_dock.setWidget(self.sources_panel)
+        self.sources_dock.setMinimumWidth(280)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.sources_dock)
+        self.sources_dock.setVisible(False)   # separate; opened via the Sources button
 
-        cols_host = QWidget()
-        cols = QHBoxLayout(cols_host)
-        cols.setContentsMargins(0, 0, 0, 0)
-        cols.setSpacing(12)
-        cols.addWidget(self._available_box["frame"], 1)
-        cols.addWidget(self._active_box["frame"], 1)
+        view = self.menuBar().addMenu("&View")
+        view.addAction(self.sources_dock.toggleViewAction())
+        view.addAction(self.channels_dock.toggleViewAction())
+        toolbar = self.addToolBar("Main")
+        toolbar.setMovable(False)
+        toolbar.addAction(self.sources_dock.toggleViewAction())
 
-        self.chart = ChartPanel(self.engine)
-        split = QSplitter(Qt.Vertical)
-        split.addWidget(cols_host)
-        split.addWidget(self.chart)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        split.setSizes([320, 480])
-        outer.addWidget(split, 1)
-
-        self.manager.available_changed.connect(self._rebuild_available)
-        self.manager.active_changed.connect(self._on_active_changed)
-        self.engine.tick.connect(self._update_live)
-        self.statusBar().showMessage("Scanning for sources…")
-        self._rebuild_available()
-        self._rebuild_active()
+        self.engine.tick.connect(self._on_tick)
+        self.statusBar().showMessage(
+            "Scanning for sources…  ·  open “Sources” to add a device"
+        )
         self.manager.start()
 
-    def _build_column(self, title: str) -> dict:
-        frame = QFrame()
-        v = QVBoxLayout(frame)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(6)
-        lbl = QLabel(title)
-        lbl.setStyleSheet("font-size:13px; font-weight:700; color:#c7d0db;")
-        v.addWidget(lbl)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        host = QWidget()
-        cards = QVBoxLayout(host)
-        cards.setContentsMargins(0, 0, 0, 0)
-        cards.setSpacing(8)
-        cards.addStretch(1)
-        scroll.setWidget(host)
-        v.addWidget(scroll, 1)
-        return {"frame": frame, "layout": cards, "label": lbl, "title": title}
-
-    def _rebuild_available(self) -> None:
-        self._rebuild(self._available_box, self.manager.available_descriptors(),
-                      active=False, on_action=self.manager.add)
-
-    def _rebuild_active(self) -> None:
-        self._rebuild(self._active_box, self.manager.active_descriptors(),
-                      active=True, on_action=self.manager.remove,
-                      on_configure=self._open_config)
-
-    def _rebuild(self, box: dict, descriptors, active: bool, on_action,
-                 on_configure=None) -> None:
-        layout = box["layout"]
-        _clear(layout)
-        if active:
-            self._active_cards = {}
-        for desc in sorted(descriptors, key=lambda d: d.name):
-            card = SourceCard(desc, active, on_action, on_configure)
-            if active:
-                self._active_cards[desc.instance_id] = card
-            layout.addWidget(card)
-        layout.addStretch(1)
-        box["label"].setText(f"{box['title']}  ({len(descriptors)})")
-
-    def _on_active_changed(self) -> None:
-        self._rebuild_active()
-        active_ids = {d.instance_id for d in self.manager.active_descriptors()}
-        self.chart.prune(active_ids)
-
-    def _update_live(self) -> None:
-        latest = self.engine.latest()
-        for card in self._active_cards.values():
-            card.apply_latest(latest)
+    def _on_tick(self):
+        self.channels_panel.update_live(self.engine.latest())
 
     def _open_config(self, instance_id: str) -> None:
         dlg = self._dialogs.get(instance_id)
@@ -594,14 +628,14 @@ class MainWindow(QMainWindow):
         self._dialogs[instance_id] = dlg
         dlg.show()
 
-    def closeEvent(self, event):  # noqa: N802 (Qt signature)
+    def closeEvent(self, event):  # noqa: N802
         self.manager.stop()
         self.engine.shutdown()
         super().closeEvent(event)
 
 
 # --------------------------------------------------------------------------- #
-#  Bootstrap
+#  Bootstrap / theming
 # --------------------------------------------------------------------------- #
 def apply_dark_theme(app: QApplication) -> None:
     app.setStyle("Fusion")
@@ -630,6 +664,9 @@ def apply_dark_theme(app: QApplication) -> None:
             border-radius:7px; padding:5px 10px; }
         QPushButton:hover:enabled { background:#2b3850; }
         QStatusBar { color:#8b95a4; }
+        QDockWidget { titlebar-close-icon: none; }
+        QDockWidget::title { background:#171c26; padding:5px 8px; font-weight:700; }
+        QToolBar { background:#11151c; border:none; spacing:6px; padding:4px; }
         """
     )
 

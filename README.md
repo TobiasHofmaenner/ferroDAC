@@ -15,11 +15,14 @@ extensible platform.
 
 ## Status
 
-**v0.2 — Phase 0 core.** The `Source` contract + driver registry + background
-discovery + source-management UI, a generated **configuration UI** (see/edit a
-device's declared controls), and the **data plane**: sources push `Reading`s, an
-`Engine` fans them out to sinks, and live values stream to the cards and a chart.
-Two fake discoverable sources prove it end-to-end with no hardware.
+**v0.3 — Phase 0 core, IDE-style shell.** The `Source` contract + driver
+registry + background discovery, a generated **configuration UI**, the **data
+plane** (sources push `Reading`s → an `Engine` fans them out to sinks), and a
+**dockable IDE-style UI**: a left **Sources** dock (device management, opened via
+a toolbar button / View menu), a central **chart**, and a right **Channels** dock
+that auto-lists every channel of every active device with a per-channel *plot*
+toggle that routes it to the chart. Two fake discoverable sources prove it
+end-to-end with no hardware.
 
 ```bash
 pip install -r requirements.txt
