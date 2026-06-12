@@ -15,14 +15,20 @@ extensible platform.
 
 ## Status
 
-**v0.3 — Phase 0 core, IDE-style shell.** The `Source` contract + driver
-registry + background discovery, a generated **configuration UI**, the **data
-plane** (sources push `Reading`s → an `Engine` fans them out to sinks), and a
-**dockable IDE-style UI**: a left **Sources** dock (device management, opened via
-a toolbar button / View menu), a central **chart**, and a right **Channels** dock
-that auto-lists every channel of every active device with a per-channel *plot*
-toggle that routes it to the chart. Two fake discoverable sources prove it
-end-to-end with no hardware.
+**v0.4 — configurable dashboard.** The `Source` contract + driver registry +
+discovery, a generated **configuration UI**, the **data plane** (sources push
+`Reading`s → an `Engine` fans them out to sinks), and an **IDE-style dockable
+shell** whose central area is a **workspace of panels** you add yourself:
+
+- **Add** menu creates **Chart** and **7-seg display** panels; each is a dock you
+  drag/resize/tile. An **Edit layout** toggle locks panels and hides their title
+  bars for clean interaction (chart zoom/pan always works).
+- The right **Channels** dock lists every channel; each card has a **Route ▾**
+  dropdown selecting which panel(s) it feeds (a channel can feed several).
+- The left **Sources** dock (device management) is hidden by default; opened via
+  the toolbar / View menu.
+
+Two fake discoverable sources prove it end-to-end with no hardware.
 
 ```bash
 pip install -r requirements.txt
