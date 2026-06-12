@@ -11,8 +11,8 @@ from __future__ import annotations
 from .. import __version__
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import Qt
-from qtpy.QtGui import QColor, QImage, QPalette
+from qtpy.QtCore import QRect, Qt, QTimer, Signal
+from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,15 +20,19 @@ from qtpy.QtWidgets import (
     QDialog,
     QDockWidget,
     QDoubleSpinBox,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -38,6 +42,8 @@ from ..core.engine import Engine
 from ..core.manager import DeviceManager
 from ..core.registry import load_builtin_drivers
 from ..core.device import DeviceDescriptor, RateMode, SinkKind
+from ..vision.detector import FAIL_LABELS, PARSE_LABELS, WHITELIST_PRESETS, Detector
+from ..vision.ocr import have_ocr, ocr_backend, preprocess, qimage_to_rgb
 from ._common import STATUS_COLORS, clear_layout, color_for, fmt
 from .panels import PANEL_TYPES
 from .workspace import Dashboard, WorkspaceArea
@@ -114,6 +120,10 @@ class SourceCard(QFrame):
                 self.value_label.setText(f"▷ {value.width()}×{value.height()}")
             else:
                 self.value_label.setText("▷ live")
+        elif self.dtype == "string":
+            self.value_label.setText(str(value) if value not in (None, "") else "—")
+        elif isinstance(value, bool):
+            self.value_label.setText("on" if value else "off")
         else:
             self.value_label.setText(fmt(value, self.unit))
 
@@ -451,12 +461,6 @@ class SourcesPanel(QWidget):
         self._layout = QVBoxLayout(host)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(6)
-        self._placeholder = QLabel(
-            "No sources yet.\nAdd a device (Devices) or an input (Add menu)."
-        )
-        self._placeholder.setStyleSheet("color:#7f8a99;")
-        self._placeholder.setWordWrap(True)
-        self._layout.addWidget(self._placeholder)
         self._layout.addStretch(1)
         scroll.setWidget(host)
         root.addWidget(scroll, 1)
@@ -469,8 +473,10 @@ class SourcesPanel(QWidget):
         self._cards = {}
         ports = self.dashboard.source_ports()
         if not ports:
-            self._layout.addWidget(self._placeholder)
-            self._placeholder.setVisible(True)
+            ph = QLabel("No sources yet.\nAdd a device (Devices) or an input (Add menu).")
+            ph.setStyleSheet("color:#7f8a99;")
+            ph.setWordWrap(True)
+            self._layout.addWidget(ph)
         for port in ports:
             card = SourceCard(
                 port, color_for(port.key),
@@ -494,7 +500,7 @@ class SourcesPanel(QWidget):
 #  Sinks panel (right dock) — data consumers (device controls + displays)
 # --------------------------------------------------------------------------- #
 class SinkCard(QFrame):
-    def __init__(self, port, value_text, bound, color, parent=None):
+    def __init__(self, port, value_text, bound, color, on_cv=None, parent=None):
         super().__init__(parent)
         self.setObjectName("SinkCardItem")
         self.setStyleSheet(
@@ -514,6 +520,11 @@ class SinkCard(QFrame):
         top.addWidget(swatch)
         top.addWidget(name)
         top.addStretch(1)
+        if on_cv is not None:
+            det = QToolButton()
+            det.setText("◎ Detections…")
+            det.clicked.connect(on_cv)
+            top.addWidget(det)
         lay.addLayout(top)
 
         self.value_label = QLabel(value_text)
@@ -535,10 +546,12 @@ class SinkCard(QFrame):
 
 
 class SinksPanel(QWidget):
-    def __init__(self, manager: DeviceManager, dashboard: Dashboard, parent=None):
+    def __init__(self, manager: DeviceManager, dashboard: Dashboard,
+                 on_cv=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.dashboard = dashboard
+        self._on_cv = on_cv
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -583,7 +596,12 @@ class SinksPanel(QWidget):
                 srcs = self.dashboard.sources_into(port.key)
                 value_text = f"{len(srcs)} source{'s' if len(srcs) != 1 else ''}"
                 bound = ", ".join(srcs) if srcs else None
-            card = SinkCard(port, value_text, bound, color_for("sink:" + port.key))
+            on_cv = None
+            if (port.kind == "display" and "image" in port.accepts
+                    and self._on_cv is not None):
+                on_cv = lambda _=False, k=port.key: self._on_cv(k)
+            card = SinkCard(port, value_text, bound,
+                            color_for("sink:" + port.key), on_cv=on_cv)
             self._cards[port.key] = (card, port)
             self._layout.addWidget(card)
         self._layout.addStretch(1)
@@ -593,6 +611,339 @@ class SinksPanel(QWidget):
         for card, port in self._cards.values():
             if port.kind == "device":
                 card.set_value(self._device_value(port))
+
+
+# --------------------------------------------------------------------------- #
+#  CV text-detection config — the ROI editor
+# --------------------------------------------------------------------------- #
+class _ROIEditor(QWidget):
+    """Shows a live frame; lets the user rubber-band a ROI and draws existing
+    detector regions. ROIs are kept in image-pixel coordinates."""
+
+    roi_changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._img = None
+        self._rois = []          # (label, (x,y,w,h), color, selected)
+        self._roi = None         # current committed ROI (image coords)
+        self._drag0 = self._drag1 = None
+        self.setMinimumSize(480, 340)
+
+    def set_frame(self, img):
+        self._img = img
+        self.update()
+
+    def set_rois(self, rois):
+        self._rois = rois
+        self.update()
+
+    def current_roi(self):
+        return self._roi
+
+    def set_current_roi(self, roi):
+        self._roi = roi
+        self.update()
+
+    # -- coordinate mapping --------------------------------------------------
+    def _content_rect(self) -> QRect:
+        if self._img is None or self._img.isNull():
+            return self.rect()
+        iw, ih = self._img.width(), self._img.height()
+        if iw == 0 or ih == 0:
+            return self.rect()
+        s = min(self.width() / iw, self.height() / ih)
+        w, h = int(iw * s), int(ih * s)
+        return QRect((self.width() - w) // 2, (self.height() - h) // 2, w, h)
+
+    def _to_image(self, pt):
+        cr = self._content_rect()
+        if self._img is None or cr.width() == 0 or cr.height() == 0:
+            return (0, 0)
+        iw, ih = self._img.width(), self._img.height()
+        x = (pt.x() - cr.x()) * iw / cr.width()
+        y = (pt.y() - cr.y()) * ih / cr.height()
+        return (max(0, min(iw, x)), max(0, min(ih, y)))
+
+    def _to_widget(self, roi) -> QRect:
+        cr = self._content_rect()
+        if self._img is None:
+            return QRect()
+        iw, ih = self._img.width(), self._img.height()
+        x, y, w, h = roi
+        sx, sy = cr.width() / iw, cr.height() / ih
+        return QRect(int(cr.x() + x * sx), int(cr.y() + y * sy),
+                     int(w * sx), int(h * sy))
+
+    # -- mouse ---------------------------------------------------------------
+    def mousePressEvent(self, e):  # noqa: N802
+        if self._img is not None and not self._img.isNull():
+            self._drag0 = self._drag1 = e.pos()
+            self.update()
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        if self._drag0 is not None:
+            self._drag1 = e.pos()
+            self.update()
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        if self._drag0 is None:
+            return
+        p0, p1 = self._to_image(self._drag0), self._to_image(e.pos())
+        x, y = int(min(p0[0], p1[0])), int(min(p0[1], p1[1]))
+        w, h = int(abs(p1[0] - p0[0])), int(abs(p1[1] - p0[1]))
+        self._drag0 = self._drag1 = None
+        if w >= 4 and h >= 4:
+            self._roi = (x, y, w, h)
+            self.roi_changed.emit()
+        self.update()
+
+    def paintEvent(self, _ev):  # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#0b0e13"))
+        if self._img is None or self._img.isNull():
+            p.setPen(QColor("#5b6b7f"))
+            p.drawText(self.rect(), Qt.AlignCenter, "waiting for camera frames…")
+            return
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(self._content_rect(), self._img)
+        for label, roi, color, selected in self._rois:
+            r = self._to_widget(roi)
+            pen = QPen(QColor(color))
+            pen.setWidth(3 if selected else 2)
+            p.setPen(pen)
+            p.drawRect(r)
+            p.fillRect(QRect(r.x(), r.y() - 16, max(36, len(label) * 8), 15),
+                       QColor(color))
+            p.setPen(QColor("#0b0e13"))
+            p.drawText(r.x() + 3, r.y() - 4, label)
+        if self._roi is not None:
+            pen = QPen(QColor("#4fc3f7"))
+            pen.setStyle(Qt.DashLine)
+            pen.setWidth(2)
+            p.setPen(pen)
+            p.drawRect(self._to_widget(self._roi))
+        if self._drag0 is not None and self._drag1 is not None:
+            pen = QPen(QColor("#ffd54f"))
+            pen.setStyle(Qt.DashLine)
+            pen.setWidth(2)
+            p.setPen(pen)
+            p.drawRect(QRect(self._drag0, self._drag1))
+
+
+class ImageConfigDialog(QDialog):
+    """Add/edit OCR text-detection sources on one image (camera) display sink."""
+
+    def __init__(self, dashboard: Dashboard, sink_key: str, parent=None):
+        super().__init__(parent)
+        self.dashboard = dashboard
+        self.sink_key = sink_key
+        sink = dashboard._sinks.get(sink_key)
+        self.panel = sink.panel if sink is not None else None
+        self.setWindowTitle(f"Text detection — {sink.name if sink else ''}")
+        self.setMinimumSize(940, 580)
+
+        root = QHBoxLayout(self)
+        left = QVBoxLayout()
+        self.editor = _ROIEditor()
+        left.addWidget(self.editor, 1)
+        hint = QLabel("Drag a box over the value to read, set the options, "
+                      "then “Add detection”.  OCR: " + ocr_backend())
+        hint.setStyleSheet("color:#8b95a4; font-size:11px;")
+        hint.setWordWrap(True)
+        left.addWidget(hint)
+        root.addLayout(left, 3)
+        root.addLayout(self._build_form(), 2)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._refresh_frame)
+        self._timer.start(150)
+        self.editor.roi_changed.connect(lambda: self._test_read())
+        self._reload_list()
+
+    # -- form ----------------------------------------------------------------
+    def _build_form(self):
+        right = QVBoxLayout()
+        form = QFormLayout()
+        self._name = QLineEdit("Reading")
+        form.addRow("Name", self._name)
+        self._type = QComboBox()
+        for val, label in PARSE_LABELS:
+            self._type.addItem(label, val)
+        self._type.currentIndexChanged.connect(self._on_type)
+        form.addRow("Type", self._type)
+        self._fail = QComboBox()
+        for val, label in FAIL_LABELS:
+            self._fail.addItem(label, val)
+        form.addRow("On failure", self._fail)
+        self._whitelist = QLineEdit(WHITELIST_PRESETS["float"])
+        form.addRow("Whitelist", self._whitelist)
+        chk = QHBoxLayout()
+        self._invert = QCheckBox("Invert")
+        self._thresh = QCheckBox("Threshold")
+        self._scale = QSpinBox()
+        self._scale.setRange(1, 6)
+        self._scale.setValue(3)
+        self._scale.setPrefix("×")
+        chk.addWidget(self._invert)
+        chk.addWidget(self._thresh)
+        chk.addWidget(QLabel("Scale"))
+        chk.addWidget(self._scale)
+        chk.addStretch(1)
+        form.addRow("Preprocess", self._wrap(chk))
+        right.addLayout(form)
+
+        # live preview
+        self._preview = QLabel("draw a box, then Test")
+        self._preview.setFixedHeight(70)
+        self._preview.setAlignment(Qt.AlignCenter)
+        self._preview.setStyleSheet("background:#0b0e13; border:1px solid #232a38;")
+        right.addWidget(self._preview)
+        self._result = QLabel("—")
+        self._result.setStyleSheet("font-family:monospace; color:#4fc3f7;")
+        right.addWidget(self._result)
+
+        row = QHBoxLayout()
+        test = QPushButton("Test read")
+        test.clicked.connect(lambda: self._test_read())
+        self._add_btn = QPushButton("Add detection")
+        self._add_btn.clicked.connect(self._add)
+        row.addWidget(test)
+        row.addWidget(self._add_btn)
+        right.addLayout(row)
+
+        lbl = QLabel("Detections")
+        lbl.setStyleSheet("font-weight:700; margin-top:6px;")
+        right.addWidget(lbl)
+        self._list = QListWidget()
+        self._list.currentRowChanged.connect(self._on_select)
+        right.addWidget(self._list, 1)
+        lrow = QHBoxLayout()
+        upd = QPushButton("Update selected")
+        upd.clicked.connect(self._update)
+        rm = QPushButton("Remove selected")
+        rm.clicked.connect(self._remove)
+        lrow.addWidget(upd)
+        lrow.addWidget(rm)
+        right.addLayout(lrow)
+        return right
+
+    @staticmethod
+    def _wrap(layout):
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # -- behaviour -----------------------------------------------------------
+    def _on_type(self):
+        preset = WHITELIST_PRESETS.get(self._type.currentData(), "")
+        self._whitelist.setText(preset)
+
+    def _refresh_frame(self):
+        if self.panel is not None:
+            self.editor.set_frame(getattr(self.panel, "_last_img", None))
+
+    def _gather(self) -> dict:
+        return dict(
+            name=self._name.text().strip() or "Reading",
+            parse_as=self._type.currentData(),
+            on_fail=self._fail.currentData(),
+            whitelist=self._whitelist.text(),
+            invert=self._invert.isChecked(),
+            threshold=self._thresh.isChecked(),
+            scale=self._scale.value(),
+        )
+
+    def _current_detector(self):
+        cfg = self._gather()
+        return Detector(id="_preview", sink_key=self.sink_key,
+                        roi=self.editor.current_roi() or (0, 0, 1, 1), **cfg)
+
+    def _test_read(self):
+        roi = self.editor.current_roi()
+        img = getattr(self.panel, "_last_img", None)
+        if roi is None or img is None or img.isNull():
+            self._result.setText("draw a box over a live frame first")
+            return
+        det = self._current_detector()
+        rgb = qimage_to_rgb(img)
+        gray = preprocess(det.crop(rgb), det.invert, det.threshold, det.scale)
+        value, text, status = det.read(rgb)
+        # show what the OCR sees
+        h, w = gray.shape
+        qimg = QImage(gray.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
+        pix = QPixmap.fromImage(qimg).scaled(
+            self._preview.width(), self._preview.height(),
+            Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._preview.setPixmap(pix)
+        self._result.setText(
+            f"“{text}”  →  {value}" + ("  (parse failed)" if status else ""))
+
+    def _add(self):
+        roi = self.editor.current_roi()
+        if roi is None:
+            self._result.setText("draw a box first")
+            return
+        cfg = self._gather()
+        self.dashboard.add_detector(self.sink_key, roi=roi, **cfg)
+        self.editor.set_current_roi(None)
+        self._reload_list()
+
+    def _on_select(self, row):
+        if row < 0 or row >= self._list.count():
+            return
+        did = self._list.item(row).data(Qt.UserRole)
+        det = self.dashboard.detector(did)
+        if det is None:
+            return
+        self._name.setText(det.name)
+        self._type.setCurrentIndex(max(0, self._type.findData(det.parse_as)))
+        self._fail.setCurrentIndex(max(0, self._fail.findData(det.on_fail)))
+        self._whitelist.setText(det.whitelist)
+        self._invert.setChecked(det.invert)
+        self._thresh.setChecked(det.threshold)
+        self._scale.setValue(det.scale)
+        self.editor.set_current_roi(det.roi)
+        self._reload_list()
+
+    def _update(self):
+        row = self._list.currentRow()
+        if row < 0:
+            return
+        did = self._list.item(row).data(Qt.UserRole)
+        cfg = self._gather()
+        roi = self.editor.current_roi()
+        if roi is not None:
+            cfg["roi"] = roi
+        self.dashboard.update_detector(did, **cfg)
+        self._reload_list()
+
+    def _remove(self):
+        row = self._list.currentRow()
+        if row < 0:
+            return
+        did = self._list.item(row).data(Qt.UserRole)
+        self.dashboard.remove_detector(did)
+        self.editor.set_current_roi(None)
+        self._reload_list()
+
+    def _reload_list(self):
+        dets = self.dashboard.detectors_for(self.sink_key)
+        cur = self._list.currentRow()
+        self._list.blockSignals(True)
+        self._list.clear()
+        rois = []
+        for i, det in enumerate(dets):
+            item = QListWidgetItem(f"{det.name}  ·  {det.parse_as}")
+            item.setData(Qt.UserRole, det.id)
+            self._list.addItem(item)
+            rois.append((det.name, det.roi, color_for(f"cv/{det.id}"), i == cur))
+        self._list.blockSignals(False)
+        self.editor.set_rois(rois)
+
+    def closeEvent(self, event):  # noqa: N802
+        self._timer.stop()
+        super().closeEvent(event)
 
 
 # --------------------------------------------------------------------------- #
@@ -606,6 +957,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ferroDAC")
         self.resize(1320, 840)
         self._dialogs: dict[str, ConfigDialog] = {}
+        self._cv_dialogs: dict[str, ImageConfigDialog] = {}
 
         self.workspace = WorkspaceArea()
         self.setCentralWidget(self.workspace)
@@ -619,7 +971,8 @@ class MainWindow(QMainWindow):
         self.sources_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.RightDockWidgetArea, self.sources_dock)
 
-        self.sinks_panel = SinksPanel(manager, self.dashboard)
+        self.sinks_panel = SinksPanel(manager, self.dashboard,
+                                      on_cv=self._open_cv_config)
         self.sinks_dock = QDockWidget("Sinks", self)
         self.sinks_dock.setObjectName("SinksDock")
         self.sinks_dock.setWidget(self.sinks_panel)
@@ -681,7 +1034,20 @@ class MainWindow(QMainWindow):
         self._dialogs[instance_id] = dlg
         dlg.show()
 
+    def _open_cv_config(self, sink_key: str) -> None:
+        dlg = self._cv_dialogs.get(sink_key)
+        if dlg is not None:
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        dlg = ImageConfigDialog(self.dashboard, sink_key, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.destroyed.connect(lambda *_: self._cv_dialogs.pop(sink_key, None))
+        self._cv_dialogs[sink_key] = dlg
+        dlg.show()
+
     def closeEvent(self, event):  # noqa: N802
+        self.dashboard.shutdown()
         self.manager.stop()
         self.engine.shutdown()
         super().closeEvent(event)

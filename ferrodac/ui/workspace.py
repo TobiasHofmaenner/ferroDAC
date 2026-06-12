@@ -16,6 +16,7 @@ routed source values to device sinks.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -26,6 +27,7 @@ from qtpy.QtWidgets import QDockWidget, QMainWindow, QWidget
 
 from ..core.device import SinkKind
 from ..core.reading import Reading
+from ..vision import CVRunner, Detector
 from .panels import PANEL_TYPES, Panel
 
 _SINK_DTYPE = {
@@ -141,6 +143,12 @@ class Dashboard(QObject):
         self._counter = 0
         self.default_sink_id = None              # default chart panel id
 
+        # CV detectors (virtual sources reading a ROI of an image sink)
+        self._detectors: dict[str, Detector] = {}
+        self._det_lock = threading.Lock()
+        self._det_counter = 0
+        self._cv: CVRunner | None = None
+
         engine.subscribe(self._on_batch)
         manager.active_changed.connect(self._rebuild_device_ports)
         self._rebuild_device_ports()
@@ -190,11 +198,78 @@ class Dashboard(QObject):
                 panel._unsub()
             for targets in self._routes.values():
                 targets.discard(pid)
+            for det in self.detectors_for(pid):     # drop detectors on this viewer
+                self.remove_detector(det.id, _emit=False)
             if self.default_sink_id == pid:
                 charts = [k for k, sp in self._sinks.items() if sp.kind == "display"]
                 self.default_sink_id = charts[0] if charts else None
         self.area.remove_panel(panel)
         self.ports_changed.emit()
+
+    # -- CV detectors (virtual sources reading an image sink's ROI) ----------
+    def add_detector(self, sink_key: str, name: str, roi: tuple,
+                     parse_as: str = "float", on_fail: str = "nan",
+                     **ocr) -> str:
+        self._det_counter += 1
+        did = f"det{self._det_counter}"
+        sink = self._sinks.get(sink_key)
+        panel = sink.panel if sink is not None else None
+        det = Detector(id=did, name=name, sink_key=sink_key, roi=roi,
+                       parse_as=parse_as, on_fail=on_fail, panel=panel, **ocr)
+        with self._det_lock:
+            self._detectors[did] = det
+        key = f"cv/{did}"
+        origin = f"CV · {sink.name}" if sink is not None else "CV"
+        self._sources[key] = SourcePort(key, name, det.dtype, "", origin, "virtual")
+        self._routes.setdefault(key, set())
+        self._ensure_cv()
+        self.ports_changed.emit()
+        return did
+
+    def update_detector(self, did: str, **fields) -> None:
+        with self._det_lock:
+            det = self._detectors.get(did)
+            if det is None:
+                return
+            for k, v in fields.items():
+                setattr(det, k, v)
+        sp = self._sources.get(f"cv/{did}")
+        if sp is not None:
+            sp.name = det.name
+            sp.dtype = det.dtype
+        self.ports_changed.emit()
+
+    def remove_detector(self, did: str, _emit: bool = True) -> None:
+        with self._det_lock:
+            self._detectors.pop(did, None)
+        key = f"cv/{did}"
+        self._sources.pop(key, None)
+        self._routes.pop(key, None)
+        if _emit:
+            self.ports_changed.emit()
+
+    def detectors_for(self, sink_key: str) -> list:
+        with self._det_lock:
+            return [d for d in self._detectors.values() if d.sink_key == sink_key]
+
+    def detector(self, did: str):
+        with self._det_lock:
+            return self._detectors.get(did)
+
+    def _snapshot_detectors(self) -> list:
+        with self._det_lock:
+            return list(self._detectors.values())
+
+    def _ensure_cv(self) -> None:
+        if self._cv is None:
+            self._cv = CVRunner(self.engine, self._snapshot_detectors, rate_hz=5.0)
+            self._cv.start()
+
+    def shutdown(self) -> None:
+        if self._cv is not None:
+            self._cv.stop()
+            self._cv.wait(2000)
+            self._cv = None
 
     # -- device ports --------------------------------------------------------
     def _rebuild_device_ports(self):
