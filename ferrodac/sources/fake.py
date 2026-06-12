@@ -118,3 +118,68 @@ class FakeThermometer(BaseSource):
     def _read(self, channel):
         t = time.time() - getattr(self, "_t0", time.time())
         return 25.0 + 3.0 * math.sin(t / 10.0) + random.uniform(-0.1, 0.1), 0
+
+
+class FakePowerSupply(BaseSource):
+    """A simulated bench power supply driving a 100 Ω load.
+
+    Controls (setters): output on/off, set-voltage, current-limit.
+    Channels (getters):  measured voltage, current, power.
+    Behaves like a real PSU: constant-voltage until the current limit is hit,
+    then constant-current (clamped), with a little measurement noise.
+    """
+
+    driver = "fake_psu"
+    discoverable = True
+    _R = 100.0   # load resistance (ohms)
+
+    @classmethod
+    def discover(cls):
+        channels = [
+            Channel(id="voltage", name="Voltage", unit="V"),
+            Channel(id="current", name="Current", unit="A"),
+            Channel(id="power", name="Power", unit="W"),
+        ]
+        controls = [
+            Control(id="output", name="Output", kind=ControlKind.TOGGLE, value=False),
+            Control(id="voltage", name="Set Voltage", kind=ControlKind.SETPOINT,
+                    params=(Param("v", "float64", "V", minimum=0.0, maximum=30.0),),
+                    value=5.0),
+            Control(id="current_limit", name="Current Limit",
+                    kind=ControlKind.SETPOINT,
+                    params=(Param("i", "float64", "A", minimum=0.0, maximum=5.0),),
+                    value=1.0),
+        ]
+        return [cls(
+            instance_id="sim:psu:1",
+            name="Sim Power Supply",
+            interface=Interface(kind="sim", params={"addr": "PSU1"}),
+            channels=channels,
+            controls=controls,
+            rate=RateControl(mode=RateMode.SETTABLE, native_hz=10.0,
+                             default_hz=5.0, min_hz=0.5, max_hz=10.0),
+            primary_channel="voltage",
+            hardware_id="SIM-PSU-0001",
+            model="SimPSU 30-5",
+        )]
+
+    def _connect(self) -> None:
+        time.sleep(0.3)
+        self._firmware = "PSU1.2"
+
+    def _read(self, channel):
+        on = bool(self._control_values.get("output", False))
+        vset = float(self._control_values.get("voltage", 0.0))
+        ilim = float(self._control_values.get("current_limit", 1.0))
+        if not on:
+            v = i = 0.0
+        else:
+            i_ideal = vset / self._R
+            if i_ideal > ilim:                # current-limited (CC)
+                i, v = ilim, ilim * self._R
+            else:                             # constant voltage (CV)
+                v, i = vset, i_ideal
+            v *= 1 + 0.005 * random.uniform(-1, 1)
+            i *= 1 + 0.01 * random.uniform(-1, 1)
+        value = {"voltage": v, "current": i, "power": v * i}[channel.id]
+        return value, 0

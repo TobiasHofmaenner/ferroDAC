@@ -27,8 +27,13 @@ shell** whose central area is a **workspace of panels** you add yourself:
   dropdown selecting which panel(s) it feeds (a channel can feed several).
 - The left **Sources** dock (device management) is hidden by default; opened via
   the toolbar / View menu.
+- **Input panels** (Slider / Button / Toggle) bind to a device **control** and
+  drive it via `invoke` — so the dashboard does **bidirectional** control, not
+  just display.
 
-Two fake discoverable sources prove it end-to-end with no hardware.
+Three fake discoverable sources prove it end-to-end with no hardware, including a
+**simulated bench power supply** (set voltage / current-limit / output on-off;
+live voltage / current / power over a 100 Ω load with CV→CC behaviour).
 
 ```bash
 pip install -r requirements.txt

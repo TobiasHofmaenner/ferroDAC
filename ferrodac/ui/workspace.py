@@ -76,24 +76,32 @@ class Dashboard(QObject):
 
     panels_changed = Signal()
 
-    def __init__(self, area: WorkspaceArea, engine, parent=None):
+    def __init__(self, area: WorkspaceArea, engine, manager, parent=None):
         super().__init__(parent)
         self.area = area
         self.engine = engine
+        self.manager = manager
         self._panels: dict = {}            # panel_id -> Panel
+        self._input_panels: set = set()    # input panels (refresh control options)
         self._routes: dict = {}            # channel key -> set(panel_id)
         self._counter = 0
         self.default_id = None
+        manager.active_changed.connect(self._refresh_inputs)
 
     # -- panels --------------------------------------------------------------
     def add_panel(self, kind: str) -> str:
         self._counter += 1
         label, cls = PANEL_TYPES[kind]
-        panel = cls()
+        if getattr(cls, "is_input", False):
+            panel = cls(self.manager)
+            self._input_panels.add(panel)
+            panel.set_options(self._control_options(panel.control_kind))
+        else:
+            panel = cls()
+            panel._unsub = self.engine.subscribe(panel.feed)
         pid = f"{kind}-{self._counter}"
         panel.panel_id = pid
         panel.title = f"{label} {self._counter}"
-        panel._unsub = self.engine.subscribe(panel.feed)
         self._panels[pid] = panel
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -106,6 +114,7 @@ class Dashboard(QObject):
         panel = self._panels.pop(pid, None)
         if panel is None:
             return
+        self._input_panels.discard(panel)
         if panel._unsub:
             panel._unsub()
         self.area.remove_panel(panel)
@@ -115,6 +124,18 @@ class Dashboard(QObject):
             charts = [p for p, pn in self._panels.items() if pn.kind == "chart"]
             self.default_id = charts[0] if charts else None
         self.panels_changed.emit()
+
+    def _control_options(self, kind):
+        out = []
+        for d in self.manager.active_descriptors():
+            for c in d.controls:
+                if c.kind == kind:
+                    out.append((d.instance_id, c.id, c, d.name))
+        return out
+
+    def _refresh_inputs(self):
+        for panel in self._input_panels:
+            panel.set_options(self._control_options(panel.control_kind))
 
     def panels(self) -> list:
         return [(pid, p.title) for pid, p in self._panels.items()]

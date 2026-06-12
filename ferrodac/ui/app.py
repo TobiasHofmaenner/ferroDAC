@@ -498,7 +498,7 @@ class MainWindow(QMainWindow):
         # central = dockable workspace of panels
         self.workspace = WorkspaceArea()
         self.setCentralWidget(self.workspace)
-        self.dashboard = Dashboard(self.workspace, engine)
+        self.dashboard = Dashboard(self.workspace, engine, manager)
         self.dashboard.add_panel("chart")     # a default chart to route into
 
         # right dock: channels
