@@ -293,6 +293,13 @@ class QMS200Device(BaseDevice):
                      params=(Param("n", "str",
                                    options=("1", "2", "4", "8", "16", "32")),),
                      value="1"),
+                # Route a total-pressure gauge here (or set manually): each sweep
+                # is scaled so its integral equals this pressure, turning the
+                # arbitrary ion currents into real partial pressures. 0 = off.
+                Sink(id="ref_pressure", name="Normalize to pressure",
+                     kind=SinkKind.SETPOINT,
+                     params=(Param("p", "float", "mbar", minimum=0.0),),
+                     value=0.0),
             ],
             rate=RateControl(mode=RateMode.SETTABLE, native_hz=1.0,
                              default_hz=0.5, min_hz=0.02, max_hz=2.0),
@@ -321,6 +328,11 @@ class QMS200Device(BaseDevice):
         self._avg_n = 1
         self._avg_buf: list = []
         self._smooth_amu = 0.0       # within-sweep boxcar window (amu); 0 = off
+        # Total-pressure normalisation: scale each sweep so its integral equals
+        # _ref_pressure (written via the ref_pressure sink, e.g. routed from a
+        # gauge). _norm_scale carries the last scale onto live partial frames.
+        self._ref_pressure = 0.0
+        self._norm_scale = None
         self._apply_scan_params()
 
     # -- discovery -----------------------------------------------------------
@@ -410,6 +422,12 @@ class QMS200Device(BaseDevice):
             return
         if sink.id == "smoothing":               # software-only, no serial
             self._smooth_amu = SMOOTH_AMU.get(value, 0.0)
+            return
+        if sink.id == "ref_pressure":            # software-only; routable from a gauge
+            try:
+                self._ref_pressure = max(0.0, float(value))
+            except (TypeError, ValueError):
+                self._ref_pressure = 0.0
             return
         self._write_q.append((sink.id, value))
 
@@ -541,10 +559,27 @@ class QMS200Device(BaseDevice):
             return y
         return np.convolve(y, np.ones(w) / w, mode="same")
 
+    def _normalize(self, trace: Trace, recompute: bool) -> Trace:
+        """Scale the spectrum so its integral equals the reference pressure, so
+        peaks read as real partial pressures. The scale is recomputed from a
+        completed sweep's full integral and reused (`_norm_scale`) on partial
+        frames, which span only part of the spectrum. 0 reference = off."""
+        if self._ref_pressure <= 0:
+            return trace
+        if recompute:
+            total = float(np.nansum(np.clip(trace.y, 0.0, None)))
+            if total > 0:
+                self._norm_scale = self._ref_pressure / total
+        if self._norm_scale:
+            trace.y = trace.y * self._norm_scale
+            trace.y_unit = "mbar"
+        return trace
+
     def _make_trace(self, points) -> Trace:
         """Reduce one raw sweep (smoothed, no averaging) — for live partials."""
         y = self._smooth(np.asarray(points, dtype=float))
-        return self._reduce(self._mass_axis(len(y)), y)
+        trace = self._reduce(self._mass_axis(len(y)), y)
+        return self._normalize(trace, recompute=False)
 
     def _make_avg_trace(self, points) -> Trace:
         """Reduce a completed sweep: within-sweep smoothing, then rolling-average
@@ -554,21 +589,23 @@ class QMS200Device(BaseDevice):
         y = self._smooth(np.asarray(points, dtype=float))
         if self._avg_n <= 1:
             self._avg_buf = []
-            return self._reduce(self._mass_axis(len(y)), y)
-        x = self._mass_axis(len(y))
-        grid = self._first + np.arange(int((self._last - self._first) * _GRID_PPA)
-                                       + 1) / _GRID_PPA
-        gy = np.interp(grid, x, y, left=np.nan, right=np.nan)
-        buf = self._avg_buf
-        if buf and len(buf[0]) != len(gy):       # grid changed → restart
-            buf = []
-        buf.append(gy)
-        del buf[:-self._avg_n]                    # keep only the last N
-        self._avg_buf = buf
-        with warnings.catch_warnings():           # edge grid points can be all-NaN
-            warnings.simplefilter("ignore", RuntimeWarning)
-            avg = np.nanmean(np.vstack(buf), axis=0)
-        return self._reduce(grid, avg)
+            trace = self._reduce(self._mass_axis(len(y)), y)
+        else:
+            x = self._mass_axis(len(y))
+            grid = self._first + np.arange(int((self._last - self._first)
+                                               * _GRID_PPA) + 1) / _GRID_PPA
+            gy = np.interp(grid, x, y, left=np.nan, right=np.nan)
+            buf = self._avg_buf
+            if buf and len(buf[0]) != len(gy):   # grid changed → restart
+                buf = []
+            buf.append(gy)
+            del buf[:-self._avg_n]                # keep only the last N
+            self._avg_buf = buf
+            with warnings.catch_warnings():       # edge grid points can be all-NaN
+                warnings.simplefilter("ignore", RuntimeWarning)
+                avg = np.nanmean(np.vstack(buf), axis=0)
+            trace = self._reduce(grid, avg)
+        return self._normalize(trace, recompute=True)
 
     def _read(self, source):
         with self._io_lock:
