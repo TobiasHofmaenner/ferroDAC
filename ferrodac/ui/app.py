@@ -44,7 +44,11 @@ from qtpy.QtWidgets import (
 )
 
 from ..core.engine import Engine
+from ..core.history import HistoryBuffer
 from ..core.manager import DeviceManager
+from ..core.markers import REC_START, REC_STOP
+from ..core import recorder as rec
+from ..core.recorder import Recorder
 from ..core.registry import load_builtin_drivers
 from ..core.device import DeviceDescriptor, RateMode, SinkKind
 from ..vision.detector import FAIL_LABELS, PARSE_LABELS, WHITELIST_PRESETS, Detector
@@ -1100,6 +1104,12 @@ class MainWindow(QMainWindow):
         self.dashboard = Dashboard(self.workspace, engine, manager)
         self.dashboard.add_panel("chart")
 
+        # data plane: always-on hot history + the recorder
+        self.history = HistoryBuffer()
+        engine.subscribe(self.history.feed)
+        self.recorder = Recorder(engine, self.history, on_change=self._on_record_change)
+        self._rec_start_mid = None
+
         self.sources_panel = SourcesPanel(manager, self.dashboard)
         self.sources_dock = QDockWidget("Sources", self)
         self.sources_dock.setObjectName("SourcesDock")
@@ -1139,6 +1149,7 @@ class MainWindow(QMainWindow):
             "Scanning for devices…  ·  open “Devices” to add one"
         )
         self.manager.start()
+        self._check_recovery()
         if self._restore_last:
             self._maybe_restore_last()
 
@@ -1169,6 +1180,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self.devices_dock.toggleViewAction())
         tb.addAction(self.edit_action)
         tb.addSeparator()
+        self.record_action = tb.addAction("● Record", self._toggle_record)
         tb.addAction("＋ Tag", self._add_tag)
 
     def _add_tag(self):
@@ -1177,6 +1189,53 @@ class MainWindow(QMainWindow):
             label, comment = dlg.values()
             self.dashboard.markers.add(time.time(), label=label, comment=comment)
             self.events_dock.raise_()
+
+    # -- record --------------------------------------------------------------
+    def _runs_dir(self) -> str:
+        from qtpy.QtCore import QStandardPaths
+        docs = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) \
+            or os.path.expanduser("~")
+        return os.path.join(docs, "ferroDAC", "runs")
+
+    def _toggle_record(self):
+        if not self.recorder.active:
+            sources = self.dashboard.capture_sources()
+            if not sources:
+                self.statusBar().showMessage(
+                    "Nothing to record — route some sources to a chart first.", 5000)
+                return
+            run_dir = os.path.join(self._runs_dir(),
+                                   "run_" + time.strftime("%Y-%m-%dT%H-%M-%S"))
+            self._rec_start_mid = self.dashboard.markers.add(
+                time.time(), kind=REC_START, comment=f"{len(sources)} sources")
+            self.recorder.start(run_dir, sources)
+            self.statusBar().showMessage(f"● Recording → {run_dir}")
+        else:
+            stop_mid = self.dashboard.markers.add(time.time(), kind=REC_STOP)
+            ms = self.dashboard.markers
+            t0 = ms.get(self._rec_start_mid).t if self._rec_start_mid \
+                and ms.get(self._rec_start_mid) else None
+            t1 = ms.get(stop_mid).t
+            out = self.recorder.stop(t_start=t0, t_stop=t1)
+            self._rec_start_mid = None
+            self.statusBar().showMessage(f"■ Saved {out}", 8000)
+
+    def _on_record_change(self):
+        if self.recorder.active:
+            self.record_action.setText("■ Stop")
+        else:
+            self.record_action.setText("● Record")
+
+    def _check_recovery(self):
+        """Crash-safety: materialise any capture left unfinalised by a crash."""
+        recovered = 0
+        for run_dir in rec.find_unfinalized(self._runs_dir()):
+            if rec.recover(run_dir):
+                recovered += 1
+        if recovered:
+            self.statusBar().showMessage(
+                f"Recovered {recovered} unfinalised recording(s) after a crash.",
+                8000)
 
     def _on_tick(self):
         self.sources_panel.update_live(self.engine.latest())
@@ -1271,6 +1330,11 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(300, lambda: self.open_session(last))
 
     def closeEvent(self, event):  # noqa: N802
+        if self.recorder.active:        # finalize rather than leave it dangling
+            ms = self.dashboard.markers
+            t0 = ms.get(self._rec_start_mid).t if self._rec_start_mid \
+                and ms.get(self._rec_start_mid) else None
+            self.recorder.stop(t_start=t0, t_stop=time.time())
         self.dashboard.shutdown()
         self.manager.stop()
         self.engine.shutdown()

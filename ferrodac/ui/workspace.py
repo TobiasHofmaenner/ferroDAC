@@ -273,6 +273,15 @@ class Dashboard(QObject):
         if _emit:
             self.ports_changed.emit()
 
+    def capture_sources(self) -> dict:
+        """Numeric sources currently routed somewhere — the Record capture set
+        (open-decision #4: the active dashboard's channels)."""
+        out = {}
+        for key, sp in self._sources.items():
+            if sp.dtype in ("float", "bool") and self._routes.get(key):
+                out[key] = {"name": sp.name, "unit": sp.unit}
+        return out
+
     def detectors_for(self, sink_key: str) -> list:
         with self._det_lock:
             return [d for d in self._detectors.values() if d.sink_key == sink_key]
