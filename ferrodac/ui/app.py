@@ -16,7 +16,7 @@ from .. import __version__
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
 from qtpy.QtCore import QByteArray, QRect, QSettings, Qt, QTimer, Signal
-from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPixmap
+from qtpy.QtGui import QColor, QIcon, QImage, QPainter, QPalette, QPen, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -1511,6 +1511,10 @@ def main(argv=None) -> int:
 
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("ferroDAC")
+    icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                             "assets", "app.png")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     apply_dark_theme(app)
 
     cfg = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)

@@ -2,5 +2,9 @@
 PySide6>=6.6
 qtpy>=2.4
 pyqtgraph>=0.13
-# Used by real device drivers (TPG-256A, Modbus) as they land:
+numpy>=1.24
+# Real device drivers (TPG-256A serial, …):
 pyserial>=3.5
+# Computer-vision sources (camera OCR). Tesseract itself is a separate install
+# (the OCR feature degrades gracefully if `tesseract` is not on PATH).
+opencv-python-headless>=4.8

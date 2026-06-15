@@ -40,6 +40,21 @@ pip install -r requirements.txt
 python -m ferrodac
 ```
 
+### Building a Windows executable
+
+CI builds a one-file Windows `.exe` on every tag push (`v*`) via
+[GitHub Actions](.github/workflows/build-windows.yml) and attaches it to the
+GitHub Release. To build locally **on Windows** (PyInstaller can't
+cross-compile):
+
+```bat
+pip install -r requirements.txt pyinstaller
+pyinstaller packaging/ferrodac.spec      :: -> dist\ferroDAC.exe
+```
+
+The camera-OCR feature additionally needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
+installed and on `PATH`; it degrades gracefully without it.
+
 Design docs:
 
 - [docs/DESIGN.md](docs/DESIGN.md) — the full architecture (the ideal we aim at).

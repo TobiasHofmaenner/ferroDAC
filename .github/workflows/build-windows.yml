@@ -1,0 +1,51 @@
+name: Build Windows EXE
+
+# Builds a Windows x86-64 .exe on a Windows runner (PyInstaller cannot
+# cross-compile from Linux) and publishes it as a GitHub Release asset.
+# Triggers on tag pushes like v1.0.0; also runnable manually.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to create the Release and upload the asset
+
+env:
+  # Run the JS actions on Node 24 instead of the deprecated Node 20 runtime.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-windows:
+    # Pinned (not windows-latest) for reproducibility; latest is migrating here.
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build EXE
+        run: pyinstaller packaging/ferrodac.spec
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferroDAC-windows-x64
+          path: dist/ferroDAC.exe
+
+      - name: Publish to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ferroDAC.exe
+          generate_release_notes: true
