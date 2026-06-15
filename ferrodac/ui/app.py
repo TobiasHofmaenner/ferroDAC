@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import json
+import os
+
 from .. import __version__
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import QRect, Qt, QTimer, Signal
+from qtpy.QtCore import QByteArray, QRect, QSettings, Qt, QTimer, Signal
 from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
@@ -20,6 +23,7 @@ from qtpy.QtWidgets import (
     QDialog,
     QDockWidget,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -964,10 +968,12 @@ class ImageConfigDialog(QDialog):
 #  Main window — dockable shell
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
-    def __init__(self, manager: DeviceManager, engine: Engine, parent=None):
+    def __init__(self, manager: DeviceManager, engine: Engine, parent=None,
+                 restore_last: bool = True):
         super().__init__(parent)
         self.manager = manager
         self.engine = engine
+        self._restore_last = restore_last
         self.setWindowTitle("ferroDAC")
         self.resize(1320, 840)
         self._dialogs: dict[str, ConfigDialog] = {}
@@ -1010,8 +1016,14 @@ class MainWindow(QMainWindow):
             "Scanning for devices…  ·  open “Devices” to add one"
         )
         self.manager.start()
+        if self._restore_last:
+            self._maybe_restore_last()
 
     def _build_menus(self):
+        filemenu = self.menuBar().addMenu("&File")
+        filemenu.addAction("Save Layout…", self._on_save)
+        filemenu.addAction("Open Layout…", self._on_open)
+
         view = self.menuBar().addMenu("&View")
         view.addAction(self.devices_dock.toggleViewAction())
         view.addAction(self.sources_dock.toggleViewAction())
@@ -1059,6 +1071,70 @@ class MainWindow(QMainWindow):
         dlg.destroyed.connect(lambda *_: self._cv_dialogs.pop(sink_key, None))
         self._cv_dialogs[sink_key] = dlg
         dlg.show()
+
+    # -- session save / restore ---------------------------------------------
+    @staticmethod
+    def _b64(qba) -> str:
+        return bytes(qba.toBase64().data()).decode("ascii")
+
+    def save_session(self, path: str) -> None:
+        data = {
+            "version": 1,
+            "devices": self.manager.export_active(),
+            "layout": self.dashboard.export_layout(),
+            "dock": {
+                "geometry": self._b64(self.saveGeometry()),
+                "window": self._b64(self.saveState()),
+                "workspace": self._b64(self.workspace.saveState()),
+            },
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        self._remember(path)
+        self.statusBar().showMessage(f"Saved {os.path.basename(path)}", 4000)
+
+    def open_session(self, path: str) -> None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not open layout: {exc}", 5000)
+            return
+        # rebuild the model first (so docks exist), then restore Qt geometry
+        self.dashboard.import_layout(data.get("layout", {}))
+        self.manager.request_devices(data.get("devices", []))
+        dock = data.get("dock", {})
+        if dock.get("workspace"):
+            self.workspace.restoreState(QByteArray.fromBase64(dock["workspace"].encode()))
+        if dock.get("geometry"):
+            self.restoreGeometry(QByteArray.fromBase64(dock["geometry"].encode()))
+        if dock.get("window"):
+            self.restoreState(QByteArray.fromBase64(dock["window"].encode()))
+        self._remember(path)
+        self.statusBar().showMessage(f"Loaded {os.path.basename(path)}", 4000)
+
+    def _on_save(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Layout", "", "ferroDAC layout (*.json)")
+        if path:
+            if not path.endswith(".json"):
+                path += ".json"
+            self.save_session(path)
+
+    def _on_open(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Layout", "", "ferroDAC layout (*.json)")
+        if path:
+            self.open_session(path)
+
+    @staticmethod
+    def _remember(path: str) -> None:
+        QSettings("ferroDAC", "ferroDAC").setValue("lastSession", path)
+
+    def _maybe_restore_last(self) -> None:
+        last = QSettings("ferroDAC", "ferroDAC").value("lastSession")
+        if last and os.path.exists(last):
+            QTimer.singleShot(300, lambda: self.open_session(last))
 
     def closeEvent(self, event):  # noqa: N802
         self.dashboard.shutdown()

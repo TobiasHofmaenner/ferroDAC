@@ -75,9 +75,13 @@ class DeviceManager(QObject):
         self._workers: list[_OpWorker] = []
         self._engine = engine
         self._registry = registry if registry is not None else DeviceRegistry()
+        self._pending: dict[str, dict] = {}     # uuid -> desired config (session restore)
+        self._resolving = False
 
         self._scan = _DiscoveryWorker(self._discoverable, scan_interval)
         self._scan.found.connect(self._merge_found)
+        self.available_changed.connect(self._try_resolve)
+        self.active_changed.connect(self._try_resolve)
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
@@ -210,6 +214,69 @@ class DeviceManager(QObject):
             if getattr(dev, "fingerprint", None) == fp:
                 return iid
         return None
+
+    # -- session restore -----------------------------------------------------
+    def export_active(self) -> list[dict]:
+        """Serialize active devices (uuid + fingerprint + config) for a session."""
+        out = []
+        for dev in self._active.values():
+            d = dev.describe()
+            fp = dev.fingerprint
+            out.append({
+                "uuid": d.uuid, "driver": fp.driver, "hardware_id": fp.hardware_id,
+                "friendly": d.name,
+                "options": {o.key: o.value for o in d.options},
+                "rate_hz": d.rate_hz,
+                "sink_values": {s.id: s.value for s in d.sinks if s.value is not None},
+            })
+        return out
+
+    def request_devices(self, entries: list[dict]) -> None:
+        """Make these devices (by uuid+fingerprint) active as they appear, then
+        apply their saved config. The resolver's local branch; the hub branch
+        (Phase 2) plugs in here too."""
+        for e in entries:
+            uuid = e.get("uuid")
+            if not uuid:
+                continue
+            self._registry.adopt(uuid, Fingerprint(e["driver"], e["hardware_id"]),
+                                 e.get("friendly", ""))
+            self._pending[uuid] = e
+        self._try_resolve()
+
+    def _try_resolve(self) -> None:
+        if self._resolving or not self._pending:
+            return
+        self._resolving = True
+        try:
+            for uuid, entry in list(self._pending.items()):
+                inst = self.instance_for_uuid(uuid)
+                if inst is not None:
+                    self._apply_device_config(inst, entry)
+                    self._pending.pop(uuid, None)
+                else:
+                    avail = self.available_for_uuid(uuid)
+                    if avail is not None:
+                        self.add(avail)     # config applied on a later resolve pass
+        finally:
+            self._resolving = False
+
+    def _apply_device_config(self, instance_id: str, entry: dict) -> None:
+        device = self._active.get(instance_id)
+        if device is None:
+            return
+        for key, value in entry.get("options", {}).items():
+            if hasattr(device, "set_option"):
+                device.set_option(key, value)
+        hz = entry.get("rate_hz")
+        if hz and hasattr(device, "set_rate_hz"):
+            device.set_rate_hz(hz)
+        for sid, value in entry.get("sink_values", {}).items():
+            try:
+                device.write(sid, value)
+            except Exception:
+                pass
+        self.active_changed.emit()
 
     def descriptor(self, instance_id: str) -> DeviceDescriptor | None:
         device = self._active.get(instance_id) or self._available.get(instance_id)

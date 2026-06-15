@@ -96,6 +96,7 @@ class WorkspaceArea(QMainWindow):
 
     def add_panel(self, panel: Panel, title: str) -> PanelDock:
         dock = PanelDock(title, panel, self)
+        dock.setObjectName(f"panel::{panel.panel_id}")   # for saveState/restoreState
         self.addDockWidget(Qt.TopDockWidgetArea, dock)
         self._docks[panel] = dock
         self._apply(dock)
@@ -156,13 +157,18 @@ class Dashboard(QObject):
         self._rebuild_device_ports()
 
     # -- panels --------------------------------------------------------------
-    def add_panel(self, kind: str) -> str:
-        self._counter += 1
+    def add_panel(self, kind: str, pid: str = None, title: str = None) -> str:
         label, cls = PANEL_TYPES[kind]
-        pid = f"{kind}-{self._counter}"
+        if pid is None:
+            self._counter += 1
+            pid = f"{kind}-{self._counter}"
+            title = title or f"{label} {self._counter}"
+        else:
+            title = title or pid
+            self._bump_counter(pid)
         panel = cls()
         panel.panel_id = pid
-        panel.title = f"{label} {self._counter}"
+        panel.title = title
         self._panels[pid] = panel
 
         if getattr(cls, "is_input", False):
@@ -185,6 +191,12 @@ class Dashboard(QObject):
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
         self.ports_changed.emit()
         return pid
+
+    def _bump_counter(self, pid: str) -> None:
+        """Keep the auto-id counter ahead of any restored panel id."""
+        tail = pid.rsplit("-", 1)[-1]
+        if tail.isdigit():
+            self._counter = max(self._counter, int(tail))
 
     def remove_panel(self, pid: str) -> None:
         panel = self._panels.pop(pid, None)
@@ -211,9 +223,14 @@ class Dashboard(QObject):
     # -- CV detectors (virtual sources reading an image sink's ROI) ----------
     def add_detector(self, sink_key: str, name: str, roi: tuple,
                      parse_as: str = "float", on_fail: str = "nan",
-                     **ocr) -> str:
-        self._det_counter += 1
-        did = f"det{self._det_counter}"
+                     did: str = None, **ocr) -> str:
+        if did is None:
+            self._det_counter += 1
+            did = f"det{self._det_counter}"
+        else:
+            tail = did[3:] if did.startswith("det") else ""
+            if tail.isdigit():
+                self._det_counter = max(self._det_counter, int(tail))
         sink = self._sinks.get(sink_key)
         panel = sink.panel if sink is not None else None
         det = Detector(id=did, name=name, sink_key=sink_key, roi=roi,
@@ -272,6 +289,56 @@ class Dashboard(QObject):
             self._cv.stop()
             self._cv.wait(2000)
             self._cv = None
+
+    # -- session (layout) serialization --------------------------------------
+    def export_layout(self) -> dict:
+        panels = []
+        for pid, panel in self._panels.items():
+            entry = {"id": pid, "kind": panel.kind, "title": panel.title}
+            st = panel.state() if hasattr(panel, "state") else {}
+            if st:
+                entry["state"] = st
+            panels.append(entry)
+        detectors = []
+        for det in self._snapshot_detectors():
+            detectors.append({
+                "id": det.id, "name": det.name, "sink": det.sink_key,
+                "roi": list(det.roi), "parse_as": det.parse_as, "on_fail": det.on_fail,
+                "whitelist": det.whitelist, "invert": det.invert,
+                "threshold": det.threshold, "scale": det.scale,
+            })
+        routes = {k: sorted(v) for k, v in self._routes.items() if v}
+        return {"panels": panels, "detectors": detectors, "routes": routes,
+                "default_sink": self.default_sink_id}
+
+    def clear_layout(self) -> None:
+        for pid in list(self._panels):
+            self.remove_panel(pid)
+        self._routes.clear()
+        self.default_sink_id = None
+        self._rebuild_device_ports()
+
+    def import_layout(self, data: dict) -> None:
+        self.clear_layout()
+        for p in data.get("panels", []):
+            pid = self.add_panel(p["kind"], pid=p["id"], title=p.get("title"))
+            panel = self._panels.get(pid)
+            if panel is not None and p.get("state") and hasattr(panel, "set_state"):
+                panel.set_state(p["state"])
+        if data.get("default_sink"):
+            self.default_sink_id = data["default_sink"]
+        for d in data.get("detectors", []):
+            self.add_detector(
+                d["sink"], name=d["name"], roi=tuple(d["roi"]),
+                parse_as=d.get("parse_as", "float"), on_fail=d.get("on_fail", "nan"),
+                did=d["id"], whitelist=d.get("whitelist", ""),
+                invert=d.get("invert", False), threshold=d.get("threshold", False),
+                scale=d.get("scale", 3),
+            )
+        for src, sinks in data.get("routes", {}).items():
+            for sink in sinks:
+                self.set_route(src, sink, True)
+        self.ports_changed.emit()
 
     # -- device ports --------------------------------------------------------
     def _rebuild_device_ports(self):

@@ -46,6 +46,13 @@ class Panel(QWidget):
     def remove_source(self, key: str) -> None: ...
     def feed(self, batch: list) -> None: ...
 
+    def state(self) -> dict:
+        """Per-panel state to persist in a saved session (override as needed)."""
+        return {}
+
+    def set_state(self, state: dict) -> None:
+        """Restore per-panel state from a saved session."""
+
 
 class ChartPanel(Panel):
     kind = "chart"
@@ -299,6 +306,17 @@ class SliderPanel(InputPanel):
         span = self._max - self._min
         return self._min + (self._slider.value() / 1000.0) * span
 
+    def state(self):
+        return {"pos": self._slider.value()}
+
+    def set_state(self, state):
+        # Restore silently: emitting here would push a value computed with the
+        # not-yet-set range into the data plane. The route re-sync propagates it.
+        self._slider.blockSignals(True)
+        self._slider.setValue(int(state.get("pos", 0)))
+        self._slider.blockSignals(False)
+        self._val.setText(fmt(self.current_value(), self._unit))
+
     def _on_slide(self, _v):
         val = self.current_value()
         self._val.setText(fmt(val, self._unit))
@@ -327,6 +345,14 @@ class TogglePanel(InputPanel):
 
     def current_value(self):
         return self._chk.isChecked()
+
+    def state(self):
+        return {"on": self._chk.isChecked()}
+
+    def set_state(self, state):
+        self._chk.blockSignals(True)
+        self._chk.setChecked(bool(state.get("on", False)))
+        self._chk.blockSignals(False)
 
 
 PANEL_TYPES = {
