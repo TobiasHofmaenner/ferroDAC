@@ -50,6 +50,7 @@ class SourcePort:
     origin: str          # device name, or "input"
     kind: str            # "device" | "virtual"
     panel: object = None
+    online: bool = True   # False = referenced-but-absent placeholder
 
 
 @dataclass
@@ -67,6 +68,7 @@ class SinkPort:
     panel: object = None
     smin: float = 0.0
     smax: float = 1.0
+    online: bool = True   # False = referenced-but-absent placeholder
 
 
 # --------------------------------------------------------------------------- #
@@ -292,21 +294,53 @@ class Dashboard(QObject):
                     smax=(p.maximum if p and p.maximum is not None else 1.0),
                 )
 
-        for key in [k for k, p in self._sources.items() if p.kind == "device" and k not in new_src]:
-            del self._sources[key]
-            self._routes.pop(key, None)
+        # SOURCES: a device source that's gone but still routed survives as an
+        # offline placeholder (desired routing != binding status); unreferenced
+        # ones are dropped. A live port replaces any placeholder & re-binds.
+        for key in [k for k, p in self._sources.items()
+                    if p.kind == "device" and k not in new_src]:
+            if self._routes.get(key):
+                if self._sources[key].online:
+                    self._sources[key].online = False
+                    self._emit_offline_gap(key)         # NaN gap, not a frozen line
+            else:
+                del self._sources[key]
+                self._routes.pop(key, None)
+        returning_src = []
         for key, port in new_src.items():
-            self._sources.setdefault(key, port)
+            if key not in self._sources or not self._sources[key].online:
+                returning_src.append(key)
+            self._sources[key] = port
 
-        for key in [k for k, p in self._sinks.items() if p.kind == "device" and k not in new_snk]:
-            del self._sinks[key]
-            for targets in self._routes.values():
-                targets.discard(key)
+        # SINKS: same — a routed-into device sink that vanished stays as an
+        # offline placeholder; a live port replaces it.
+        referenced = set().union(*self._routes.values()) if self._routes else set()
+        for key in [k for k, p in self._sinks.items()
+                    if p.kind == "device" and k not in new_snk]:
+            if key in referenced:
+                self._sinks[key].online = False
+            else:
+                del self._sinks[key]
+                for targets in self._routes.values():
+                    targets.discard(key)
+        returning_snk = []
         for key, port in new_snk.items():
-            self._sinks.setdefault(key, port)
+            if key not in self._sinks or not self._sinks[key].online:
+                returning_snk.append(key)
+            self._sinks[key] = port
 
-        # default-route new device sources to the default chart — but only if
-        # datatype-compatible (an image source must not land on a chart).
+        # auto-rebind: re-apply the side-effects of existing routes that touch a
+        # port which just came (back) online.
+        for skey in returning_src:
+            for sink_key in self._routes.get(skey, ()):
+                self._apply_route(skey, sink_key)
+        for sink_key in returning_snk:
+            for skey, targets in self._routes.items():
+                if sink_key in targets:
+                    self._apply_route(skey, sink_key)
+
+        # default-route genuinely new device sources to the default chart — but
+        # only if datatype-compatible (an image source must not land on a chart).
         for key, port in new_src.items():
             if key not in self._routes:
                 self._routes[key] = set()
@@ -314,6 +348,14 @@ class Dashboard(QObject):
                 if default is not None and port.dtype in default.accepts:
                     self.set_route(key, self.default_sink_id, True)
         self.ports_changed.emit()
+
+    def _emit_offline_gap(self, source_key: str) -> None:
+        """Publish one NaN so charts show a visible break when a source drops."""
+        try:
+            device, source = source_key.split("/", 1)
+        except ValueError:
+            return
+        self.engine.publish(Reading(device, source, time.time(), float("nan"), 1))
 
     # -- queries for the docks ----------------------------------------------
     def source_ports(self) -> list:
@@ -347,33 +389,40 @@ class Dashboard(QObject):
 
     # -- routing -------------------------------------------------------------
     def set_route(self, source_key: str, sink_key: str, on: bool) -> None:
+        """Record the *desired* route. Side-effects are applied only while both
+        endpoints exist; an absent endpoint keeps the route as intent (it binds
+        when the device appears) — never drops it."""
         targets = self._routes.setdefault(source_key, set())
+        sink = self._sinks.get(sink_key)
+        if on:
+            if sink is not None and sink.single_bind:   # one source owns this sink
+                for skey, tg in list(self._routes.items()):
+                    if skey != source_key and sink_key in tg:
+                        tg.discard(sink_key)
+                        if sink.kind == "display" and sink.panel is not None:
+                            sink.panel.remove_source(skey)
+            targets.add(sink_key)
+            self._apply_route(source_key, sink_key)
+        else:
+            targets.discard(sink_key)
+            if sink is not None and sink.kind == "display" and sink.panel is not None:
+                sink.panel.remove_source(source_key)
+        self.ports_changed.emit()
+
+    def _apply_route(self, source_key: str, sink_key: str) -> None:
+        """Live side-effects of a route — a no-op unless both ports are present."""
         sink = self._sinks.get(sink_key)
         src = self._sources.get(source_key)
         if sink is None or src is None:
             return
-        if on:
-            if sink.single_bind:        # one source owns this sink — displace others
-                for skey, tg in list(self._routes.items()):
-                    if skey != source_key and sink_key in tg:
-                        tg.discard(sink_key)
-                        if sink.kind == "display":
-                            sink.panel.remove_source(skey)
-            targets.add(sink_key)
-            if sink.kind == "display":
-                sink.panel.add_source(source_key, src)
-            elif sink.kind == "device":
-                if src.kind == "virtual" and hasattr(src.panel, "set_range") \
-                        and sink.dtype == "float":
-                    src.panel.set_range(sink.smin, sink.smax, sink.unit)
-                # sync the device sink to the source's current value now
-                if src.kind == "virtual" and src.dtype in ("float", "bool"):
-                    self._write_to_device(sink, src.panel.current_value())
-        else:
-            targets.discard(sink_key)
-            if sink.kind == "display":
-                sink.panel.remove_source(source_key)
-        self.ports_changed.emit()
+        if sink.kind == "display":
+            sink.panel.add_source(source_key, src)
+        elif sink.kind == "device":
+            if src.kind == "virtual" and hasattr(src.panel, "set_range") \
+                    and sink.dtype == "float":
+                src.panel.set_range(sink.smin, sink.smax, sink.unit)
+            if src.kind == "virtual" and src.dtype in ("float", "bool"):
+                self._write_to_device(sink, src.panel.current_value())
 
     # -- data flow -----------------------------------------------------------
     def _on_batch(self, batch):

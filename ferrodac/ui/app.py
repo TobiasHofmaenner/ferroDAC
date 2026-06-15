@@ -61,9 +61,11 @@ class SourceCard(QFrame):
         self.key = port.key
         self.unit = port.unit or ""
         self.dtype = port.dtype
+        self.online = getattr(port, "online", True)
         self.setObjectName("SourceCard")
+        border = "#232a38" if self.online else "#3a2f24"
         self.setStyleSheet(
-            "#SourceCard { background:#171c26; border:1px solid #232a38;"
+            "#SourceCard { background:#171c26; border:1px solid " + border + ";"
             " border-radius:8px; }"
         )
         lay = QVBoxLayout(self)
@@ -107,14 +109,22 @@ class SourceCard(QFrame):
         bits = [port.origin, port.dtype]
         if self.unit:
             bits.append(self.unit)
+        if not self.online:
+            bits.append("offline")
         sub = QLabel("  ·  ".join(bits))
         sub.setStyleSheet("color:#7f8a99; font-size:10px;")
         lay.addWidget(sub)
+        if not self.online:
+            self.value_label.setText("offline")
+            self.value_label.setStyleSheet(
+                "color:#caa472; font-family:monospace; font-size:15px;")
 
     def set_value(self, text: str) -> None:
         self.value_label.setText(text)
 
     def set_live(self, value) -> None:
+        if not self.online:
+            return
         if self.dtype == "image":
             if isinstance(value, QImage) and not value.isNull():
                 self.value_label.setText(f"▷ {value.width()}×{value.height()}")
@@ -502,9 +512,13 @@ class SourcesPanel(QWidget):
 class SinkCard(QFrame):
     def __init__(self, port, value_text, bound, color, on_cv=None, parent=None):
         super().__init__(parent)
+        self.online = getattr(port, "online", True)
+        if not self.online:
+            value_text = "offline"
         self.setObjectName("SinkCardItem")
+        border = "#232a38" if self.online else "#3a2f24"
         self.setStyleSheet(
-            "#SinkCardItem { background:#171c26; border:1px solid #232a38;"
+            "#SinkCardItem { background:#171c26; border:1px solid " + border + ";"
             " border-radius:8px; }"
         )
         lay = QVBoxLayout(self)
@@ -609,7 +623,7 @@ class SinksPanel(QWidget):
 
     def update_live(self):
         for card, port in self._cards.values():
-            if port.kind == "device":
+            if port.kind == "device" and getattr(port, "online", True):
                 card.set_value(self._device_value(port))
 
 
