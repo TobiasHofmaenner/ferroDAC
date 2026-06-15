@@ -25,6 +25,8 @@ class Trace:
     x_unit: str = ""
     y_label: str = "Intensity"
     y_unit: str = ""
+    x_lo: float = None            # declared full-axis range (so a partial fill or
+    x_hi: float = None            # stale view doesn't dictate the plotted extent)
 
     def __len__(self) -> int:
         return len(self.x)

@@ -71,10 +71,14 @@ ETX = b"\x03"
 PROBE_BAUDRATES = (19200, 9600)
 ANALYZER = {0: "QMG 125", 1: "QMG 400", 4: "QMS 200"}
 
-# speed code → seconds per amu (per the QMG protocol)
+# speed code → seconds per amu (matches the QMG protocol speed_list)
 SPEED_S_PER_AMU = {7: 0.1, 8: 0.2, 9: 0.5, 10: 1.0, 11: 2.0}
-# resolution code → points per amu (MST); used only to estimate scan time
-STEPS_PER_AMU = {0: 1, 1: 8, 2: 64}
+
+# Optional fixed mass-axis offset (amu) to correct a start-of-sweep lead-in,
+# tuned against a known peak (e.g. water @ 18). Software-only; default 0.
+OFFSET_OPTS = [(-1.0, "−1.0"), (-0.75, "−0.75"), (-0.5, "−0.5"), (-0.25, "−0.25"),
+               (0.0, "0"), (0.25, "+0.25"), (0.5, "+0.5"), (0.75, "+0.75"),
+               (1.0, "+1.0")]
 
 # C-SEM high voltage: operated ~900–1500 V; clamp generously and let the unit
 # reject out-of-range. Exact ceiling + SHV value units are hardware-validated.
@@ -245,6 +249,7 @@ class QMS200Device(BaseDevice):
             Option("speed", "Scan speed", tuple(SPEED_OPTS), 9),
             Option("resolution", "Resolution", tuple(RES_OPTS), 1),
             Option("readout", "Readout", tuple(READOUT_OPTS), "peak"),
+            Option("mass_offset", "Mass offset", tuple(OFFSET_OPTS), 0.0),
         ]
         super().__init__(
             instance_id=f"qms:{probe.port}",
@@ -282,10 +287,12 @@ class QMS200Device(BaseDevice):
         # blocks waiting for a scan to finish. deque ops are atomic in CPython.
         self._write_q: deque = deque()
         self._reconfig_pending = False
-        self._full_len = None        # longest sweep seen for this config; the m/z
-        #                              axis is mapped against this (not the count
-        #                              of a possibly-truncated scan), so peaks stay
-        #                              put and a short scan just drops high masses
+        # Measured sweep density (points per amu). The mass of point i is
+        # `first + offset + i/_rate` — a fixed rate, not a division by a guessed
+        # total — so masses stay put regardless of truncation or dropped points.
+        # Learned from completed sweeps; range-independent, so only a resolution
+        # or speed change forces a relearn (recalibrate-on-change).
+        self._rate = None
         self._apply_scan_params()
 
     # -- discovery -----------------------------------------------------------
@@ -323,6 +330,7 @@ class QMS200Device(BaseDevice):
         self._speed = int(self._option_values.get("speed", 9))
         self._mst = int(self._option_values.get("resolution", 1))
         self._readout = str(self._option_values.get("readout", "peak"))
+        self._offset = float(self._option_values.get("mass_offset", 0.0))
 
     def _scan_time(self) -> float:
         width = max(1, self._last - self._first)
@@ -372,9 +380,12 @@ class QMS200Device(BaseDevice):
         # Update local scan params immediately (cheap), and flag the poll thread
         # to reprogram the analyzer between scans — no GUI-thread serial I/O.
         self._apply_scan_params()
-        if key in ("range", "resolution"):      # sweep length changed → relearn
-            self._full_len = None
-        self._reconfig_pending = True
+        if key in ("resolution", "speed"):       # density may change → recalibrate
+            self._rate = None
+        if key in ("range", "resolution", "speed"):
+            self._reconfig_pending = True        # needs a hardware reprogram
+        # "readout" / "mass_offset" are software-only: applied on the next frame,
+        # no reprogram, no recalibration (rate is unchanged, axis stays valid).
 
     def _send_control(self, sink_id: str, value) -> None:
         """The actual serial send for a control sink (poll thread, IO lock held)."""
@@ -453,20 +464,28 @@ class QMS200Device(BaseDevice):
     def _empty(self):
         n = max(2, (self._last - self._first) + 1)
         x = np.linspace(self._first, self._last, n)
-        return Trace(x, np.full(n, np.nan), x_label="m/z", y_label="Intensity")
+        return Trace(x, np.full(n, np.nan), x_label="m/z", y_label="Intensity",
+                     x_lo=float(self._first), x_hi=float(self._last))
 
-    def _make_trace(self, points, total: int = None) -> Trace:
-        """Map a (possibly partial) sweep onto an m/z axis. `total` is the full
-        sweep length: for a partial scan the points so far cover only the first
-        len(points)/total of the mass span, so they are placed there rather than
-        stretched across the whole range. In "peak" readout each integer mass
-        becomes the peak intensity in its ±0.5 u window, which collapses the
-        dense, log-unfriendly analog sweep into a clean per-mass spectrum and
-        rejects single-point noise/valley spikes."""
-        y = np.asarray(points, dtype=float)
-        total = total or len(y)
+    def _mass_axis(self, n: int) -> np.ndarray:
+        """The m/z of each of n sequential points. Uses the measured sweep
+        density (points per amu) so the mass of point i is a fixed
+        `first + offset + i/rate` — independent of the total count, hence
+        immune to truncation and dropped points. Until the rate is learned
+        (the first sweep of a config), fall back to assuming this is a complete
+        sweep spanning the full range."""
+        if self._rate:
+            return self._first + self._offset + np.arange(n) / self._rate
         span = self._last - self._first
-        x = self._first + span * np.arange(len(y)) / max(1, total - 1)
+        return self._first + self._offset + span * np.arange(n) / max(1, n - 1)
+
+    def _make_trace(self, points) -> Trace:
+        """Map a (possibly partial) sweep onto its m/z axis. In "peak" readout
+        each integer mass becomes the peak intensity in its ±0.5 u window, which
+        collapses the dense, log-unfriendly analog sweep into a clean per-mass
+        spectrum and rejects single-point noise/valley spikes."""
+        y = np.asarray(points, dtype=float)
+        x = self._mass_axis(len(y))
         if self._readout == "peak":
             masses = np.arange(self._first, self._last + 1, dtype=float)
             inten = np.full(len(masses), np.nan)
@@ -475,7 +494,8 @@ class QMS200Device(BaseDevice):
                 if sel.any():
                     inten[k] = np.nanmax(y[sel])
             x, y = masses, inten
-        return Trace(x, y, x_label="m/z", y_label="Intensity", y_unit="A")
+        return Trace(x, y, x_label="m/z", y_label="Intensity", y_unit="A",
+                     x_lo=float(self._first), x_hi=float(self._last))
 
     def _read(self, source):
         with self._io_lock:
@@ -496,46 +516,51 @@ class QMS200Device(BaseDevice):
             except ProtocolError as exc:
                 self._drop_link(str(exc))
                 return self._empty(), 1
-        _dbg(f"scan drained {len(points)} points in {time.monotonic() - t0:.1f}s "
-             f"(range {self._first}-{self._last}, speed {self._speed})")
+        if self._reconfig_pending:                  # a setting changed mid-sweep →
+            return self._empty(), 1                 # discard this mixed/partial scan
         if len(points) < 2:
             self._last_error = (f"scan returned {len(points)} point(s) — check "
                                 "MBH/MDB framing (FERRODAC_QMS_DEBUG=1 for trace)")
+            _dbg(f"scan drained {len(points)} points in {time.monotonic()-t0:.1f}s")
             return self._empty(), 1
-        # map against the longest sweep seen so a truncated scan keeps its masses
-        # aligned (missing high masses become NaN) instead of stretching the axis
-        self._full_len = max(self._full_len or 0, len(points))
-        return self._make_trace(points, total=self._full_len), 0
+        # Learn the sweep density (points/amu) from this complete sweep. Taking
+        # the max means a one-off truncated sweep can't lower the rate; the
+        # longest (full) sweep sets it. Range-independent → reused across ranges.
+        width = max(1, self._last - self._first)
+        self._rate = max(self._rate or 0.0, (len(points) - 1) / width)
+        _dbg(f"scan drained {len(points)} points in {time.monotonic()-t0:.1f}s "
+             f"(range {self._first}-{self._last}, speed {self._speed}, "
+             f"rate {self._rate:.1f}/amu)")
+        return self._make_trace(points), 0
 
     def _drain_scan(self, source=None) -> list:
         """Read one scan: pull points (MDB) as the buffer (MBH) fills, until the
-        scan stops producing or we time out. Point count defines the m/z axis.
-        While draining, emit throttled *partial* frames so the spectrum fills in
-        live (peak/analog both mapped via the last scan's length)."""
+        scan stops producing or we time out. Point masses come from the measured
+        sweep density, not the count. While draining, emit throttled *partial*
+        frames so the spectrum fills in live."""
         points: list = []
         idle = 0
         resyncs = 0
         dropped = 0
         emitted = 0
         last_partial = time.monotonic()
-        # Generous deadline (the scan can run longer than its nominal time once
-        # per-point serial overhead is added); the drain is abortable via
-        # `_streaming`, so a long ceiling is safe and just a backstop.
-        deadline = time.monotonic() + self._scan_time() * 1.4 + 8.0
+        drain_start = time.monotonic()
+        # Generous backstop: per-point serial readout lags the sweep, so a full
+        # scan can take well over its nominal time. The drain is abortable via
+        # `_streaming`, so a long ceiling is safe.
+        deadline = drain_start + self._scan_time() * 3.0 + 30.0
 
         def maybe_emit():
             # Emit a partial "sweep-so-far" a touch faster than the engine's
-            # ~50 ms (20 Hz) drain so every repaint has a fresh frame. Mapped
-            # against the longest sweep seen (or the current length on the very
-            # first scan) so masses stay put as it fills.
+            # ~50 ms (20 Hz) drain so every repaint has a fresh frame. Gated on a
+            # known rate so the live fill places masses correctly; the first
+            # sweep of a config (rate unknown) calibrates silently, then streams.
             nonlocal last_partial, emitted
             now = time.monotonic()
-            if (source is not None and self._emit is not None and points
-                    and now - last_partial >= 0.04):
-                total = max(self._full_len or 0, len(points))
+            if (source is not None and self._emit is not None and self._rate
+                    and points and now - last_partial >= 0.04):
                 self._emit(Reading(self.data_id, source.id, time.time(),
-                                   self._make_trace(points, total=total),
-                                   0, partial=True))
+                                   self._make_trace(points), 0, partial=True))
                 last_partial = now
                 emitted += 1
 
@@ -552,10 +577,12 @@ class QMS200Device(BaseDevice):
                 avail = 0
             if avail <= 0:
                 idle += 1
-                # Wait ~0.8 s of no new data before concluding the sweep ended —
-                # tolerant of mid-sweep gaps so a slow scan isn't truncated (which
-                # would otherwise stretch the m/z axis).
-                if points and idle >= 16:
+                # The analyzer sweeps for ~scan_time; because per-point readout
+                # lags, an empty buffer before then just means we briefly caught
+                # up mid-sweep — NOT the end. Only conclude the sweep is done once
+                # its nominal time has passed and the buffer has then drained.
+                swept = time.monotonic() - drain_start >= self._scan_time()
+                if points and swept and idle >= 8:
                     break
                 time.sleep(0.05)
                 continue

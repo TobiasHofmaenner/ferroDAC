@@ -181,7 +181,8 @@ class Recorder:
             if r.key in self._sources and isinstance(r.value, (int, float)):
                 w.writerow([f"{r.t:.6f}", r.key, r.value, r.status])
                 wrote = True
-            elif r.key in self._trace_sources and isinstance(r.value, Trace):
+            elif (r.key in self._trace_sources and isinstance(r.value, Trace)
+                    and r.status == 0):           # skip empty/aborted scans
                 self._write_trace_row(r)
         if wrote:
             self._raw.flush()

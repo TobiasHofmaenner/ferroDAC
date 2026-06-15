@@ -318,6 +318,7 @@ class SpectrumPanel(Panel):
         self._curves: dict = {}            # current run (bright)
         self._prev_curves: dict = {}       # previous completed run (dim, overlay)
         self._last_complete: dict = {}     # key -> (x, y) of last complete scan
+        self._xr = None                    # pinned X range (declared axis extent)
         self._cursor_lines: dict = {}      # trend cursors (id -> InfiniteLine)
         self.on_cursor_move = None          # set by the Dashboard
 
@@ -346,26 +347,40 @@ class SpectrumPanel(Panel):
                 slot[0] = r.value
                 if not r.partial:
                     slot[1] = r.value
-        autorange = False
         for key, (tr, complete) in latest.items():
             y = np.where(tr.y > 0, tr.y, np.nan)            # log-safe
             self._curves[key].setData(tr.x, y, connect="finite")   # current (bright)
             self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
             self.plot.setLabel("left", _axis_text(tr.y_label, tr.y_unit))
+            # Pin X to the trace's declared range so a partial fill or a stale
+            # ghost from a different scan range can't stretch the axis past it.
+            lo = tr.x_lo if tr.x_lo is not None else float(tr.x[0])
+            hi = tr.x_hi if tr.x_hi is not None else float(tr.x[-1])
+            if hi > lo and self._xr != (lo, hi):
+                self.plot.setXRange(lo, hi, padding=0.01)
+                self._xr = (lo, hi)
             if complete is not None:
                 # The finished scan becomes the dim "previous" ghost that the next
-                # live-filling run overlays. Redrawn only here (on a full scan),
-                # not on every partial frame.
+                # live-filling run overlays. Redrawn only here (on a full scan).
                 cy = np.where(complete.y > 0, complete.y, np.nan)
                 prev = self._prev_curves.get(key)
                 if prev is not None:
                     prev.setData(complete.x, cy, connect="finite")
                 self._last_complete[key] = (complete.x, cy)
-                autorange = True
-            elif key not in self._last_complete:            # first build: frame it
-                autorange = True
-        if autorange:
-            self.plot.autoRange()
+                self._fit_y(cy)
+            elif key not in self._last_complete:            # first build: frame Y
+                self._fit_y(y)
+
+    def _fit_y(self, y):
+        """Fit the log-Y axis to the positive data (only on completed scans, so
+        the live fill doesn't jitter the view)."""
+        vals = y[np.isfinite(y) & (y > 0)]
+        if vals.size == 0:
+            return
+        lo, hi = float(vals.min()), float(vals.max())
+        if hi <= lo:
+            hi = lo * 10.0
+        self.plot.setYRange(np.log10(lo), np.log10(hi), padding=0.08)
 
     def set_cursors(self, cursors):
         """Draw trend-cursor lines: cursors = [(id, name, mz, value, color)]."""
