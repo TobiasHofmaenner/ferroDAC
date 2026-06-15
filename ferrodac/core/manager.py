@@ -8,6 +8,7 @@ from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 from qtpy.QtCore import QObject, QThread, Signal
 
 from .device import Device, DeviceDescriptor
+from .identity import DeviceRegistry, Fingerprint
 
 
 class _DiscoveryWorker(QThread):
@@ -64,6 +65,7 @@ class DeviceManager(QObject):
         drivers: Sequence[type[Device]],
         scan_interval: float = 2.0,
         engine=None,
+        registry: DeviceRegistry | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -72,6 +74,7 @@ class DeviceManager(QObject):
         self._active: dict[str, Device] = {}
         self._workers: list[_OpWorker] = []
         self._engine = engine
+        self._registry = registry if registry is not None else DeviceRegistry()
 
         self._scan = _DiscoveryWorker(self._discoverable, scan_interval)
         self._scan.found.connect(self._merge_found)
@@ -116,6 +119,11 @@ class DeviceManager(QObject):
         device = self._available.pop(instance_id, None)
         if device is None:
             return
+        # Onboard: assign the device's stable UUID before it starts streaming, so
+        # every Reading is keyed by the data-plane identity from the first sample.
+        if hasattr(device, "fingerprint") and device.uuid is None:
+            uid = self._registry.register(device.fingerprint, friendly=device.name)
+            device.set_uuid(uid)
         self._active[instance_id] = device
         if hasattr(device, "mark_connecting"):
             device.mark_connecting()
@@ -179,6 +187,29 @@ class DeviceManager(QObject):
 
     def is_active(self, instance_id: str) -> bool:
         return instance_id in self._active
+
+    # -- resolution (uuid <-> live device) -----------------------------------
+    @property
+    def registry(self) -> DeviceRegistry:
+        return self._registry
+
+    def instance_for_uuid(self, uuid: str) -> str | None:
+        """The instance_id of the active device carrying this UUID, if any."""
+        for iid, dev in self._active.items():
+            if getattr(dev, "uuid", None) == uuid:
+                return iid
+        return None
+
+    def available_for_uuid(self, uuid: str) -> str | None:
+        """An *available* (not yet active) device whose fingerprint matches the
+        registry's fingerprint for this UUID — the resolver's local branch."""
+        fp = self._registry.fingerprint_for(uuid)
+        if fp is None:
+            return None
+        for iid, dev in self._available.items():
+            if getattr(dev, "fingerprint", None) == fp:
+                return iid
+        return None
 
     def descriptor(self, instance_id: str) -> DeviceDescriptor | None:
         device = self._active.get(instance_id) or self._available.get(instance_id)

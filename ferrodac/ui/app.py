@@ -1091,15 +1091,22 @@ def apply_dark_theme(app: QApplication) -> None:
 
 
 def main(argv=None) -> int:
+    import os
     import sys
+
+    from qtpy.QtCore import QStandardPaths
+    from ..core.identity import DeviceRegistry
 
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("ferroDAC")
     apply_dark_theme(app)
 
+    cfg = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
+    registry = DeviceRegistry(os.path.join(cfg, "registry.json") if cfg else None)
+
     drivers = load_builtin_drivers()
     engine = Engine()
-    manager = DeviceManager(drivers, engine=engine)
+    manager = DeviceManager(drivers, engine=engine, registry=registry)
     win = MainWindow(manager, engine)
     win.show()
     return app.exec()

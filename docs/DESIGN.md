@@ -217,6 +217,33 @@ artifact — "add any module as long as it's in the library."
   declared capabilities (channels + commands + config), sourced from
   `Describe()`.
 
+### 6.1 Device identity & resolution (decided 2026-06-12)
+
+The UUID above is the load-bearing identity. It makes layouts portable and is
+the same key whether a device is local or remote.
+
+- **Identity = UUID, minted at onboarding**, the first time a user *adds* a
+  device. Hardware can't carry our UUID (a UVC webcam only has its vendor
+  descriptor), so the UUID lives on a **registry record**, not the device:
+  `{ uuid, friendly_name, fingerprint:{driver, hardware_id} }`. The registry is
+  the **UUID ↔ hardware** bridge — a local `registry.json` now, the **hub** in
+  the networked phase. `instance_id` stays a *physical address* (how the driver
+  reaches hardware, e.g. `/dev/video0`); the **UUID is the data-plane identity**
+  (Readings, routes, layouts all key on it). Only things *we* mint get UUIDs;
+  endpoints are addressed compositionally as `(device-uuid, source/sink-id)`.
+- **Resolution** maps a referenced UUID → a concrete data source, reconciled
+  continuously on every discovery tick / hub event:
+  `local registry match → bind LOCAL` · *(later)* `hub online → bind REMOTE` ·
+  `else → UNRESOLVED placeholder`.
+- **Disappearance is not deletion.** *Desired routing* (declarative, persisted)
+  is decoupled from *binding status* (live, reactive). A referenced-but-absent
+  device — never added, not on the server, or unplugged mid-session — keeps its
+  slot as a greyed **placeholder**; its sources emit **NaN (a visible gap, never
+  a frozen line)**; it **auto-rebinds** when the same UUID reappears; the user
+  can **manually re-bind** a slot to a different device. One mechanism covers
+  local-absent, remote-absent, and vanished-mid-session — and makes
+  save/restore and shared dashboards the *same* code path.
+
 ---
 
 ## 7. The two planes: Live & Record

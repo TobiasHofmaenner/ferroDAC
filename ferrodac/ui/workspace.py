@@ -275,12 +275,13 @@ class Dashboard(QObject):
     def _rebuild_device_ports(self):
         new_src, new_snk = {}, {}
         for d in self.manager.active_descriptors():
+            did = d.uuid or d.instance_id     # data-plane identity (portable)
             for s in d.sources:
-                key = f"{d.instance_id}/{s.id}"
+                key = f"{did}/{s.id}"
                 new_src[key] = SourcePort(key, s.name, getattr(s, "dtype", "float"),
                                           s.unit, d.name, "device")
             for sk in d.sinks:
-                key = f"{d.instance_id}#{sk.id}"
+                key = f"{did}#{sk.id}"
                 dt = _SINK_DTYPE.get(sk.kind, "float")
                 p = sk.params[0] if sk.params else None
                 new_snk[key] = SinkPort(

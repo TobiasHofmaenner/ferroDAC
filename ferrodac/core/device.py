@@ -125,6 +125,7 @@ class DeviceDescriptor:
     driver: str
     name: str
     interface: Interface
+    uuid: Optional[str] = None   # data-plane identity (None until onboarded)
     status: Status = Status.DISCOVERED
     hardware_id: Optional[str] = None
     model: Optional[str] = None

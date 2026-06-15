@@ -139,7 +139,7 @@ class _CaptureController(QObject):
             img = img.copy()
         emit = self._device._emit
         if emit is not None:
-            emit(Reading(self._device.instance_id, "frame", time.time(), img, 0))
+            emit(Reading(self._device.data_id, "frame", time.time(), img, 0))
 
 
 # --------------------------------------------------------------------------- #

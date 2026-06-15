@@ -124,6 +124,27 @@ Implications / constraints:
 Lands after the data plane + a viewer exist (roughly Phase 1–2), but the data
 plane is being shaped now so it slots straight in.
 
+## Decided: Device identity & resolution (2026-06-12)
+
+Settled ahead of **workspace save/restore** (Phase 1), because the layout format
+must address devices in a way that survives moving to another machine/user.
+
+- **UUID per device, minted at onboarding**, persisted in a **registry**
+  (`uuid ↔ fingerprint{driver, hardware_id}`) — local `registry.json` now, the
+  **hub** later. `instance_id` = physical address; **UUID = data-plane identity**
+  (Readings, routes, layouts key on it). See [DESIGN.md §6.1](DESIGN.md).
+- **Resolver**: `UUID → local | remote(Phase 2) | unresolved`, reconciled on
+  every discovery/hub event. The server is *only the second branch* — adding it
+  never changes the layout format.
+- **Disappearing devices**: desired routing (persisted) is decoupled from binding
+  status (live). Absent device → greyed placeholder + NaN gaps, **never** dropped
+  routes; **auto-rebinds** on return; manual re-bind available. Same mechanism
+  for local-absent / remote-absent / unplugged-mid-session, and it makes
+  save/restore and shared dashboards one code path.
+- **Build order**: (1) registry + resolver (local branch) + resilient routes;
+  (2) full-session save/restore to viewer-neutral JSON (+ Qt dock blob); (3) the
+  remote branch in Phase 2.
+
 ## Explicitly deferred (designed, not built yet)
 
 Control · multi-station · waveform/video planes · web viewer · auth · WebDAV ·

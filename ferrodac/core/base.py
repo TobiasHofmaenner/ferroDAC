@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import Optional, Sequence
 
 from .reading import Reading
+from .identity import Fingerprint
 from .device import (
     Device,
     DeviceDescriptor,
@@ -58,6 +59,7 @@ class BaseDevice(Device):
         self._firmware: Optional[str] = None
         self._status = Status.DISCOVERED
         self._last_error: Optional[str] = None
+        self._uuid: Optional[str] = None       # data-plane identity (set at onboarding)
 
         self._sink_values = {
             s.id: s.value for s in self._sinks if s.kind != SinkKind.ACTION
@@ -72,6 +74,23 @@ class BaseDevice(Device):
     @property
     def instance_id(self) -> str:
         return self._instance_id
+
+    @property
+    def data_id(self) -> str:
+        """The identity Readings are keyed by: the UUID once onboarded, else the
+        physical instance_id."""
+        return self._uuid or self._instance_id
+
+    @property
+    def uuid(self) -> Optional[str]:
+        return self._uuid
+
+    def set_uuid(self, uuid: str) -> None:
+        self._uuid = uuid
+
+    @property
+    def fingerprint(self) -> Fingerprint:
+        return Fingerprint(self.driver, self._hardware_id or self._instance_id)
 
     @property
     def name(self) -> str:
@@ -93,6 +112,7 @@ class BaseDevice(Device):
                 sinks.append(replace(s, value=self._sink_values.get(s.id, s.value)))
         return DeviceDescriptor(
             instance_id=self._instance_id,
+            uuid=self._uuid,
             driver=self.driver,
             name=self._name,
             interface=self._interface,
@@ -219,7 +239,7 @@ class BaseDevice(Device):
                 except Exception:
                     value, status = float("nan"), 1
                 if emit is not None:
-                    emit(Reading(self._instance_id, src.id, now, value, status))
+                    emit(Reading(self.data_id, src.id, now, value, status))
             interval = 1.0 / (self._rate_hz or 1.0)
             remaining = interval - (time.monotonic() - cycle)
             while self._streaming and remaining > 0:
