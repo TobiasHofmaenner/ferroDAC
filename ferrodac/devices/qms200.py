@@ -85,6 +85,10 @@ _DEFAULT_PPA = 32.0
 # differences and lets a truncated sweep contribute only over its real range.
 _GRID_PPA = 64
 
+# Within-sweep boxcar smoothing: averages the dense raw points over a window
+# (in amu). Kept well under 1 u so noise drops without blurring the peaks.
+SMOOTH_AMU = {"Off": 0.0, "0.1 u": 0.1, "0.2 u": 0.2, "0.5 u": 0.5}
+
 # Optional fixed mass-axis offset (amu) to correct a start-of-sweep lead-in,
 # tuned against a known peak (e.g. water @ 18). Software-only; default 0.
 OFFSET_OPTS = [(-1.0, "−1.0"), (-0.75, "−0.75"), (-0.5, "−0.5"), (-0.25, "−0.25"),
@@ -282,6 +286,9 @@ class QMS200Device(BaseDevice):
                      params=(Param("v", "float", "V",
                                    minimum=0.0, maximum=SEM_HV_MAX),),
                      value=900.0),
+                Sink(id="smoothing", name="Smoothing", kind=SinkKind.ENUM,
+                     params=(Param("w", "str", options=tuple(SMOOTH_AMU)),),
+                     value="Off"),
                 Sink(id="average", name="Average sweeps", kind=SinkKind.ENUM,
                      params=(Param("n", "str",
                                    options=("1", "2", "4", "8", "16", "32")),),
@@ -313,6 +320,7 @@ class QMS200Device(BaseDevice):
         # onto a fixed mass grid. Only the poll thread touches _avg_buf.
         self._avg_n = 1
         self._avg_buf: list = []
+        self._smooth_amu = 0.0       # within-sweep boxcar window (amu); 0 = off
         self._apply_scan_params()
 
     # -- discovery -----------------------------------------------------------
@@ -399,6 +407,9 @@ class QMS200Device(BaseDevice):
                 self._avg_n = max(1, int(value))
             except (TypeError, ValueError):
                 self._avg_n = 1
+            return
+        if sink.id == "smoothing":               # software-only, no serial
+            self._smooth_amu = SMOOTH_AMU.get(value, 0.0)
             return
         self._write_q.append((sink.id, value))
 
@@ -521,17 +532,26 @@ class QMS200Device(BaseDevice):
         return Trace(x, y, x_label="m/z", y_label="Intensity", y_unit="A",
                      x_lo=float(self._first), x_hi=float(self._last))
 
+    def _smooth(self, y: np.ndarray) -> np.ndarray:
+        """Within-sweep boxcar: average the dense raw points over a window of
+        `smooth_amu` (converted to points via the sweep density). Reduces
+        per-point noise; kept under 1 u so the peaks aren't blurred."""
+        w = int(round(self._smooth_amu * (self._steps_per_amu or _DEFAULT_PPA)))
+        if w < 2 or w >= len(y):
+            return y
+        return np.convolve(y, np.ones(w) / w, mode="same")
+
     def _make_trace(self, points) -> Trace:
-        """Reduce one raw sweep (no averaging) — used for live partial frames."""
-        y = np.asarray(points, dtype=float)
+        """Reduce one raw sweep (smoothed, no averaging) — for live partials."""
+        y = self._smooth(np.asarray(points, dtype=float))
         return self._reduce(self._mass_axis(len(y)), y)
 
     def _make_avg_trace(self, points) -> Trace:
-        """Reduce a completed sweep, rolling-averaging the last N raw sweeps
-        first (noise ∝ 1/√N). Sweeps are resampled onto a fixed mass grid so
-        small per-sweep length differences don't matter and a truncated sweep
-        contributes only over the masses it actually reached (NaN elsewhere)."""
-        y = np.asarray(points, dtype=float)
+        """Reduce a completed sweep: within-sweep smoothing, then rolling-average
+        the last N sweeps (noise ∝ 1/√N). Sweeps are resampled onto a fixed mass
+        grid so small per-sweep length differences don't matter and a truncated
+        sweep contributes only over the masses it actually reached."""
+        y = self._smooth(np.asarray(points, dtype=float))
         if self._avg_n <= 1:
             self._avg_buf = []
             return self._reduce(self._mass_axis(len(y)), y)
