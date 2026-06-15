@@ -83,6 +83,10 @@ SCAN_RANGES = [("1-50", "1–50 u"), ("1-100", "1–100 u"), ("1-200", "1–200 
 SPEED_OPTS = [(7, "0.1 s/u"), (8, "0.2 s/u"), (9, "0.5 s/u"),
               (10, "1 s/u"), (11, "2 s/u")]
 RES_OPTS = [(0, "Coarse (1/u)"), (1, "Normal (8/u)"), (2, "Fine (64/u)")]
+# How the raw analog sweep is reduced to a spectrum. "peak" = one point per
+# integer mass (the peak intensity in that ±0.5 u window) — the clean RGA bar
+# view, robust to noise/dropped points. "analog" = the full raw sweep.
+READOUT_OPTS = [("peak", "Peaks per mass"), ("analog", "Full analog scan")]
 
 
 class ProtocolError(Exception):
@@ -238,6 +242,7 @@ class QMS200Device(BaseDevice):
             Option("range", "Scan range", tuple(SCAN_RANGES), "1-50"),
             Option("speed", "Scan speed", tuple(SPEED_OPTS), 9),
             Option("resolution", "Resolution", tuple(RES_OPTS), 1),
+            Option("readout", "Readout", tuple(READOUT_OPTS), "peak"),
         ]
         super().__init__(
             instance_id=f"qms:{probe.port}",
@@ -306,6 +311,7 @@ class QMS200Device(BaseDevice):
         self._first, self._last = first, last
         self._speed = int(self._option_values.get("speed", 9))
         self._mst = int(self._option_values.get("resolution", 1))
+        self._readout = str(self._option_values.get("readout", "peak"))
 
     def _scan_time(self) -> float:
         width = max(1, self._last - self._first)
@@ -426,6 +432,23 @@ class QMS200Device(BaseDevice):
         x = np.linspace(self._first, self._last, n)
         return Trace(x, np.full(n, np.nan), x_label="m/z", y_label="Intensity")
 
+    def _make_trace(self, points) -> Trace:
+        """Map the drained sweep onto an m/z axis. In "peak" readout each
+        integer mass becomes the peak intensity in its ±0.5 u window, which
+        collapses the dense, log-unfriendly analog sweep into a clean per-mass
+        spectrum and rejects single-point noise/valley spikes."""
+        y = np.asarray(points, dtype=float)
+        x = np.linspace(self._first, self._last, len(y))
+        if self._readout == "peak":
+            masses = np.arange(self._first, self._last + 1, dtype=float)
+            inten = np.full(len(masses), np.nan)
+            for k, m in enumerate(masses):
+                sel = (x >= m - 0.5) & (x <= m + 0.5)
+                if sel.any():
+                    inten[k] = np.nanmax(y[sel])
+            x, y = masses, inten
+        return Trace(x, y, x_label="m/z", y_label="Intensity", y_unit="A")
+
     def _read(self, source):
         with self._io_lock:
             if self._link is None and not self._reopen():
@@ -442,9 +465,7 @@ class QMS200Device(BaseDevice):
             self._last_error = (f"scan returned {len(points)} point(s) — check "
                                 "MBH/MDB framing (FERRODAC_QMS_DEBUG=1 for trace)")
             return self._empty(), 1
-        x = np.linspace(self._first, self._last, len(points))
-        return Trace(x, np.asarray(points, dtype=float),
-                     x_label="m/z", y_label="Intensity"), 0
+        return self._make_trace(points), 0
 
     def _drain_scan(self) -> list:
         """Read one scan: pull points (MDB) as the buffer (MBH) fills, until the
