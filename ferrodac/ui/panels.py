@@ -23,9 +23,11 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+import numpy as np
 import pyqtgraph as pg
 
 from ..core.markers import RECORDING
+from ..core.spectrum import Spectrum
 from ._common import color_for, fmt
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
@@ -276,6 +278,52 @@ class NumericPanel(Panel):
 
 
 # --------------------------------------------------------------------------- #
+#  Mass-spectrum display — a virtual SINK for a "spectrum" source (e.g. an RGA)
+# --------------------------------------------------------------------------- #
+class SpectrumPanel(Panel):
+    """Intensity vs m/z. Unlike a chart, each scan *replaces* the curve rather
+    than scrolling. Log-y (intensities span decades)."""
+
+    kind = "spectrum"
+    accepts = frozenset({"spectrum"})
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.plot = pg.PlotWidget()
+        self.plot.showGrid(x=True, y=True, alpha=0.25)
+        self.plot.setLabel("bottom", "m/z")
+        self.plot.setLabel("left", "Intensity")
+        self.plot.getAxis("bottom").enableAutoSIPrefix(False)
+        self.plot.setLogMode(x=False, y=True)
+        self.plot.addLegend(offset=(-10, 10))
+        self.plot.getPlotItem().setClipToView(True)
+        lay.addWidget(self.plot)
+        self._curves: dict = {}
+
+    def add_source(self, key, source):
+        if key in self._curves:
+            return
+        self._curves[key] = self.plot.plot(
+            [], [], pen=pg.mkPen(color_for(key), width=1.5), name=source.name)
+
+    def remove_source(self, key):
+        curve = self._curves.pop(key, None)
+        if curve is not None:
+            self.plot.removeItem(curve)
+
+    def feed(self, batch):
+        latest = {}
+        for r in batch:
+            if r.key in self._curves and isinstance(r.value, Spectrum):
+                latest[r.key] = r.value
+        for key, spec in latest.items():
+            y = np.where(spec.intensity > 0, spec.intensity, np.nan)  # log-safe
+            self._curves[key].setData(spec.mass, y, connect="finite")
+
+
+# --------------------------------------------------------------------------- #
 #  Image display — a virtual SINK for an "image" source (e.g. a camera)
 # --------------------------------------------------------------------------- #
 class VideoView(QWidget):
@@ -489,6 +537,7 @@ class TogglePanel(InputPanel):
 PANEL_TYPES = {
     "chart": ("Chart", ChartPanel),
     "numeric": ("7-seg display", NumericPanel),
+    "spectrum": ("Mass spectrum", SpectrumPanel),
     "image": ("Camera view", ImagePanel),
     "slider": ("Slider", SliderPanel),
     "button": ("Button", ButtonPanel),

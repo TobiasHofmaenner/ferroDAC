@@ -10,6 +10,8 @@ import math
 import random
 import time
 
+import numpy as np
+
 from ..core.base import BaseDevice
 from ..core.device import (
     Interface,
@@ -21,6 +23,7 @@ from ..core.device import (
     SinkKind,
     Source,
 )
+from ..core.spectrum import Spectrum
 
 
 class FakeGaugeController(BaseDevice):
@@ -175,3 +178,52 @@ class FakePowerSupply(BaseDevice):
             i *= 1 + 0.01 * random.uniform(-1, 1)
         value = {"voltage": v, "current": i, "power": v * i}[source.id]
         return value, 0
+
+
+class FakeRGA(BaseDevice):
+    """A simulated residual-gas analyser (quadrupole mass spectrometer).
+
+    Emits a whole **mass spectrum** (intensity vs m/z) per scan — the array
+    modality. An Emission toggle gates the ion source: off → noise floor only.
+    Peaks sit at the usual residual gases (H2, H2O, N2/CO, O2, Ar, CO2 …).
+    """
+
+    driver = "fake_rga"
+    discoverable = True
+    # m/z -> partial pressure (mbar)
+    _PEAKS = {2: 8e-7, 14: 6e-8, 16: 1.0e-7, 17: 2.0e-7, 18: 1.2e-6,
+              28: 6e-7, 32: 1.5e-7, 40: 5e-8, 44: 3e-7}
+
+    @classmethod
+    def discover(cls):
+        return [cls(
+            instance_id="sim:rga:1",
+            name="Sim RGA",
+            interface=Interface(kind="sim", params={"addr": "RGA1"}),
+            sources=[Source(id="spectrum", name="Mass spectrum", unit="mbar",
+                            modality=Modality.WAVEFORM, dtype="spectrum",
+                            prefer_log=True)],
+            sinks=[Sink(id="emission", name="Emission", kind=SinkKind.TOGGLE,
+                        value=True)],
+            rate=RateControl(mode=RateMode.SETTABLE, native_hz=1.0,
+                             default_hz=0.5, min_hz=0.05, max_hz=2.0),
+            primary_source="spectrum",
+            hardware_id="SIM-RGA-0001",
+            model="SimRGA 1-50",
+        )]
+
+    def _connect(self) -> None:
+        time.sleep(0.3)
+        self._firmware = "SIMrga1"
+        self._mass = np.arange(1.0, 50.0, 0.2)
+
+    def _read(self, source):
+        mass = getattr(self, "_mass", np.arange(1.0, 50.0, 0.2))
+        inten = np.full_like(mass, 2e-9)               # baseline
+        if bool(self._sink_values.get("emission", True)):
+            for m, amp in self._PEAKS.items():
+                inten = inten + amp * (1 + 0.05 * random.uniform(-1, 1)) \
+                    * np.exp(-((mass - m) ** 2) / (2 * 0.25 ** 2))
+        inten = inten * (1 + 0.03 * np.random.uniform(-1, 1, size=mass.shape))
+        inten = np.clip(inten, 1e-12, None)
+        return Spectrum(mass, inten, unit="mbar"), 0
