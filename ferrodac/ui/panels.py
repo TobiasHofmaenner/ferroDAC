@@ -786,6 +786,18 @@ class GasConfigDialog(QDialog):
         self._sel_lbl.setStyleSheet("color:#8b95a4; font-size:11px;")
         root.addWidget(self._sel_lbl)
         self._refresh_list()
+        credit = QLabel(
+            "Reference cracking patterns from the "
+            "<a href='https://webbook.nist.gov/chemistry/'>NIST Chemistry WebBook</a> "
+            "(SRD 69) — public-domain U.S. Government data; use here does not imply "
+            "endorsement by NIST. Imported libraries from "
+            "<a href='https://mona.fiehnlab.ucdavis.edu'>MassBank of North America</a> "
+            "(<a href='https://creativecommons.org/licenses/by/4.0/'>CC BY 4.0</a>, "
+            "adapted). ferroDAC is not affiliated with or endorsed by NIST or MoNA.")
+        credit.setWordWrap(True)
+        credit.setOpenExternalLinks(True)
+        credit.setStyleSheet("color:#6b7686; font-size:10px;")
+        root.addWidget(credit)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
