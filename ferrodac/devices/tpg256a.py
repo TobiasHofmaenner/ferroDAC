@@ -60,10 +60,11 @@ PROBE_BAUDRATES: tuple[int, ...] = (9600, 19200)
 UNIT_TEXT = {0: "mbar", 1: "Torr", 2: "Pa"}
 
 GAUGE_TYPES = {
-    "TPR": "Pirani", "PCR": "Pirani/Capacitance", "IKR": "Cold cathode",
-    "IKR9": "Cold cathode", "IKR11": "Cold cathode", "PKR": "FullRange CC",
-    "APR": "Linear", "CMR": "Capacitance", "ACR": "Capacitance",
-    "IMR": "Pirani/High-p", "PBR": "FullRange BA",
+    "TPR": "Pirani", "PCR": "Pirani/Capa", "TPR/PCR": "Pirani/Capa",
+    "IKR": "Cold cathode", "IKR9": "Cold cathode", "IKR11": "Cold cathode",
+    "PKR": "FullRange CC", "APR": "Linear", "CMR": "Capacitance",
+    "ACR": "Capacitance", "APR/CMR": "Linear", "IMR": "Pirani/High-p",
+    "PBR": "FullRange BA",
 }
 # Gauge families whose emission can actually be switched on/off (SEN).
 SWITCHABLE = ("IKR", "PKR", "PBR", "IMR")
@@ -90,6 +91,7 @@ class ProbeResult:
     unit: str = "mbar"
     firmware: str = ""
     states: list = field(default_factory=list)   # on/off per channel (0/1/2)
+    serial: str = ""       # USB serial number (port-independent identity)
 
 
 # --------------------------------------------------------------------------- #
@@ -110,7 +112,8 @@ class _Link:
             pass
         self.ser.write(mnemonic.encode("ascii") + CR + LF)
         self.ser.flush()
-        resp = self.ser.read_until(expected=LF)
+        # strip stray CR/LF/NUL the line may carry from a prior partial exchange
+        resp = self.ser.read_until(expected=LF).lstrip(b"\r\n\x00")
         if not resp:
             raise ProtocolError(f"no response to {mnemonic!r}")
         if resp[:1] == ACK:
@@ -131,14 +134,23 @@ class _Link:
         self._send(mnemonic)
         return self._enquire()
 
-    def read_pressure(self, channel: int) -> tuple[int, float]:
-        parts = self.query(f"PR{channel}").split(",")
-        if len(parts) < 2:
-            raise ProtocolError(f"bad PR{channel}: {parts!r}")
-        try:
-            return int(parts[0].strip()), float(parts[1].strip())
-        except ValueError:
-            return int(parts[0].strip()), math.nan
+    def read_pressure(self, channel: int, attempts: int = 3) -> tuple[int, float]:
+        """Read one channel, retrying transient serial-framing glitches."""
+        last = None
+        for _ in range(attempts):
+            try:
+                parts = self.query(f"PR{channel}").split(",")
+                status = int(parts[0].strip())
+                value = float(parts[1].strip()) if len(parts) > 1 else math.nan
+                return status, value
+            except (ProtocolError, ValueError, IndexError) as exc:
+                last = exc
+                try:
+                    self.ser.reset_input_buffer()
+                except Exception:
+                    pass
+                time.sleep(0.03)
+        raise ProtocolError(f"PR{channel} failed after {attempts}: {last}")
 
     def read_identification(self) -> list[str]:
         return [t.strip() for t in self.query("TID").split(",")]
@@ -211,24 +223,29 @@ def probe_port(port: str, baudrates=PROBE_BAUDRATES) -> Optional[ProbeResult]:
         except Exception:
             return None       # cannot open at all → give up on this port
         try:
-            ser.write(ETX)
-            ser.flush()
-            time.sleep(0.05)
-            ser.reset_input_buffer()
-            ser.write(b"TID" + CR + LF)
-            ser.flush()
-            if ser.read_until(expected=LF)[:1] == ACK:
-                ser.write(ENQ)
+            for _ in range(3):      # tolerate a glitched identify on the right baud
+                ser.write(ETX)
                 ser.flush()
-                data = ser.read_until(expected=LF).decode("ascii", "replace").strip()
-                tokens = data.split(",")
-                if len(tokens) == 6:        # six channels ⇒ a MaxiGauge
-                    link = _Link(ser, port, baud)
-                    res = ProbeResult(port, baud, _gauges_from_idents(tokens),
-                                      link.read_unit(), link.read_firmware(),
-                                      link.read_states())
-                    ser.close()
-                    return res
+                time.sleep(0.05)
+                ser.reset_input_buffer()
+                ser.write(b"TID" + CR + LF)
+                ser.flush()
+                resp = ser.read_until(expected=LF).lstrip(b"\r\n\x00")
+                if not resp:
+                    break           # silent at this baud → move to the next one
+                if resp[:1] == ACK:
+                    ser.write(ENQ)
+                    ser.flush()
+                    data = ser.read_until(expected=LF).decode("ascii", "replace").strip()
+                    tokens = data.split(",")
+                    if len(tokens) == 6:    # six channels ⇒ a MaxiGauge
+                        link = _Link(ser, port, baud)
+                        res = ProbeResult(port, baud, _gauges_from_idents(tokens),
+                                          link.read_unit(), link.read_firmware(),
+                                          link.read_states())
+                        ser.close()
+                        return res
+                time.sleep(0.05)        # got noise → retry the identify
         except Exception:
             pass
         finally:
@@ -277,7 +294,7 @@ class TPG256ADevice(BaseDevice):
             rate=RateControl(mode=RateMode.SETTABLE, native_hz=2.0,
                              default_hz=1.0, min_hz=0.1, max_hz=5.0),
             primary_source=sources[0].id if sources else None,
-            hardware_id=f"TPG256A@{probe.port}",
+            hardware_id=f"TPG256A:{probe.serial or probe.port}",
             model="Pfeiffer MaxiGauge TPG 256 A",
         )
         self._unit = probe.unit
@@ -290,7 +307,9 @@ class TPG256ADevice(BaseDevice):
     def discover(cls):
         if not HAVE_SERIAL:
             return []
-        present = set(list_ports())
+        serials = {p.device: (p.serial_number or "")
+                   for p in serial.tools.list_ports.comports()}
+        present = set(serials)
         with cls._cls_lock:
             for p in [p for p in cls._cache if p not in present]:
                 del cls._cache[p]
@@ -298,6 +317,8 @@ class TPG256ADevice(BaseDevice):
                         if p not in cls._cache and p not in cls._active_ports]
         for p in to_probe:
             res = probe_port(p)                 # slow work outside the lock
+            if res is not None:
+                res.serial = serials.get(p, "")
             with cls._cls_lock:
                 if p not in cls._active_ports:
                     cls._cache[p] = res
