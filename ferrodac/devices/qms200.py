@@ -282,8 +282,10 @@ class QMS200Device(BaseDevice):
         # blocks waiting for a scan to finish. deque ops are atomic in CPython.
         self._write_q: deque = deque()
         self._reconfig_pending = False
-        self._scan_len = None        # last complete scan's point count, used to
-        #                              place partial (live-fill) frames correctly
+        self._full_len = None        # longest sweep seen for this config; the m/z
+        #                              axis is mapped against this (not the count
+        #                              of a possibly-truncated scan), so peaks stay
+        #                              put and a short scan just drops high masses
         self._apply_scan_params()
 
     # -- discovery -----------------------------------------------------------
@@ -370,6 +372,8 @@ class QMS200Device(BaseDevice):
         # Update local scan params immediately (cheap), and flag the poll thread
         # to reprogram the analyzer between scans — no GUI-thread serial I/O.
         self._apply_scan_params()
+        if key in ("range", "resolution"):      # sweep length changed → relearn
+            self._full_len = None
         self._reconfig_pending = True
 
     def _send_control(self, sink_id: str, value) -> None:
@@ -497,8 +501,10 @@ class QMS200Device(BaseDevice):
             self._last_error = (f"scan returned {len(points)} point(s) — check "
                                 "MBH/MDB framing (FERRODAC_QMS_DEBUG=1 for trace)")
             return self._empty(), 1
-        self._scan_len = len(points)                # for next scan's partial map
-        return self._make_trace(points), 0
+        # map against the longest sweep seen so a truncated scan keeps its masses
+        # aligned (missing high masses become NaN) instead of stretching the axis
+        self._full_len = max(self._full_len or 0, len(points))
+        return self._make_trace(points, total=self._full_len), 0
 
     def _drain_scan(self, source=None) -> list:
         """Read one scan: pull points (MDB) as the buffer (MBH) fills, until the
@@ -510,19 +516,20 @@ class QMS200Device(BaseDevice):
         resyncs = 0
         dropped = 0
         last_partial = time.monotonic()
-        deadline = time.monotonic() + self._scan_time() + 5.0
-        # `_streaming` lets stop()/disconnect() abort a long scan promptly instead
-        # of blocking on the IO lock until the scan deadline.
+        # Generous deadline (the scan can run longer than its nominal time once
+        # per-point serial overhead is added); the drain is abortable via
+        # `_streaming`, so a long ceiling is safe and just a backstop.
+        deadline = time.monotonic() + self._scan_time() * 1.4 + 8.0
         while self._streaming and time.monotonic() < deadline:
             if self._reconfig_pending:              # option changed → end this
                 break                               # sweep so the new config
             self._service_writes()                  # applies promptly; controls
             #                                         apply between chunks too
             now = time.monotonic()
-            if (source is not None and self._emit is not None and self._scan_len
+            if (source is not None and self._emit is not None and self._full_len
                     and points and now - last_partial >= 0.15):
                 self._emit(Reading(self.data_id, source.id, time.time(),
-                                   self._make_trace(points, total=self._scan_len),
+                                   self._make_trace(points, total=self._full_len),
                                    0, partial=True))
                 last_partial = now
             try:
@@ -532,7 +539,10 @@ class QMS200Device(BaseDevice):
                 avail = 0
             if avail <= 0:
                 idle += 1
-                if points and idle >= 6:            # ~0.3 s with no new data
+                # Wait ~0.8 s of no new data before concluding the sweep ended —
+                # tolerant of mid-sweep gaps so a slow scan isn't truncated (which
+                # would otherwise stretch the m/z axis).
+                if points and idle >= 16:
                     break
                 time.sleep(0.05)
                 continue

@@ -315,31 +315,57 @@ class SpectrumPanel(Panel):
         self.plot.addLegend(offset=(-10, 10))
         self.plot.getPlotItem().setClipToView(True)
         lay.addWidget(self.plot)
-        self._curves: dict = {}
+        self._curves: dict = {}            # current run (bright)
+        self._prev_curves: dict = {}       # previous completed run (dim, overlay)
+        self._last_complete: dict = {}     # key -> (x, y) of last complete scan
         self._cursor_lines: dict = {}      # trend cursors (id -> InfiniteLine)
         self.on_cursor_move = None          # set by the Dashboard
 
     def add_source(self, key, source):
         if key in self._curves:
             return
+        # previous-run ghost drawn underneath, current run on top
+        self._prev_curves[key] = self.plot.plot(
+            [], [], pen=pg.mkPen((120, 130, 145), width=1.0), name="previous")
         self._curves[key] = self.plot.plot(
             [], [], pen=pg.mkPen(color_for(key), width=1.5), name=source.name)
 
     def remove_source(self, key):
-        curve = self._curves.pop(key, None)
-        if curve is not None:
-            self.plot.removeItem(curve)
+        for store in (self._curves, self._prev_curves):
+            curve = store.pop(key, None)
+            if curve is not None:
+                self.plot.removeItem(curve)
+        self._last_complete.pop(key, None)
 
     def feed(self, batch):
-        latest = {}
+        # latest[key] = [trace_to_show, complete_trace_or_None]
+        latest: dict = {}
         for r in batch:
             if r.key in self._curves and isinstance(r.value, Trace):
-                latest[r.key] = r.value
-        for key, tr in latest.items():
+                slot = latest.setdefault(r.key, [None, None])
+                slot[0] = r.value
+                if not r.partial:
+                    slot[1] = r.value
+        autorange = False
+        for key, (tr, complete) in latest.items():
+            # ghost the last completed scan so a new (live-filling) run overlays it
+            prev = self._prev_curves.get(key)
+            if prev is not None and key in self._last_complete:
+                px, py = self._last_complete[key]
+                prev.setData(px, py, connect="finite")
             y = np.where(tr.y > 0, tr.y, np.nan)            # log-safe
             self._curves[key].setData(tr.x, y, connect="finite")
             self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
             self.plot.setLabel("left", _axis_text(tr.y_label, tr.y_unit))
+            if complete is not None:                        # rotate on full scans
+                self._last_complete[key] = (complete.x,
+                                            np.where(complete.y > 0, complete.y, np.nan))
+            # rescale only on a completed scan (or before the first one), so the
+            # live fill doesn't jitter the view every partial frame
+            if complete is not None or key not in self._last_complete:
+                autorange = True
+        if autorange:
+            self.plot.autoRange()
 
     def set_cursors(self, cursors):
         """Draw trend-cursor lines: cursors = [(id, name, mz, value, color)]."""
