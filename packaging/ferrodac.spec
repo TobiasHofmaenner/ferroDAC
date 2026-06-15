@@ -29,6 +29,10 @@ hiddenimports = collect_submodules("ferrodac")
 hiddenimports += collect_submodules(
     "pyqtgraph", filter=lambda name: not name.startswith("pyqtgraph.opengl")
 )
+# pyserial picks its port-enumeration backend at runtime by platform, so the
+# Windows one (serial.tools.list_ports_windows) is invisible to static analysis;
+# pull every serial submodule in or the frozen app can't list COM ports at all.
+hiddenimports += collect_submodules("serial")
 hiddenimports += [
     "PySide6.QtMultimedia",          # camera capture
     "PySide6.QtMultimediaWidgets",
@@ -37,7 +41,6 @@ hiddenimports += [
     "PySide6.QtOpenGLWidgets",
     "PySide6.QtSvg",
     "cv2",                           # vision preprocessing
-    "serial", "serial.tools.list_ports",
 ]
 
 datas = collect_data_files("pyqtgraph")

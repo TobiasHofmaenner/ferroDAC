@@ -187,7 +187,7 @@ class _Link:
             pass
 
 
-def _open_serial(port: str, baud: int, timeout: float = 0.4):
+def _open_serial(port: str, baud: int, timeout: float = 0.6):
     return serial.Serial(
         port, baud, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
         stopbits=serial.STOPBITS_ONE, timeout=timeout, write_timeout=timeout)
@@ -223,7 +223,10 @@ def probe_port(port: str, baudrates=PROBE_BAUDRATES) -> Optional[ProbeResult]:
         except Exception:
             return None       # cannot open at all → give up on this port
         try:
-            for _ in range(3):      # tolerate a glitched identify on the right baud
+            time.sleep(0.15)        # let the port + FTDI latency settle after open
+            # A present device may be slow to answer the first exchange (notably
+            # on Windows right after open), so retry rather than bail on silence.
+            for _ in range(4):
                 ser.write(ETX)
                 ser.flush()
                 time.sleep(0.05)
@@ -231,8 +234,6 @@ def probe_port(port: str, baudrates=PROBE_BAUDRATES) -> Optional[ProbeResult]:
                 ser.write(b"TID" + CR + LF)
                 ser.flush()
                 resp = ser.read_until(expected=LF).lstrip(b"\r\n\x00")
-                if not resp:
-                    break           # silent at this baud → move to the next one
                 if resp[:1] == ACK:
                     ser.write(ENQ)
                     ser.flush()
@@ -245,7 +246,7 @@ def probe_port(port: str, baudrates=PROBE_BAUDRATES) -> Optional[ProbeResult]:
                                           link.read_states())
                         ser.close()
                         return res
-                time.sleep(0.05)        # got noise → retry the identify
+                time.sleep(0.05)
         except Exception:
             pass
         finally:
