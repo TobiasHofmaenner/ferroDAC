@@ -1527,16 +1527,18 @@ class MainWindow(QMainWindow):
         ms = self.dashboard.markers
         if not self.recorder.active:
             sources = self.dashboard.capture_sources()
-            if not sources:
+            traces = self.dashboard.capture_traces()
+            if not sources and not traces:
                 self.statusBar().showMessage(
                     "Nothing to record — route some sources to a chart first.", 5000)
                 return
             run_dir = os.path.join(self._runs_dir(),
                                    "run_" + time.strftime("%Y-%m-%dT%H-%M-%S"))
+            n = len(sources) + len(traces)
             self._rec_start_mid = ms.add(
                 time.time(), kind=RECORDING, label="REC",
-                comment=f"{len(sources)} sources", run_dir=run_dir)
-            self.recorder.start(run_dir, sources)
+                comment=f"{n} sources", run_dir=run_dir)
+            self.recorder.start(run_dir, sources, traces)
             self.statusBar().showMessage(f"● Recording → {run_dir}")
         else:
             m = ms.get(self._rec_start_mid)

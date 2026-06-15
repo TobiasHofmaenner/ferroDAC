@@ -13,7 +13,10 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import time
+
+from .trace import Trace
 
 
 def _col(key: str, info: dict) -> str:
@@ -137,6 +140,8 @@ class Recorder:
         self._writer = None
         self._dir = None
         self._sources: dict = {}
+        self._trace_sources: dict = {}
+        self._trace_files: dict = {}
         self._cap_start = None
 
     @property
@@ -147,10 +152,12 @@ class Recorder:
     def run_dir(self):
         return self._dir
 
-    def start(self, run_dir: str, sources: dict) -> None:
+    def start(self, run_dir: str, sources: dict, trace_sources: dict = None) -> None:
         os.makedirs(run_dir, exist_ok=True)
         self._dir = run_dir
         self._sources = dict(sources)
+        self._trace_sources = dict(trace_sources or {})
+        self._trace_files = {}
         self._cap_start = time.time()
         self._raw = open(os.path.join(run_dir, "_capture.csv"), "a", newline="")
         self._writer = csv.writer(self._raw)
@@ -172,8 +179,28 @@ class Recorder:
             if r.key in self._sources and isinstance(r.value, (int, float)):
                 w.writerow([f"{r.t:.6f}", r.key, r.value, r.status])
                 wrote = True
+            elif r.key in self._trace_sources and isinstance(r.value, Trace):
+                self._write_trace_row(r)
         if wrote:
             self._raw.flush()
+
+    def _write_trace_row(self, r) -> None:
+        """Append a scan to a per-trace CSV (header = the m/z axis, written once).
+        Each row is `time_s` + the intensities; an axis-length change is skipped."""
+        info = self._trace_sources[r.key]
+        fh = self._trace_files.get(r.key)
+        if fh is None:
+            safe = re.sub(r"[^\w.-]", "_", info.get("name", r.key)) or "trace"
+            fh = open(os.path.join(self._dir, f"trace_{safe}.csv"), "a", newline="")
+            self._trace_files[r.key] = fh
+            info["n"] = len(r.value.x)
+            if fh.tell() == 0:
+                csv.writer(fh).writerow(["time_s"] + [f"{m:g}" for m in r.value.x])
+        if len(r.value.x) != info.get("n"):
+            return
+        csv.writer(fh).writerow([f"{r.t - self._cap_start:.3f}"]
+                                + [f"{v:.6E}" for v in r.value.y])
+        fh.flush()
 
     def stop(self, t_start=None, t_stop=None) -> str | None:
         if not self._active:
@@ -186,6 +213,12 @@ class Recorder:
             self._raw.flush()
             self._raw.close()
             self._raw = None
+        for fh in self._trace_files.values():
+            try:
+                fh.close()
+            except Exception:
+                pass
+        self._trace_files = {}
         out = materialize_capture(self._dir, self._sources, t_start, t_stop,
                                   history=self.history, cap_start=self._cap_start)
         # persistent run metadata (kept) — lets the recording be re-exported later

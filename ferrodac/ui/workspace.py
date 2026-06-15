@@ -313,6 +313,12 @@ class Dashboard(QObject):
                 out[key] = {"name": sp.name, "unit": sp.unit}
         return out
 
+    def capture_traces(self) -> dict:
+        """Routed trace (array) sources — recorded full-scan to per-trace CSVs."""
+        return {key: {"name": sp.name}
+                for key, sp in self._sources.items()
+                if sp.dtype == "trace" and self._routes.get(key)}
+
     def detectors_for(self, sink_key: str) -> list:
         with self._det_lock:
             return [d for d in self._detectors.values() if d.sink_key == sink_key]
