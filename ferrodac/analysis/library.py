@@ -75,10 +75,12 @@ def all_names() -> list[str]:
 # --------------------------------------------------------------------------- #
 #  Extensible store: import EI spectra (NIST/MoNA MSP) into the live library
 # --------------------------------------------------------------------------- #
+import io
 import json
 import os
 import re
 import urllib.request
+import zipfile
 
 _CURATED_NAMES = set(LIBRARY)            # the bundled defaults (never cached out)
 
@@ -171,18 +173,48 @@ def import_msp(path: str, max_mw: float = 250.0) -> int:
     return len(gases)
 
 
-# Best-effort bulk URL (MoNA GC-MS MSP, CC BY 4.0). The download page generates
-# links dynamically, so this can rot — Import-from-file is the reliable path.
-MONA_GCMS_MSP = ("https://mona.fiehnlab.ucdavis.edu/rest/downloads/retrieve/"
-                 "MoNA-export-GC-MS_Spectra.msp")
+# MoNA GC-MS EI library (CC BY 4.0). The export id rotates, so we query the
+# predefined-downloads API for the current one rather than hardcoding a link.
+_MONA_PREDEFINED = "https://mona.fiehnlab.ucdavis.edu/rest/downloads/predefined"
+_MONA_RETRIEVE = "https://mona.fiehnlab.ucdavis.edu/rest/downloads/retrieve/"
 
 
-def download_library(url: str = MONA_GCMS_MSP, max_mw: float = 250.0) -> int:
-    """Best-effort: fetch an MSP bulk export and import it. May fail if the URL
-    has changed — callers should fall back to import_msp()."""
-    dest = os.path.join(_cache_dir(), "download.msp")
-    urllib.request.urlretrieve(url, dest)
-    return import_msp(dest, max_mw)
+def _get(url: str, timeout: float) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "ferroDAC"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _mona_gcms_id() -> str:
+    """The current MoNA GC-MS MSP export id (the id rotates per re-export)."""
+    data = json.loads(_get(_MONA_PREDEFINED, 30))
+    for entry in data:
+        exp = entry.get("mspExport") or {}
+        tags = f"{entry.get('label', '')} {entry.get('query', '')} {exp.get('query', '')}"
+        if exp.get("format") == "msp" and "GC-MS" in tags and exp.get("id"):
+            return exp["id"]
+    raise RuntimeError("GC-MS MSP export not found in MoNA predefined downloads")
+
+
+def download_library(max_mw: float = 250.0) -> int:
+    """Best-effort: fetch + import the MoNA GC-MS library (a zip of one .msp).
+    Falls through with a clear error if MoNA's API/format changes — Import-from-
+    file is the dependable path."""
+    blob = _get(_MONA_RETRIEVE + _mona_gcms_id(), 180)
+    text = None
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            msps = [n for n in zf.namelist() if n.lower().endswith((".msp", ".txt"))]
+            if msps:
+                text = zf.read(msps[0]).decode("utf-8", "replace")
+    except zipfile.BadZipFile:
+        text = blob.decode("utf-8", "replace")   # served as raw msp, not zipped
+    if not text:
+        raise RuntimeError("no .msp found in the downloaded archive")
+    gases = parse_msp(text, max_mw)
+    add_compounds(gases)
+    _save_cache()
+    return len(gases)
 
 
 def _save_cache() -> None:
