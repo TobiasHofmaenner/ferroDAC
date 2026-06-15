@@ -145,6 +145,27 @@ must address devices in a way that survives moving to another machine/user.
   (2) full-session save/restore to viewer-neutral JSON (+ Qt dock blob); (3) the
   remote branch in Phase 2.
 
+## Decided: Record mechanics + markers/tags (2026-06-15)
+
+MVP client features that double as on-ramps to the server data plane. See
+[DESIGN.md §7.1](DESIGN.md).
+
+- **Shared session time base** across panels (one clock) — unblocks tags,
+  record markers, and the future replay timeline. Charts key x on a shared
+  origin so vertical lines align across graphs.
+- **One MarkerModel** holds event **tags** (timestamp + comment) and record
+  **start/stop** — the same draggable vertical-marker primitive; every chart
+  renders them (pyqtgraph `InfiniteLine`), **synced across all graphs**.
+- **Record** = append-only raw capture (crash-safe, long format) + markers as a
+  selection window; the wide `data.csv` is materialised at Stop (pre-roll
+  backfill from a bounded always-on history buffer). Crash → recover the
+  unfinalised capture on relaunch. Records all currently-routed sources.
+- **On-ramp**: the history buffer is the data plane's hot tier; the raw capture
+  is the precursor to the always-on persistence sink; markers become timeline
+  cursors/jump-points. Tags → `log.md` annotations (§10).
+- **Build order**: (1) shared clock + MarkerModel + synced chart tags + Events
+  dock; (2) history buffer + Recorder + Record/Stop UI + recovery.
+
 ## Explicitly deferred (designed, not built yet)
 
 Control · multi-station · waveform/video planes · web viewer · auth · WebDAV ·

@@ -272,6 +272,31 @@ the same key whether a device is local or remote.
 - **Wire format ≠ storage format.** The live wire may be binary/msgpack; the
   durable record is always open files.
 
+### 7.1 Record mechanics & the marker model (decided 2026-06-15)
+
+Record separates **capture** (always-on, crash-safe) from **selection** (movable
+markers) — so dragging a marker never re-serialises a long run.
+
+- **Capture = append-only raw file**, opened the instant you hit Record:
+  long format `t, uuid, source, value, status`, one row per reading. Append-only
+  ⇒ a crash leaves every recorded reading intact and nothing is ever rewritten.
+  A `_recording.json` sidecar (raw path, capture set, start time) lets a relaunch
+  detect an unfinalised capture and recover it.
+- **Two markers are a *selection window*, not a re-serialise trigger.** The clean
+  **wide `data.csv`** (columns-per-source, §8) is **materialised once at Stop**
+  by slicing the raw capture to `[start, stop]`; dragging *start* before the
+  press backfills from the always-on bounded **history buffer** (the pre-roll).
+- **Evolution:** once the persistence store exists, the live store is *always*
+  capturing, so Record stops needing its own file — it becomes two bookmarks over
+  the store and `data.csv` becomes a query-export. The marker UI is unchanged;
+  only the backing store graduates (per-record file → TSDB).
+- **Markers/tags are one primitive on a shared session time base.** Event **tags**
+  (timestamp + comment) and record **start/stop** are the same draggable vertical
+  time-marker, held in one `MarkerModel`; every chart renders them (pyqtgraph
+  `InfiniteLine`) against a single session clock, so they stay **synced across all
+  graphs**. Tags are session/run metadata: saved with the layout, auto-appended to
+  `log.md` (§10), and (later) jump-to points on the replay timeline.
+
 ---
 
 ## 8. Project folder = system of record

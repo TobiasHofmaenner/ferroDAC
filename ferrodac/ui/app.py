@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from .. import __version__
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
@@ -632,6 +633,121 @@ class SinksPanel(QWidget):
 
 
 # --------------------------------------------------------------------------- #
+#  Events / tags (markers shared across all charts)
+# --------------------------------------------------------------------------- #
+class _MarkerDialog(QDialog):
+    def __init__(self, label="", comment="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Tag")
+        self.setMinimumWidth(360)
+        form = QFormLayout(self)
+        self._label = QLineEdit(label)
+        self._comment = QLineEdit(comment)
+        form.addRow("Label", self._label)
+        form.addRow("Comment", self._comment)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        form.addRow(row)
+
+    def values(self):
+        return self._label.text().strip(), self._comment.text().strip()
+
+
+class EventsPanel(QWidget):
+    """Lists session markers (tags + record bookmarks); edit/remove."""
+
+    def __init__(self, markers, clock, parent=None):
+        super().__init__(parent)
+        self.markers = markers
+        self.clock = clock
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self._label = QLabel("Events")
+        self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
+        root.addWidget(self._label)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        host = QWidget()
+        self._layout = QVBoxLayout(host)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(6)
+        self._layout.addStretch(1)
+        scroll.setWidget(host)
+        root.addWidget(scroll, 1)
+        markers.changed.connect(self._rebuild)
+        self._rebuild()
+
+    def _rebuild(self):
+        clear_layout(self._layout)
+        ms = self.markers.all()
+        if not ms:
+            ph = QLabel("No events.\nDrop a tag with “＋ Tag”.")
+            ph.setStyleSheet("color:#7f8a99;")
+            ph.setWordWrap(True)
+            self._layout.addWidget(ph)
+        for m in ms:
+            self._layout.addWidget(self._row(m))
+        self._layout.addStretch(1)
+        self._label.setText(f"Events  ({len(ms)})")
+
+    def _row(self, m):
+        card = QFrame()
+        card.setObjectName("EventCard")
+        card.setStyleSheet(
+            "#EventCard { background:#171c26; border:1px solid #232a38;"
+            " border-radius:8px; }")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(2)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        dot = QLabel()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet(f"background:{m.color}; border-radius:5px;")
+        name = QLabel(m.label)
+        name.setStyleSheet("font-weight:700;")
+        t = QLabel(f"t={self.clock.rel(m.t):.1f}s")
+        t.setStyleSheet("color:#7f8a99; font-size:10px;")
+        top.addWidget(dot)
+        top.addWidget(name)
+        top.addStretch(1)
+        top.addWidget(t)
+        edit = QToolButton()
+        edit.setText("✎")
+        edit.clicked.connect(lambda _=False, mid=m.id: self._edit(mid))
+        rm = QToolButton()
+        rm.setText("✕")
+        rm.clicked.connect(lambda _=False, mid=m.id: self.markers.remove(mid))
+        top.addWidget(edit)
+        top.addWidget(rm)
+        lay.addLayout(top)
+        if m.comment:
+            c = QLabel(m.comment)
+            c.setStyleSheet("color:#8b95a4; font-size:11px;")
+            c.setWordWrap(True)
+            lay.addWidget(c)
+        return card
+
+    def _edit(self, mid):
+        m = self.markers.get(mid)
+        if m is None:
+            return
+        dlg = _MarkerDialog(m.label, m.comment, self)
+        if dlg.exec():
+            label, comment = dlg.values()
+            self.markers.update(mid, label=label or m.label, comment=comment)
+
+
+# --------------------------------------------------------------------------- #
 #  CV text-detection config — the ROI editor
 # --------------------------------------------------------------------------- #
 class _ROIEditor(QWidget):
@@ -998,7 +1114,14 @@ class MainWindow(QMainWindow):
         self.sinks_dock.setWidget(self.sinks_panel)
         self.sinks_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.RightDockWidgetArea, self.sinks_dock)
+        self.events_panel = EventsPanel(self.dashboard.markers, self.dashboard.clock)
+        self.events_dock = QDockWidget("Events", self)
+        self.events_dock.setObjectName("EventsDock")
+        self.events_dock.setWidget(self.events_panel)
+        self.events_dock.setMinimumWidth(280)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.events_dock)
         self.tabifyDockWidget(self.sources_dock, self.sinks_dock)
+        self.tabifyDockWidget(self.sinks_dock, self.events_dock)
         self.sources_dock.raise_()
 
         self.devices_panel = DevicesPanel(manager, self._open_config)
@@ -1028,6 +1151,7 @@ class MainWindow(QMainWindow):
         view.addAction(self.devices_dock.toggleViewAction())
         view.addAction(self.sources_dock.toggleViewAction())
         view.addAction(self.sinks_dock.toggleViewAction())
+        view.addAction(self.events_dock.toggleViewAction())
         view.addSeparator()
         self.edit_action = view.addAction("Edit layout")
         self.edit_action.setCheckable(True)
@@ -1040,9 +1164,19 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, k=kind: self.dashboard.add_panel(k))
 
         tb = self.addToolBar("Main")
+        tb.setObjectName("MainToolBar")
         tb.setMovable(False)
         tb.addAction(self.devices_dock.toggleViewAction())
         tb.addAction(self.edit_action)
+        tb.addSeparator()
+        tb.addAction("＋ Tag", self._add_tag)
+
+    def _add_tag(self):
+        dlg = _MarkerDialog(parent=self)
+        if dlg.exec():
+            label, comment = dlg.values()
+            self.dashboard.markers.add(time.time(), label=label, comment=comment)
+            self.events_dock.raise_()
 
     def _on_tick(self):
         self.sources_panel.update_live(self.engine.latest())

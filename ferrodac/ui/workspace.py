@@ -26,6 +26,7 @@ from qtpy.QtCore import QObject, Qt, Signal
 from qtpy.QtWidgets import QDockWidget, QMainWindow, QWidget
 
 from ..core.device import SinkKind
+from ..core.markers import MarkerModel, SessionClock
 from ..core.reading import Reading
 from ..vision import CVRunner, Detector
 from .panels import PANEL_TYPES, Panel
@@ -140,6 +141,8 @@ class Dashboard(QObject):
         self.engine = engine
         self.manager = manager
         self._panels: dict = {}                 # panel_id -> Panel
+        self.clock = SessionClock()             # one shared time origin
+        self.markers = MarkerModel(self)        # tags + record bookmarks
         self._sources: dict[str, SourcePort] = {}
         self._sinks: dict[str, SinkPort] = {}
         self._routes: dict[str, set] = {}        # source_key -> set(sink_key)
@@ -186,6 +189,9 @@ class Dashboard(QObject):
             )
             if self.default_sink_id is None and kind == "chart":
                 self.default_sink_id = pid
+
+        if hasattr(panel, "attach_session"):
+            panel.attach_session(self.clock, self.markers)
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -309,7 +315,8 @@ class Dashboard(QObject):
             })
         routes = {k: sorted(v) for k, v in self._routes.items() if v}
         return {"panels": panels, "detectors": detectors, "routes": routes,
-                "default_sink": self.default_sink_id}
+                "default_sink": self.default_sink_id,
+                "markers": self.markers.to_list()}
 
     def clear_layout(self) -> None:
         for pid in list(self._panels):
@@ -320,6 +327,7 @@ class Dashboard(QObject):
 
     def import_layout(self, data: dict) -> None:
         self.clear_layout()
+        self.markers.from_list(data.get("markers", []))
         for p in data.get("panels", []):
             pid = self.add_panel(p["kind"], pid=p["id"], title=p.get("title"))
             panel = self._panels.get(pid)

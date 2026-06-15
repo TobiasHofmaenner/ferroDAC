@@ -75,6 +75,61 @@ class ChartPanel(Panel):
         self._curves: dict = {}
         self._buf: dict = {}
         self._t0 = None
+        self.clock = None
+        self.markers = None
+        self._marker_lines: dict = {}
+
+    # -- shared session time base + markers ----------------------------------
+    def attach_session(self, clock, markers):
+        self.clock = clock
+        self.markers = markers
+        markers.changed.connect(self._sync_markers)
+        self._sync_markers()
+
+    def _x(self, t):
+        if self.clock is not None:
+            return self.clock.rel(t)
+        if self._t0 is None:
+            self._t0 = t
+        return t - self._t0
+
+    def _sync_markers(self):
+        if self.markers is None:
+            return
+        current = {m.id: m for m in self.markers.all()}
+        for mid in list(self._marker_lines):
+            if mid not in current:
+                self.plot.removeItem(self._marker_lines.pop(mid))
+        for mid, m in current.items():
+            x = self._x(m.t)
+            line = self._marker_lines.get(mid)
+            if line is None:
+                line = pg.InfiniteLine(
+                    pos=x, angle=90, movable=True,
+                    pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
+                    label=m.label,
+                    labelOpts={"position": 0.92, "color": m.color,
+                               "fill": (10, 14, 19, 180)})
+                line.sigPositionChangeFinished.connect(
+                    lambda _=None, mid=mid: self._on_marker_drag(mid))
+                self.plot.addItem(line)
+                self._marker_lines[mid] = line
+            else:
+                if abs(line.value() - x) > 1e-9:
+                    line.blockSignals(True)
+                    line.setValue(x)
+                    line.blockSignals(False)
+                try:
+                    line.label.setFormat(m.label)
+                except Exception:
+                    pass
+
+    def _on_marker_drag(self, mid):
+        line = self._marker_lines.get(mid)
+        if line is None or self.markers is None:
+            return
+        t = self.clock.abs(line.value()) if self.clock else line.value()
+        self.markers.move(mid, t)
 
     def add_source(self, key, source):
         if key in self._curves:
@@ -97,10 +152,8 @@ class ChartPanel(Panel):
                 continue
             if not isinstance(r.value, (int, float)):
                 continue
-            if self._t0 is None:
-                self._t0 = r.t
             xs, ys = buf
-            xs.append(r.t - self._t0)
+            xs.append(self._x(r.t))
             ok = r.status == 0 and r.value == r.value and r.value > 0
             ys.append(r.value if ok else float("nan"))
             self._curves[r.key].setData(xs, ys, connect="finite")
