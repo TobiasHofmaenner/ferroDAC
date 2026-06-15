@@ -8,3 +8,4 @@ type. Kept Qt-free so it is unit-testable headless and could run server-side.
 
 from .processor import Port, Processor, PROCESSOR_TYPES, register  # noqa: F401
 from . import cursor  # noqa: F401  registers CursorProcessor
+from . import gas     # noqa: F401  registers GasAnalyzer
