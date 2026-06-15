@@ -422,7 +422,8 @@ class WaterfallPanel(Panel):
     def feed(self, batch):
         tr = None
         for r in batch:
-            if r.key == self._src_key and isinstance(r.value, Trace):
+            if r.key == self._src_key and isinstance(r.value, Trace) \
+                    and not r.partial:           # one row per complete scan
                 tr = r.value
         if tr is None:
             return

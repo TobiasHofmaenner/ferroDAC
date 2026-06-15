@@ -176,6 +176,8 @@ class Recorder:
         w = self._writer
         wrote = False
         for r in batch:
+            if getattr(r, "partial", False):
+                continue                          # preview frame — not recorded
             if r.key in self._sources and isinstance(r.value, (int, float)):
                 w.writerow([f"{r.t:.6f}", r.key, r.value, r.status])
                 wrote = True

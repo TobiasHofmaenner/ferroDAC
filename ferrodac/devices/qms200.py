@@ -38,6 +38,7 @@ import numpy as np
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
 from ..core.base import BaseDevice
+from ..core.reading import Reading
 from ..core.device import (
     Interface,
     Modality,
@@ -281,6 +282,8 @@ class QMS200Device(BaseDevice):
         # blocks waiting for a scan to finish. deque ops are atomic in CPython.
         self._write_q: deque = deque()
         self._reconfig_pending = False
+        self._scan_len = None        # last complete scan's point count, used to
+        #                              place partial (live-fill) frames correctly
         self._apply_scan_params()
 
     # -- discovery -----------------------------------------------------------
@@ -448,13 +451,18 @@ class QMS200Device(BaseDevice):
         x = np.linspace(self._first, self._last, n)
         return Trace(x, np.full(n, np.nan), x_label="m/z", y_label="Intensity")
 
-    def _make_trace(self, points) -> Trace:
-        """Map the drained sweep onto an m/z axis. In "peak" readout each
-        integer mass becomes the peak intensity in its ±0.5 u window, which
-        collapses the dense, log-unfriendly analog sweep into a clean per-mass
-        spectrum and rejects single-point noise/valley spikes."""
+    def _make_trace(self, points, total: int = None) -> Trace:
+        """Map a (possibly partial) sweep onto an m/z axis. `total` is the full
+        sweep length: for a partial scan the points so far cover only the first
+        len(points)/total of the mass span, so they are placed there rather than
+        stretched across the whole range. In "peak" readout each integer mass
+        becomes the peak intensity in its ±0.5 u window, which collapses the
+        dense, log-unfriendly analog sweep into a clean per-mass spectrum and
+        rejects single-point noise/valley spikes."""
         y = np.asarray(points, dtype=float)
-        x = np.linspace(self._first, self._last, len(y))
+        total = total or len(y)
+        span = self._last - self._first
+        x = self._first + span * np.arange(len(y)) / max(1, total - 1)
         if self._readout == "peak":
             masses = np.arange(self._first, self._last + 1, dtype=float)
             inten = np.full(len(masses), np.nan)
@@ -479,7 +487,7 @@ class QMS200Device(BaseDevice):
             self._service_writes()                  # apply queued controls
             try:
                 self._link.query("CRU ,2")          # start a scan
-                points = self._drain_scan()
+                points = self._drain_scan(source)
             except ProtocolError as exc:
                 self._drop_link(str(exc))
                 return self._empty(), 1
@@ -489,15 +497,19 @@ class QMS200Device(BaseDevice):
             self._last_error = (f"scan returned {len(points)} point(s) — check "
                                 "MBH/MDB framing (FERRODAC_QMS_DEBUG=1 for trace)")
             return self._empty(), 1
+        self._scan_len = len(points)                # for next scan's partial map
         return self._make_trace(points), 0
 
-    def _drain_scan(self) -> list:
+    def _drain_scan(self, source=None) -> list:
         """Read one scan: pull points (MDB) as the buffer (MBH) fills, until the
-        scan stops producing or we time out. Point count defines the m/z axis."""
+        scan stops producing or we time out. Point count defines the m/z axis.
+        While draining, emit throttled *partial* frames so the spectrum fills in
+        live (peak/analog both mapped via the last scan's length)."""
         points: list = []
         idle = 0
         resyncs = 0
         dropped = 0
+        last_partial = time.monotonic()
         deadline = time.monotonic() + self._scan_time() + 5.0
         # `_streaming` lets stop()/disconnect() abort a long scan promptly instead
         # of blocking on the IO lock until the scan deadline.
@@ -506,6 +518,13 @@ class QMS200Device(BaseDevice):
                 break                               # sweep so the new config
             self._service_writes()                  # applies promptly; controls
             #                                         apply between chunks too
+            now = time.monotonic()
+            if (source is not None and self._emit is not None and self._scan_len
+                    and points and now - last_partial >= 0.15):
+                self._emit(Reading(self.data_id, source.id, time.time(),
+                                   self._make_trace(points, total=self._scan_len),
+                                   0, partial=True))
+                last_partial = now
             try:
                 hdr = self._link.query("MBH").split(",")
                 avail = int(hdr[3]) if len(hdr) > 3 else 0

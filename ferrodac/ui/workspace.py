@@ -596,8 +596,8 @@ class Dashboard(QObject):
     def _on_batch(self, batch):
         """Engine sink: extract trend cursors + write routed sources to sinks."""
         for r in batch:
-            if isinstance(r.value, Trace):
-                self._extract_cursors(r)
+            if isinstance(r.value, Trace) and not r.partial:
+                self._extract_cursors(r)        # complete scans only
             for sink_key in self._routes.get(r.key, ()):
                 sp = self._sinks.get(sink_key)
                 if sp is not None and sp.kind == "device":

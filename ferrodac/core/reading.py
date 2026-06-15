@@ -12,6 +12,9 @@ class Reading:
     t: float           # wall-clock timestamp (seconds)
     value: float
     status: int = 0    # 0 = ok
+    partial: bool = False  # preview frame (e.g. a partially-scanned spectrum):
+    #                        live displays render it, but recorders / waterfall /
+    #                        cursor extraction ignore it and wait for the complete.
 
     @property
     def key(self) -> str:
