@@ -73,6 +73,10 @@ SPEED_S_PER_AMU = {7: 0.1, 8: 0.2, 9: 0.5, 10: 1.0, 11: 2.0}
 # resolution code → points per amu (MST); used only to estimate scan time
 STEPS_PER_AMU = {0: 1, 1: 8, 2: 64}
 
+# C-SEM high voltage: operated ~900–1500 V; clamp generously and let the unit
+# reject out-of-range. Exact ceiling + SHV value units are hardware-validated.
+SEM_HV_MAX = 2200.0
+
 SCAN_RANGES = [("1-50", "1–50 u"), ("1-100", "1–100 u"), ("1-200", "1–200 u"),
                ("12-50", "12–50 u")]
 SPEED_OPTS = [(7, "0.1 s/u"), (8, "0.2 s/u"), (9, "0.5 s/u"),
@@ -236,6 +240,10 @@ class QMS200Device(BaseDevice):
                      value="Faraday"),
                 Sink(id="multiplier", name="Multiplier (SEM HV)",
                      kind=SinkKind.TOGGLE, value=False),
+                Sink(id="sem_voltage", name="SEM voltage", kind=SinkKind.SETPOINT,
+                     params=(Param("v", "float", "V",
+                                   minimum=0.0, maximum=SEM_HV_MAX),),
+                     value=900.0),
             ],
             rate=RateControl(mode=RateMode.SETTABLE, native_hz=1.0,
                              default_hz=0.5, min_hz=0.02, max_hz=2.0),
@@ -314,6 +322,7 @@ class QMS200Device(BaseDevice):
             ("multiplier", "SEM", lambda r: r.strip() == "1"),
             ("detector", "SDT", lambda r: "SEM" if (r.strip() and int(r) > 0)
              else "Faraday"),
+            ("sem_voltage", "SHV", lambda r: float(r.split(",")[0].strip())),
         ):
             try:
                 self._sink_values[sink_id] = parse(self._link.query(cmd))
@@ -333,6 +342,10 @@ class QMS200Device(BaseDevice):
                 self._link.query("SEM ,1" if value else "SEM ,0")
             elif sink.id == "detector":
                 self._link.query("SDT ,1" if value == "SEM" else "SDT ,0")
+            elif sink.id == "sem_voltage":
+                # Stage the multiplier HV; only physically applied while the
+                # multiplier (SEM) is on, which the user controls separately.
+                self._link.query(f"SHV ,{int(round(value))}")
 
     def _on_option(self, key: str, value) -> None:
         self._apply_scan_params()
