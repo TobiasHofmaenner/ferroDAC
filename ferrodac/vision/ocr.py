@@ -53,18 +53,36 @@ def qimage_to_rgb(qimg: QImage) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 #  Preprocess + recognise
 # --------------------------------------------------------------------------- #
-def preprocess(rgb: np.ndarray, invert: bool = False,
-               threshold: bool = False, scale: int = 3) -> np.ndarray:
-    """Grayscale → optional upscale (helps small ROIs) → invert → Otsu binarize."""
+def preprocess(rgb: np.ndarray, invert: bool = False, threshold: bool = False,
+               scale: int = 3, adaptive: bool = False, denoise: bool = False,
+               rotate: float = 0.0, thresh_value: int = 0) -> np.ndarray:
+    """Grayscale → deskew → upscale → denoise → invert → binarize.
+
+    Binarization (when ``threshold``): adaptive Gaussian, manual (``thresh_value``
+    > 0), or Otsu (default). Built general for mixed displays.
+    """
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    if rotate:
+        h, w = gray.shape
+        m = cv2.getRotationMatrix2D((w / 2, h / 2), rotate, 1.0)
+        gray = cv2.warpAffine(gray, m, (w, h), flags=cv2.INTER_CUBIC,
+                              borderMode=cv2.BORDER_REPLICATE)
     if scale and scale != 1:
         gray = cv2.resize(gray, None, fx=scale, fy=scale,
                           interpolation=cv2.INTER_CUBIC)
+    if denoise:
+        gray = cv2.medianBlur(gray, 3)
     if invert:
         gray = cv2.bitwise_not(gray)
     if threshold:
-        gray = cv2.threshold(gray, 0, 255,
-                             cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        if adaptive:
+            gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                         cv2.THRESH_BINARY, 31, 10)
+        elif thresh_value and thresh_value > 0:
+            gray = cv2.threshold(gray, thresh_value, 255, cv2.THRESH_BINARY)[1]
+        else:
+            gray = cv2.threshold(gray, 0, 255,
+                                 cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     return gray
 
 

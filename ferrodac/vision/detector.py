@@ -1,32 +1,44 @@
 """A Detector — an OCR-backed virtual source reading a ROI of a frame.
 
-It crops its region of interest, recognises text, parses it to the configured
-type, and applies a failure policy when parsing fails. The Dashboard registers
-each Detector as a normal SourcePort, so its value routes like any other.
+It crops its region of interest, recognises text, and turns it into a trustworthy
+routable value:
+
+    OCR text → parse → gain·x + offset → accept-window → stability filter
+
+with a failure policy (NaN gap / zero / hold-last) whenever a step rejects the
+read. The Dashboard registers each Detector as a normal SourcePort.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections import Counter, deque
+from dataclasses import dataclass, field
+from typing import Optional
 
 from .ocr import preprocess, recognize
 
 _NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+_TRUE = ("1", "on", "true", "yes", "hi", "high")
+_FALSE = ("0", "off", "false", "no", "lo", "low")
 
 # parse_as -> routing dtype (what compatible-sink filtering uses)
 _PARSE_DTYPE = {"float": "float", "int": "float", "bool": "bool", "text": "string"}
 
 PARSE_LABELS = [("float", "Float"), ("int", "Integer"),
                 ("bool", "Boolean"), ("text", "Text")]
-FAIL_LABELS = [("nan", "Not-a-number (gap)"), ("zero", "Zero"),
+FAIL_LABELS = [("nan", "Not-a-number (gap)"), ("zero", "Zero / empty"),
                ("hold", "Hold last good")]
 WHITELIST_PRESETS = {
-    "float": "0123456789.-",
-    "int": "0123456789-",
-    "bool": "",
-    "text": "",
+    "float": "0123456789.-", "int": "0123456789-", "bool": "", "text": "",
 }
+
+# Configurable fields that are serialized with a saved session.
+CONFIG_FIELDS = (
+    "parse_as", "on_fail", "whitelist", "unit",
+    "scale", "invert", "threshold", "adaptive", "thresh_value", "denoise", "rotate",
+    "gain", "offset", "vmin", "vmax", "smooth", "rate_hz",
+)
 
 
 @dataclass
@@ -38,19 +50,37 @@ class Detector:
     parse_as: str = "float"        # float | int | bool | text
     on_fail: str = "nan"           # nan | zero | hold
     whitelist: str = "0123456789.-"
+    unit: str = ""
+    psm: int = 7
+    # preprocessing
+    scale: int = 3
     invert: bool = False
     threshold: bool = False
-    scale: int = 3
-    psm: int = 7
+    adaptive: bool = False         # adaptive vs Otsu/manual when threshold is on
+    thresh_value: int = 0          # >0 = manual threshold, else Otsu
+    denoise: bool = False
+    rotate: float = 0.0            # degrees (deskew)
+    # value pipeline
+    gain: float = 1.0
+    offset: float = 0.0
+    vmin: Optional[float] = None
+    vmax: Optional[float] = None
+    smooth: int = 1                # stability window (median/mode of last N)
+    rate_hz: float = 5.0
     # runtime state
     panel: object = None
     last_text: str = ""
     last_value: object = None
-    _last_good: object = None
+    _good: object = field(default=None, repr=False)        # rolling window
+    _last_good: object = field(default=None, repr=False)
 
     @property
     def dtype(self) -> str:
         return _PARSE_DTYPE.get(self.parse_as, "string")
+
+    @property
+    def numeric(self) -> bool:
+        return self.parse_as in ("float", "int")
 
     # -- processing ----------------------------------------------------------
     def crop(self, rgb):
@@ -62,42 +92,72 @@ class Detector:
         h = max(1, min(int(h), H - y))
         return rgb[y:y + h, x:x + w]
 
+    def preprocessed(self, rgb):
+        return preprocess(self.crop(rgb), self.invert, self.threshold, self.scale,
+                          self.adaptive, self.denoise, self.rotate, self.thresh_value)
+
     def read(self, rgb):
-        """OCR the ROI of a full RGB frame → (value, raw_text, status)."""
-        gray = preprocess(self.crop(rgb), self.invert, self.threshold, self.scale)
-        text = recognize(gray, self.whitelist, self.psm)
+        """OCR + parse + transform + range + stability → (value, raw_text, status)."""
+        text = recognize(self.preprocessed(rgb), self.whitelist, self.psm)
         self.last_text = text
-        value, status = self._parse(text)
+        value, status = self._finalize(*self._parse_raw(text))
         self.last_value = value
         return value, text, status
 
-    def _parse(self, text: str):
+    # -- pipeline stages -----------------------------------------------------
+    def _parse_raw(self, text: str):
+        """OCR text → (raw_value, ok) — no transform / failure policy yet."""
         if self.parse_as == "text":
-            return text, (0 if text else 1)
+            return text, bool(text)
         if self.parse_as == "bool":
             t = text.strip().lower()
-            if t in ("1", "on", "true", "yes", "hi", "high"):
-                self._last_good = True
-                return True, 0
-            if t in ("0", "off", "false", "no", "lo", "low"):
-                self._last_good = False
-                return False, 0
-            return self._fail(False)
+            if t in _TRUE:
+                return True, True
+            if t in _FALSE:
+                return False, True
+            return None, False
         m = _NUM_RE.search(text.replace(" ", ""))
         if m:
             try:
                 v = float(m.group())
-                if self.parse_as == "int":
-                    v = float(round(v))
-                self._last_good = v
-                return v, 0
+                return (float(round(v)) if self.parse_as == "int" else v), True
             except ValueError:
                 pass
-        return self._fail(float("nan"))
+        return None, False
 
-    def _fail(self, nan_value):
+    def _finalize(self, raw, ok):
+        if ok and self.numeric:
+            raw = self.gain * raw + self.offset
+            if (self.vmin is not None and raw < self.vmin) or \
+               (self.vmax is not None and raw > self.vmax):
+                ok = False                      # outside the accept-window
+        if ok:
+            self._push(raw)
+            return self._smoothed(), 0
+        return self._on_fail()
+
+    def _push(self, v):
+        n = max(1, int(self.smooth))
+        if self._good is None or self._good.maxlen != n:
+            self._good = deque(self._good or (), maxlen=n)
+        self._good.append(v)
+        self._last_good = v
+
+    def _smoothed(self):
+        w = list(self._good or ())
+        if not w:
+            return self._last_good
+        if self.numeric:
+            s = sorted(w)
+            med = s[len(s) // 2] if len(s) % 2 else (s[len(s) // 2 - 1] + s[len(s) // 2]) / 2
+            return float(round(med)) if self.parse_as == "int" else med
+        return Counter(w).most_common(1)[0][0]      # mode for bool/text
+
+    def _on_fail(self):
+        empty = False if self.parse_as == "bool" else ("" if self.parse_as == "text" else 0.0)
         if self.on_fail == "zero":
-            return (False if self.parse_as == "bool" else 0.0), 0
+            return empty, 0
         if self.on_fail == "hold" and self._last_good is not None:
             return self._last_good, 0
-        return nan_value, 1
+        nan = float("nan") if self.numeric else empty
+        return nan, 1

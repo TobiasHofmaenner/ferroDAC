@@ -29,6 +29,7 @@ from ..core.device import SinkKind
 from ..core.markers import MarkerModel, SessionClock
 from ..core.reading import Reading
 from ..vision import CVRunner, Detector
+from ..vision.detector import CONFIG_FIELDS
 from .panels import PANEL_TYPES, Panel
 
 _SINK_DTYPE = {
@@ -245,7 +246,7 @@ class Dashboard(QObject):
             self._detectors[did] = det
         key = f"cv/{did}"
         origin = f"CV · {sink.name}" if sink is not None else "CV"
-        self._sources[key] = SourcePort(key, name, det.dtype, "", origin, "virtual")
+        self._sources[key] = SourcePort(key, name, det.dtype, det.unit, origin, "virtual")
         self._routes.setdefault(key, set())
         self._ensure_cv()
         self.ports_changed.emit()
@@ -262,6 +263,7 @@ class Dashboard(QObject):
         if sp is not None:
             sp.name = det.name
             sp.dtype = det.dtype
+            sp.unit = det.unit
         self.ports_changed.emit()
 
     def remove_detector(self, did: str, _emit: bool = True) -> None:
@@ -306,7 +308,7 @@ class Dashboard(QObject):
 
     def _ensure_cv(self) -> None:
         if self._cv is None:
-            self._cv = CVRunner(self.engine, self._snapshot_detectors, rate_hz=5.0)
+            self._cv = CVRunner(self.engine, self._snapshot_detectors)
             self._cv.start()
 
     def shutdown(self) -> None:
@@ -326,12 +328,10 @@ class Dashboard(QObject):
             panels.append(entry)
         detectors = []
         for det in self._snapshot_detectors():
-            detectors.append({
-                "id": det.id, "name": det.name, "sink": det.sink_key,
-                "roi": list(det.roi), "parse_as": det.parse_as, "on_fail": det.on_fail,
-                "whitelist": det.whitelist, "invert": det.invert,
-                "threshold": det.threshold, "scale": det.scale,
-            })
+            entry = {"id": det.id, "name": det.name, "sink": det.sink_key,
+                     "roi": list(det.roi)}
+            entry.update({f: getattr(det, f) for f in CONFIG_FIELDS})
+            detectors.append(entry)
         routes = {k: sorted(v) for k, v in self._routes.items() if v}
         return {"panels": panels, "detectors": detectors, "routes": routes,
                 "default_sink": self.default_sink_id,
@@ -355,13 +355,9 @@ class Dashboard(QObject):
         if data.get("default_sink"):
             self.default_sink_id = data["default_sink"]
         for d in data.get("detectors", []):
-            self.add_detector(
-                d["sink"], name=d["name"], roi=tuple(d["roi"]),
-                parse_as=d.get("parse_as", "float"), on_fail=d.get("on_fail", "nan"),
-                did=d["id"], whitelist=d.get("whitelist", ""),
-                invert=d.get("invert", False), threshold=d.get("threshold", False),
-                scale=d.get("scale", 3),
-            )
+            cfg = {f: d[f] for f in CONFIG_FIELDS if f in d}
+            self.add_detector(d["sink"], name=d.get("name", "Reading"),
+                              roi=tuple(d["roi"]), did=d["id"], **cfg)
         for src, sinks in data.get("routes", {}).items():
             for sink in sinks:
                 self.set_route(src, sink, True)

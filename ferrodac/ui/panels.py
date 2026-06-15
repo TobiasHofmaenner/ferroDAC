@@ -10,7 +10,7 @@ from __future__ import annotations
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
 from qtpy.QtCore import QRect, Qt, Signal
-from qtpy.QtGui import QColor, QImage, QPainter, QPalette
+from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen
 from qtpy.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -289,16 +289,32 @@ class VideoView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._img: QImage | None = None
+        self._overlays: list = []     # (text, roi, color, ok) — detector regions
         self.setMinimumSize(160, 120)
 
     def set_image(self, img) -> None:
         self._img = img
         self.update()
 
+    def set_overlays(self, overlays) -> None:
+        self._overlays = overlays
+        self.update()
+
     def image_size(self):
         if self._img is None or self._img.isNull():
             return None
         return self._img.width(), self._img.height()
+
+    def _roi_to_widget(self, roi) -> QRect:
+        cr = self.content_rect()
+        sz = self.image_size()
+        if sz is None:
+            return QRect()
+        iw, ih = sz
+        x, y, w, h = roi
+        sx, sy = cr.width() / iw, cr.height() / ih
+        return QRect(int(cr.x() + x * sx), int(cr.y() + y * sy),
+                     int(w * sx), int(h * sy))
 
     def content_rect(self) -> QRect:
         """The rectangle the image currently occupies (centred, aspect-fit)."""
@@ -320,6 +336,20 @@ class VideoView(QWidget):
             return
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.drawImage(self.content_rect(), self._img)
+        for text, roi, color, ok in self._overlays:
+            r = self._roi_to_widget(roi)
+            col = QColor(color)
+            pen = QPen(col)
+            pen.setWidth(2)
+            if not ok:
+                pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.drawRect(r)
+            tw = p.fontMetrics().horizontalAdvance(text) + 8
+            p.fillRect(QRect(r.x(), r.y() - 16, tw, 15),
+                       col if ok else QColor("#3a2f24"))
+            p.setPen(QColor("#0b0e13") if ok else QColor("#caa472"))
+            p.drawText(r.x() + 4, r.y() - 4, text)
 
 
 class ImagePanel(Panel):

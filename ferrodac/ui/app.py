@@ -923,46 +923,104 @@ class ImageConfigDialog(QDialog):
         self._reload_list()
 
     # -- form ----------------------------------------------------------------
+    def _spin(self, lo, hi, val, step=1.0, decimals=0, prefix="", suffix=""):
+        s = QDoubleSpinBox() if decimals else QSpinBox()
+        s.setRange(lo, hi)
+        s.setValue(val)
+        if decimals:
+            s.setDecimals(decimals)
+        s.setSingleStep(step)
+        if prefix:
+            s.setPrefix(prefix)
+        if suffix:
+            s.setSuffix(suffix)
+        return s
+
     def _build_form(self):
         right = QVBoxLayout()
         form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
         self._name = QLineEdit("Reading")
-        form.addRow("Name", self._name)
+        self._unit = QLineEdit()
+        self._unit.setPlaceholderText("unit")
+        self._unit.setFixedWidth(70)
+        form.addRow("Name", self._pair(self._name, self._unit, 1, 0))
         self._type = QComboBox()
         for val, label in PARSE_LABELS:
             self._type.addItem(label, val)
         self._type.currentIndexChanged.connect(self._on_type)
-        form.addRow("Type", self._type)
         self._fail = QComboBox()
         for val, label in FAIL_LABELS:
             self._fail.addItem(label, val)
-        form.addRow("On failure", self._fail)
+        form.addRow("Type", self._pair(self._type, self._fail, 1, 1))
         self._whitelist = QLineEdit(WHITELIST_PRESETS["float"])
         form.addRow("Whitelist", self._whitelist)
-        chk = QHBoxLayout()
+
+        # preprocessing
         self._invert = QCheckBox("Invert")
         self._thresh = QCheckBox("Threshold")
-        self._scale = QSpinBox()
-        self._scale.setRange(1, 6)
-        self._scale.setValue(3)
-        self._scale.setPrefix("×")
-        chk.addWidget(self._invert)
-        chk.addWidget(self._thresh)
-        chk.addWidget(QLabel("Scale"))
-        chk.addWidget(self._scale)
-        chk.addStretch(1)
-        form.addRow("Preprocess", self._wrap(chk))
+        self._adaptive = QCheckBox("Adaptive")
+        self._denoise = QCheckBox("Denoise")
+        pp = QHBoxLayout()
+        for w in (self._invert, self._thresh, self._adaptive, self._denoise):
+            pp.addWidget(w)
+        pp.addStretch(1)
+        form.addRow("Clean-up", self._wrap(pp))
+        self._scale = self._spin(1, 6, 3, prefix="×")
+        self._rotate = self._spin(-45, 45, 0, step=0.5, decimals=1, suffix="°")
+        sr = QHBoxLayout()
+        sr.addWidget(QLabel("Scale"))
+        sr.addWidget(self._scale)
+        sr.addWidget(QLabel("Rotate"))
+        sr.addWidget(self._rotate)
+        sr.addStretch(1)
+        form.addRow("", self._wrap(sr))
+
+        # value pipeline
+        self._gain = self._spin(-1e6, 1e6, 1.0, step=0.1, decimals=4)
+        self._offset = self._spin(-1e9, 1e9, 0.0, step=0.1, decimals=4)
+        vt = QHBoxLayout()
+        vt.addWidget(QLabel("gain ×"))
+        vt.addWidget(self._gain)
+        vt.addWidget(QLabel("+ offset"))
+        vt.addWidget(self._offset)
+        vt.addStretch(1)
+        form.addRow("Value", self._wrap(vt))
+        self._vmin = QLineEdit()
+        self._vmin.setPlaceholderText("min")
+        self._vmax = QLineEdit()
+        self._vmax.setPlaceholderText("max")
+        rg = QHBoxLayout()
+        rg.addWidget(self._vmin)
+        rg.addWidget(QLabel("…"))
+        rg.addWidget(self._vmax)
+        rg.addStretch(1)
+        form.addRow("Accept range", self._wrap(rg))
+        self._smooth = self._spin(1, 25, 1, suffix=" smpl")
+        self._rate = self._spin(0.1, 10, 5, step=0.5, decimals=1, suffix=" Hz")
+        sm = QHBoxLayout()
+        sm.addWidget(QLabel("Stabilise"))
+        sm.addWidget(self._smooth)
+        sm.addWidget(QLabel("Rate"))
+        sm.addWidget(self._rate)
+        sm.addStretch(1)
+        form.addRow("Sampling", self._wrap(sm))
         right.addLayout(form)
 
         # live preview
         self._preview = QLabel("draw a box, then Test")
-        self._preview.setFixedHeight(70)
+        self._preview.setFixedHeight(64)
         self._preview.setAlignment(Qt.AlignCenter)
         self._preview.setStyleSheet("background:#0b0e13; border:1px solid #232a38;")
         right.addWidget(self._preview)
+        prow = QHBoxLayout()
         self._result = QLabel("—")
         self._result.setStyleSheet("font-family:monospace; color:#4fc3f7;")
-        right.addWidget(self._result)
+        self._live = QCheckBox("Live")
+        self._live.setChecked(True)
+        prow.addWidget(self._result, 1)
+        prow.addWidget(self._live)
+        right.addLayout(prow)
 
         row = QHBoxLayout()
         test = QPushButton("Test read")
@@ -995,6 +1053,13 @@ class ImageConfigDialog(QDialog):
         w.setLayout(layout)
         return w
 
+    def _pair(self, a, b, sa, sb):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(a, sa)
+        row.addWidget(b, sb)
+        return self._wrap(row)
+
     # -- behaviour -----------------------------------------------------------
     def _on_type(self):
         preset = WHITELIST_PRESETS.get(self._type.currentData(), "")
@@ -1003,16 +1068,40 @@ class ImageConfigDialog(QDialog):
     def _refresh_frame(self):
         if self.panel is not None:
             self.editor.set_frame(getattr(self.panel, "_last_img", None))
+        # live preview: re-OCR every ~3rd tick (~450 ms) so the value tracks
+        self._preview_tick = getattr(self, "_preview_tick", 0) + 1
+        if (getattr(self, "_live", None) is not None and self._live.isChecked()
+                and self.editor.current_roi() is not None
+                and self._preview_tick % 3 == 0):
+            self._test_read()
+
+    @staticmethod
+    def _opt_float(le):
+        t = le.text().strip()
+        try:
+            return float(t) if t else None
+        except ValueError:
+            return None
 
     def _gather(self) -> dict:
         return dict(
             name=self._name.text().strip() or "Reading",
+            unit=self._unit.text().strip(),
             parse_as=self._type.currentData(),
             on_fail=self._fail.currentData(),
             whitelist=self._whitelist.text(),
             invert=self._invert.isChecked(),
             threshold=self._thresh.isChecked(),
+            adaptive=self._adaptive.isChecked(),
+            denoise=self._denoise.isChecked(),
             scale=self._scale.value(),
+            rotate=self._rotate.value(),
+            gain=self._gain.value(),
+            offset=self._offset.value(),
+            vmin=self._opt_float(self._vmin),
+            vmax=self._opt_float(self._vmax),
+            smooth=self._smooth.value(),
+            rate_hz=self._rate.value(),
         )
 
     def _current_detector(self):
@@ -1058,12 +1147,22 @@ class ImageConfigDialog(QDialog):
         if det is None:
             return
         self._name.setText(det.name)
+        self._unit.setText(det.unit)
         self._type.setCurrentIndex(max(0, self._type.findData(det.parse_as)))
         self._fail.setCurrentIndex(max(0, self._fail.findData(det.on_fail)))
         self._whitelist.setText(det.whitelist)
         self._invert.setChecked(det.invert)
         self._thresh.setChecked(det.threshold)
+        self._adaptive.setChecked(det.adaptive)
+        self._denoise.setChecked(det.denoise)
         self._scale.setValue(det.scale)
+        self._rotate.setValue(det.rotate)
+        self._gain.setValue(det.gain)
+        self._offset.setValue(det.offset)
+        self._vmin.setText("" if det.vmin is None else f"{det.vmin:g}")
+        self._vmax.setText("" if det.vmax is None else f"{det.vmax:g}")
+        self._smooth.setValue(det.smooth)
+        self._rate.setValue(det.rate_hz)
         self.editor.set_current_roi(det.roi)
         self._reload_list()
 
@@ -1340,6 +1439,29 @@ class MainWindow(QMainWindow):
     def _on_tick(self):
         self.sources_panel.update_live(self.engine.latest())
         self.sinks_panel.update_live()
+        self._update_image_overlays()
+
+    def _update_image_overlays(self):
+        for pid, panel in self.dashboard._panels.items():
+            if getattr(panel, "kind", "") != "image" or not hasattr(panel, "view"):
+                continue
+            overlays = []
+            for det in self.dashboard.detectors_for(pid):
+                val = det.last_value
+                ok = (isinstance(val, bool)
+                      or (isinstance(val, (int, float)) and val == val)
+                      or (det.dtype == "string" and bool(val)))
+                if det.dtype == "string":
+                    vt = str(val) if val else "?"
+                elif isinstance(val, bool):
+                    vt = "on" if val else "off"
+                elif isinstance(val, (int, float)) and val == val:
+                    vt = fmt(val, det.unit)
+                else:
+                    vt = "—"
+                overlays.append((f"{det.name}: {vt}", det.roi,
+                                 color_for(f"cv/{det.id}"), ok))
+            panel.view.set_overlays(overlays)
 
     def _open_config(self, instance_id: str) -> None:
         dlg = self._dialogs.get(instance_id)
