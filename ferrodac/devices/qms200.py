@@ -489,13 +489,14 @@ class QMS200Device(BaseDevice):
                     self._drop_link(str(exc))
                     return self._empty(), 1
             self._service_writes()                  # apply queued controls
+            t0 = time.monotonic()
             try:
                 self._link.query("CRU ,2")          # start a scan
                 points = self._drain_scan(source)
             except ProtocolError as exc:
                 self._drop_link(str(exc))
                 return self._empty(), 1
-        _dbg(f"scan drained {len(points)} points "
+        _dbg(f"scan drained {len(points)} points in {time.monotonic() - t0:.1f}s "
              f"(range {self._first}-{self._last}, speed {self._speed})")
         if len(points) < 2:
             self._last_error = (f"scan returned {len(points)} point(s) — check "
@@ -515,27 +516,35 @@ class QMS200Device(BaseDevice):
         idle = 0
         resyncs = 0
         dropped = 0
+        emitted = 0
         last_partial = time.monotonic()
         # Generous deadline (the scan can run longer than its nominal time once
         # per-point serial overhead is added); the drain is abortable via
         # `_streaming`, so a long ceiling is safe and just a backstop.
         deadline = time.monotonic() + self._scan_time() * 1.4 + 8.0
+
+        def maybe_emit():
+            # Emit a partial "sweep-so-far" a touch faster than the engine's
+            # ~50 ms (20 Hz) drain so every repaint has a fresh frame. Mapped
+            # against the longest sweep seen (or the current length on the very
+            # first scan) so masses stay put as it fills.
+            nonlocal last_partial, emitted
+            now = time.monotonic()
+            if (source is not None and self._emit is not None and points
+                    and now - last_partial >= 0.04):
+                total = max(self._full_len or 0, len(points))
+                self._emit(Reading(self.data_id, source.id, time.time(),
+                                   self._make_trace(points, total=total),
+                                   0, partial=True))
+                last_partial = now
+                emitted += 1
+
         while self._streaming and time.monotonic() < deadline:
             if self._reconfig_pending:              # option changed → end this
                 break                               # sweep so the new config
             self._service_writes()                  # applies promptly; controls
             #                                         apply between chunks too
-            now = time.monotonic()
-            # Emit partials a touch faster than the engine's ~50 ms (20 Hz) drain
-            # so every repaint has a fresh frame — the panel coalesces, so extra
-            # emits are cheap and the spectrum fills in smoothly rather than in
-            # visible chunks.
-            if (source is not None and self._emit is not None and self._full_len
-                    and points and now - last_partial >= 0.04):
-                self._emit(Reading(self.data_id, source.id, time.time(),
-                                   self._make_trace(points, total=self._full_len),
-                                   0, partial=True))
-                last_partial = now
+            maybe_emit()
             try:
                 hdr = self._link.query("MBH").split(",")
                 avail = int(hdr[3]) if len(hdr) > 3 else 0
@@ -571,9 +580,9 @@ class QMS200Device(BaseDevice):
                     # complete and the m/z axis stays aligned.
                     dropped += 1
                     _dbg(f"skipped stray MDB frame {raw!r}")
+                maybe_emit()                        # stream during big bursts too
             if resyncs > 20:                        # runaway desync — give up
                 _dbg("too many resyncs, aborting drain")
                 break
-        if dropped:
-            _dbg(f"{dropped} stray frame(s) skipped this scan")
+        _dbg(f"{emitted} partial frame(s) emitted, {dropped} stray(s) skipped")
         return points
