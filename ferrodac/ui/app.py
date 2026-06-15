@@ -52,7 +52,7 @@ from ..core.recorder import Recorder
 from ..core.registry import load_builtin_drivers
 from ..core.device import DeviceDescriptor, RateMode, SinkKind
 from ..vision.detector import FAIL_LABELS, PARSE_LABELS, WHITELIST_PRESETS, Detector
-from ..vision.ocr import have_ocr, ocr_backend, preprocess, qimage_to_rgb
+from ..vision.ocr import available_engines, get_engine, ocr_backend, qimage_to_rgb
 from ._common import STATUS_COLORS, clear_layout, color_for, fmt
 from .panels import PANEL_TYPES
 from .workspace import Dashboard, WorkspaceArea
@@ -945,6 +945,10 @@ class ImageConfigDialog(QDialog):
         self._unit.setPlaceholderText("unit")
         self._unit.setFixedWidth(70)
         form.addRow("Name", self._pair(self._name, self._unit, 1, 0))
+        self._engine = QComboBox()
+        for key, label in (available_engines() or [("tesseract", "Tesseract")]):
+            self._engine.addItem(label, key)
+        form.addRow("Engine", self._engine)
         self._type = QComboBox()
         for val, label in PARSE_LABELS:
             self._type.addItem(label, val)
@@ -1087,6 +1091,7 @@ class ImageConfigDialog(QDialog):
         return dict(
             name=self._name.text().strip() or "Reading",
             unit=self._unit.text().strip(),
+            engine=self._engine.currentData(),
             parse_as=self._type.currentData(),
             on_fail=self._fail.currentData(),
             whitelist=self._whitelist.text(),
@@ -1117,15 +1122,15 @@ class ImageConfigDialog(QDialog):
             return
         det = self._current_detector()
         rgb = qimage_to_rgb(img)
-        gray = preprocess(det.crop(rgb), det.invert, det.threshold, det.scale)
-        value, text, status = det.read(rgb)
-        # show what the OCR sees
-        h, w = gray.shape
-        qimg = QImage(gray.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
-        pix = QPixmap.fromImage(qimg).scaled(
-            self._preview.width(), self._preview.height(),
-            Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self._preview.setPixmap(pix)
+        text, dbg = get_engine(det.engine).read(det.crop(rgb), det)
+        det.last_text = text
+        value, status = det._finalize(*det._parse_raw(text))
+        if dbg is not None and dbg.ndim == 2:        # show what the engine sees
+            h, w = dbg.shape
+            qimg = QImage(dbg.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
+            self._preview.setPixmap(QPixmap.fromImage(qimg).scaled(
+                self._preview.width(), self._preview.height(),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation))
         self._result.setText(
             f"“{text}”  →  {value}" + ("  (parse failed)" if status else ""))
 
@@ -1148,6 +1153,7 @@ class ImageConfigDialog(QDialog):
             return
         self._name.setText(det.name)
         self._unit.setText(det.unit)
+        self._engine.setCurrentIndex(max(0, self._engine.findData(det.engine)))
         self._type.setCurrentIndex(max(0, self._type.findData(det.parse_as)))
         self._fail.setCurrentIndex(max(0, self._fail.findData(det.on_fail)))
         self._whitelist.setText(det.whitelist)

@@ -16,7 +16,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .ocr import preprocess, recognize
+from .ocr import get_engine, preprocess
 
 _NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 _TRUE = ("1", "on", "true", "yes", "hi", "high")
@@ -35,7 +35,7 @@ WHITELIST_PRESETS = {
 
 # Configurable fields that are serialized with a saved session.
 CONFIG_FIELDS = (
-    "parse_as", "on_fail", "whitelist", "unit",
+    "engine", "parse_as", "on_fail", "whitelist", "unit",
     "scale", "invert", "threshold", "adaptive", "thresh_value", "denoise", "rotate",
     "gain", "offset", "vmin", "vmax", "smooth", "rate_hz",
 )
@@ -47,6 +47,7 @@ class Detector:
     name: str
     sink_key: str                  # the image display sink it reads from
     roi: tuple                     # (x, y, w, h) in image pixels
+    engine: str = "general"        # general (DNN) | tesseract
     parse_as: str = "float"        # float | int | bool | text
     on_fail: str = "nan"           # nan | zero | hold
     whitelist: str = "0123456789.-"
@@ -98,7 +99,7 @@ class Detector:
 
     def read(self, rgb):
         """OCR + parse + transform + range + stability → (value, raw_text, status)."""
-        text = recognize(self.preprocessed(rgb), self.whitelist, self.psm)
+        text, _dbg = get_engine(self.engine).read(self.crop(rgb), self)
         self.last_text = text
         value, status = self._finalize(*self._parse_raw(text))
         self.last_value = value

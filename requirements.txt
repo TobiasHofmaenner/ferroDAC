@@ -5,6 +5,11 @@ pyqtgraph>=0.13
 numpy>=1.24
 # Real device drivers (TPG-256A serial, …):
 pyserial>=3.5
-# Computer-vision sources (camera OCR). Tesseract itself is a separate install
-# (the OCR feature degrades gracefully if `tesseract` is not on PATH).
+# Computer-vision sources (camera OCR).
 opencv-python-headless>=4.8
+# The "General" OCR engine — a DNN (PP-OCR via ONNX Runtime). Much more robust
+# than Tesseract across printed / LCD / seven-segment displays. Optional: the
+# detector falls back to Tesseract if it's absent.
+rapidocr-onnxruntime>=1.3
+# Tesseract (the "fast" engine) is a separate native install (apt / installer);
+# the OCR feature degrades gracefully if neither engine is present.

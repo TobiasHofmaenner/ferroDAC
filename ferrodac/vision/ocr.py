@@ -1,9 +1,15 @@
-"""OCR backend + frame helpers.
+"""OCR backends + frame helpers.
 
-Tesseract (via its CLI, reading PNG from stdin) is the default engine: apt-
-installable, cross-platform, and solid on printed/LCD digits with a character
-whitelist. It is deliberately isolated here so a seven-segment recognizer
-(ssocr) or a DNN model can be slotted in later without touching the detector.
+The recogniser is **pluggable** — a detector picks an engine by key:
+
+  - ``general``   — a DNN OCR (PP-OCR via ONNX Runtime / RapidOCR). Far more
+                    robust across printed / LCD / seven-segment / scene text;
+                    works on the raw colour crop. The default when available.
+  - ``tesseract`` — fast and light, great on clean printed digits with a
+                    character whitelist; weak on segmented / styled displays.
+
+Each engine takes the cropped ROI and the detector (for its preprocessing /
+whitelist prefs) and returns ``(text, debug_image)``.
 """
 
 from __future__ import annotations
@@ -27,15 +33,7 @@ _TESSERACT = shutil.which("tesseract")
 
 
 def have_ocr() -> bool:
-    return _TESSERACT is not None and _HAVE_CV2
-
-
-def ocr_backend() -> str:
-    if not _HAVE_CV2:
-        return "unavailable (OpenCV missing)"
-    if _TESSERACT is None:
-        return "unavailable (tesseract missing)"
-    return "tesseract"
+    return _HAVE_CV2 and bool(available_engines())
 
 
 # --------------------------------------------------------------------------- #
@@ -102,3 +100,112 @@ def recognize(gray: np.ndarray, whitelist: str = "", psm: int = 7) -> str:
         return out.stdout.decode("utf-8", "replace").strip()
     except Exception:
         return ""
+
+
+def _whitelist_filter(text: str, whitelist: str) -> str:
+    if not whitelist:
+        return text.strip()
+    allowed = set(whitelist) | {" "}
+    return "".join(c for c in text if c in allowed).strip()
+
+
+def _rotate(gray, deg):
+    h, w = gray.shape[:2]
+    m = cv2.getRotationMatrix2D((w / 2, h / 2), deg, 1.0)
+    return cv2.warpAffine(gray, m, (w, h), flags=cv2.INTER_CUBIC,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+
+# --------------------------------------------------------------------------- #
+#  Engines
+# --------------------------------------------------------------------------- #
+class _Engine:
+    key = ""
+    label = ""
+
+    def available(self) -> bool:
+        return False
+
+    def read(self, rgb, det):                 # -> (text, debug_gray)
+        return "", None
+
+
+class TesseractEngine(_Engine):
+    key = "tesseract"
+    label = "Tesseract — fast, clean printed digits"
+
+    def available(self) -> bool:
+        return _TESSERACT is not None and _HAVE_CV2
+
+    def read(self, rgb, det):
+        gray = preprocess(rgb, det.invert, det.threshold, det.scale, det.adaptive,
+                          det.denoise, det.rotate, det.thresh_value)
+        return recognize(gray, det.whitelist, det.psm), gray
+
+
+class GeneralEngine(_Engine):
+    """PP-OCR (RapidOCR / ONNX Runtime) — a DNN that reads the *raw colour* crop."""
+
+    key = "general"
+    label = "General — DNN (PP-OCR), most robust"
+    _ocr = None
+    _ok = None
+
+    def available(self) -> bool:
+        if GeneralEngine._ok is None:
+            try:
+                import rapidocr_onnxruntime  # noqa: F401
+                GeneralEngine._ok = _HAVE_CV2
+            except Exception:
+                GeneralEngine._ok = False
+        return bool(GeneralEngine._ok)
+
+    def _engine(self):
+        if GeneralEngine._ocr is None:
+            from rapidocr_onnxruntime import RapidOCR
+            GeneralEngine._ocr = RapidOCR()
+        return GeneralEngine._ocr
+
+    def read(self, rgb, det):
+        img = rgb
+        if det.rotate:
+            img = _rotate(img, det.rotate)
+        h = img.shape[0]
+        if h < 96:                              # DNN likes a reasonable height
+            f = 96.0 / max(h, 1)
+            img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
+        try:
+            res, _ = self._engine()(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        except Exception:
+            res = None
+        text = " ".join(t for _b, t, _s in res) if res else ""
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        return _whitelist_filter(text, det.whitelist), gray
+
+
+_ENGINES = [GeneralEngine(), TesseractEngine()]
+_BY_KEY = {e.key: e for e in _ENGINES}
+
+
+def available_engines() -> list:
+    """[(key, label)] for every engine usable in this environment (best first)."""
+    return [(e.key, e.label) for e in _ENGINES if e.available()]
+
+
+def get_engine(key: str) -> _Engine:
+    eng = _BY_KEY.get(key)
+    if eng is not None and eng.available():
+        return eng
+    fallback = available_engines()
+    return _BY_KEY[fallback[0][0]] if fallback else _BY_KEY["tesseract"]
+
+
+def default_engine() -> str:
+    eng = available_engines()
+    return eng[0][0] if eng else "tesseract"
+
+
+def ocr_backend() -> str:
+    """Human-readable summary of available engines (for the config dialog hint)."""
+    eng = available_engines()
+    return ", ".join(label.split(" —")[0] for _k, label in eng) if eng else "none"

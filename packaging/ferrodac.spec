@@ -14,7 +14,8 @@
 
 import os
 
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import (collect_submodules, collect_data_files,
+                                     collect_dynamic_libs)
 
 # The spec lives in packaging/; the app lives one level up. SPECPATH is the
 # directory containing this spec file (injected by PyInstaller).
@@ -47,6 +48,21 @@ datas = collect_data_files("pyqtgraph")
 # Bundle the window/taskbar icon so the running app can load it.
 datas += [(os.path.join(ROOT, "ferrodac", "assets", "app.png"), "ferrodac/assets")]
 
+# The "General" OCR engine (RapidOCR / ONNX Runtime) — bundle its models + libs.
+# Wrapped so a packaging hiccup can't break the build; the engine degrades to
+# Tesseract at runtime if it isn't bundled.
+binaries = []
+try:
+    hiddenimports += collect_submodules("rapidocr_onnxruntime")
+    hiddenimports += collect_submodules("onnxruntime")
+    hiddenimports += ["pyclipper", "shapely"]
+    datas += collect_data_files("rapidocr_onnxruntime")   # the .onnx models + yaml
+    datas += collect_data_files("onnxruntime")
+    binaries += collect_dynamic_libs("onnxruntime")
+    binaries += collect_dynamic_libs("shapely")
+except Exception as exc:                                   # noqa: BLE001
+    print(f"[ferrodac.spec] general OCR engine not bundled: {exc}")
+
 # Keep only PySide6: exclude the other Qt bindings so qtpy resolves to PySide6
 # and we don't bundle a second toolkit (opencv-python-headless also avoids
 # shipping its own Qt).
@@ -59,7 +75,7 @@ excludes = [
 a = Analysis(
     [os.path.join(ROOT, "main.py")],     # absolute-import launcher (see main.py)
     pathex=[ROOT],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
