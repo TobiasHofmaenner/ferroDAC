@@ -312,6 +312,10 @@ class SpectrumPanel(Panel):
         self.plot.setLabel("left", "Intensity")
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot.setLogMode(x=False, y=True)
+        # X is pinned to the scan range (set in feed); Y auto-ranges (log-aware,
+        # so we don't do manual log math) to the data visible within that X.
+        self.plot.enableAutoRange(x=False, y=True)
+        self.plot.getViewBox().setAutoVisible(y=True)
         self.plot.addLegend(offset=(-10, 10))
         self.plot.getPlotItem().setClipToView(True)
         lay.addWidget(self.plot)
@@ -367,20 +371,6 @@ class SpectrumPanel(Panel):
                 if prev is not None:
                     prev.setData(complete.x, cy, connect="finite")
                 self._last_complete[key] = (complete.x, cy)
-                self._fit_y(cy)
-            elif key not in self._last_complete:            # first build: frame Y
-                self._fit_y(y)
-
-    def _fit_y(self, y):
-        """Fit the log-Y axis to the positive data (only on completed scans, so
-        the live fill doesn't jitter the view)."""
-        vals = y[np.isfinite(y) & (y > 0)]
-        if vals.size == 0:
-            return
-        lo, hi = float(vals.min()), float(vals.max())
-        if hi <= lo:
-            hi = lo * 10.0
-        self.plot.setYRange(np.log10(lo), np.log10(hi), padding=0.08)
 
     def set_cursors(self, cursors):
         """Draw trend-cursor lines: cursors = [(id, name, mz, value, color)]."""

@@ -74,6 +74,11 @@ ANALYZER = {0: "QMG 125", 1: "QMG 400", 4: "QMS 200"}
 # speed code → seconds per amu (matches the QMG protocol speed_list)
 SPEED_S_PER_AMU = {7: 0.1, 8: 0.2, 9: 0.5, 10: 1.0, 11: 2.0}
 
+# Assumed points-per-amu for the very first sweep of a config, before the real
+# density is measured from a completed sweep. The X axis is pinned to the scan
+# range, so an over/under estimate just clips — it self-corrects on completion.
+_DEFAULT_PPA = 32.0
+
 # Optional fixed mass-axis offset (amu) to correct a start-of-sweep lead-in,
 # tuned against a known peak (e.g. water @ 18). Software-only; default 0.
 OFFSET_OPTS = [(-1.0, "−1.0"), (-0.75, "−0.75"), (-0.5, "−0.5"), (-0.25, "−0.25"),
@@ -292,7 +297,7 @@ class QMS200Device(BaseDevice):
         # total — so masses stay put regardless of truncation or dropped points.
         # Learned from completed sweeps; range-independent, so only a resolution
         # or speed change forces a relearn (recalibrate-on-change).
-        self._rate = None
+        self._steps_per_amu = None
         self._apply_scan_params()
 
     # -- discovery -----------------------------------------------------------
@@ -381,7 +386,7 @@ class QMS200Device(BaseDevice):
         # to reprogram the analyzer between scans — no GUI-thread serial I/O.
         self._apply_scan_params()
         if key in ("resolution", "speed"):       # density may change → recalibrate
-            self._rate = None
+            self._steps_per_amu = None
         if key in ("range", "resolution", "speed"):
             self._reconfig_pending = True        # needs a hardware reprogram
         # "readout" / "mass_offset" are software-only: applied on the next frame,
@@ -468,16 +473,13 @@ class QMS200Device(BaseDevice):
                      x_lo=float(self._first), x_hi=float(self._last))
 
     def _mass_axis(self, n: int) -> np.ndarray:
-        """The m/z of each of n sequential points. Uses the measured sweep
-        density (points per amu) so the mass of point i is a fixed
-        `first + offset + i/rate` — independent of the total count, hence
-        immune to truncation and dropped points. Until the rate is learned
-        (the first sweep of a config), fall back to assuming this is a complete
-        sweep spanning the full range."""
-        if self._rate:
-            return self._first + self._offset + np.arange(n) / self._rate
-        span = self._last - self._first
-        return self._first + self._offset + span * np.arange(n) / max(1, n - 1)
+        """The m/z of each of n sequential points: a fixed
+        `first + offset + i/steps_per_amu`, independent of the total count, so
+        masses are immune to truncation and dropped points. The first sweep of a
+        config (rate not yet measured) uses a default density and is clipped to
+        the pinned X range; the completed sweep then sets the real rate."""
+        rate = self._steps_per_amu or _DEFAULT_PPA
+        return self._first + self._offset + np.arange(n) / rate
 
     def _make_trace(self, points) -> Trace:
         """Map a (possibly partial) sweep onto its m/z axis. In "peak" readout
@@ -527,10 +529,10 @@ class QMS200Device(BaseDevice):
         # the max means a one-off truncated sweep can't lower the rate; the
         # longest (full) sweep sets it. Range-independent → reused across ranges.
         width = max(1, self._last - self._first)
-        self._rate = max(self._rate or 0.0, (len(points) - 1) / width)
+        self._steps_per_amu = max(self._steps_per_amu or 0.0, (len(points) - 1) / width)
         _dbg(f"scan drained {len(points)} points in {time.monotonic()-t0:.1f}s "
              f"(range {self._first}-{self._last}, speed {self._speed}, "
-             f"rate {self._rate:.1f}/amu)")
+             f"rate {self._steps_per_amu:.1f}/amu)")
         return self._make_trace(points), 0
 
     def _drain_scan(self, source=None) -> list:
@@ -552,12 +554,12 @@ class QMS200Device(BaseDevice):
 
         def maybe_emit():
             # Emit a partial "sweep-so-far" a touch faster than the engine's
-            # ~50 ms (20 Hz) drain so every repaint has a fresh frame. Gated on a
-            # known rate so the live fill places masses correctly; the first
-            # sweep of a config (rate unknown) calibrates silently, then streams.
+            # ~50 ms (20 Hz) drain so every repaint has a fresh frame. Masses use
+            # the measured rate (or the default on the first sweep), so the live
+            # fill places points correctly; the completed sweep refines the rate.
             nonlocal last_partial, emitted
             now = time.monotonic()
-            if (source is not None and self._emit is not None and self._rate
+            if (source is not None and self._emit is not None
                     and points and now - last_partial >= 0.04):
                 self._emit(Reading(self.data_id, source.id, time.time(),
                                    self._make_trace(points), 0, partial=True))

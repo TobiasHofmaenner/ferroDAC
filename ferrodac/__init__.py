@@ -1,3 +1,3 @@
 """ferroDAC — extensible, local-first lab data-acquisition platform."""
 
-__version__ = "0.26.0"
+__version__ = "0.26.1"
