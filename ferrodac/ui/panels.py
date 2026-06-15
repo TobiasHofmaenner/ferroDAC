@@ -13,11 +13,18 @@ from qtpy.QtCore import QRect, QRectF, Qt, Signal
 from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen
 from qtpy.QtWidgets import (
     QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLCDNumber,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -28,6 +35,7 @@ import pyqtgraph as pg
 
 from ..core.markers import RECORDING
 from ..core.trace import Trace
+from ..analysis.library import DEFAULT_GASES, LIBRARY
 from ._common import color_for, fmt
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
@@ -690,6 +698,68 @@ class TogglePanel(InputPanel):
         self._chk.blockSignals(False)
 
 
+class GasConfigDialog(QDialog):
+    """Configure a gas analysis: Monte-Carlo runs, sparsity, peak width, and
+    which gases to fit (the candidate set)."""
+
+    _MC = [("Off (single fit)", 1), ("16", 16), ("32", 32),
+           ("64", 64), ("128", 128), ("256", 256)]
+
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Gas analysis")
+        self.setMinimumWidth(320)
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self._mc = QComboBox()
+        for label, val in self._MC:
+            self._mc.addItem(label, val)
+        ix = self._mc.findData(int(cfg.get("mc", 64)) or 1)
+        self._mc.setCurrentIndex(ix if ix >= 0 else 3)
+        form.addRow("Monte-Carlo", self._mc)
+        self._sp = QDoubleSpinBox()
+        self._sp.setRange(0.0, 0.3)
+        self._sp.setSingleStep(0.01)
+        self._sp.setDecimals(2)
+        self._sp.setValue(float(cfg.get("sparsity", 0.0)))
+        form.addRow("Sparsity", self._sp)
+        self._fw = QDoubleSpinBox()
+        self._fw.setRange(0.2, 2.0)
+        self._fw.setSingleStep(0.1)
+        self._fw.setDecimals(2)
+        self._fw.setSuffix(" u")
+        self._fw.setValue(float(cfg.get("peak_fwhm", 0.7)))
+        form.addRow("Peak width", self._fw)
+        root.addLayout(form)
+        root.addWidget(QLabel("Gases to fit:"))
+        sel = set(cfg.get("gases") or DEFAULT_GASES)
+        host = QWidget()
+        grid = QGridLayout(host)
+        grid.setContentsMargins(2, 2, 2, 2)
+        self._checks = {}
+        for i, name in enumerate(LIBRARY):
+            cb = QCheckBox(f"{name}  ({LIBRARY[name].formula})")
+            cb.setChecked(name in sel)
+            self._checks[name] = cb
+            grid.addWidget(cb, i // 2, i % 2)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(host)
+        scroll.setMaximumHeight(190)
+        root.addWidget(scroll)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        root.addWidget(bb)
+
+    def values(self) -> dict:
+        gases = [n for n, cb in self._checks.items() if cb.isChecked()]
+        return {"mc": self._mc.currentData(),
+                "sparsity": round(self._sp.value(), 3),
+                "peak_fwhm": round(self._fw.value(), 3),
+                "gases": gases or list(DEFAULT_GASES)}
+
+
 class CompositionPanel(Panel):
     """Gas composition: hosts a Dashboard GasAnalyzer on the bound mass-spectrum
     and shows the partial pressures as bars (Monte-Carlo error bars + flagged
@@ -705,6 +775,16 @@ class CompositionPanel(Panel):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(4, 2, 4, 0)
+        hdr.addStretch(1)
+        self._cfg_btn = QPushButton("⚙ Configure")
+        self._cfg_btn.setStyleSheet(
+            "QPushButton { color:#8b95a4; border:1px solid #2a3340; border-radius:4px;"
+            " padding:1px 8px; font-size:11px; } QPushButton:hover { color:#c7d0db; }")
+        self._cfg_btn.clicked.connect(self._open_config)
+        hdr.addWidget(self._cfg_btn)
+        lay.addLayout(hdr)
         self.plot = pg.PlotWidget()
         self.plot.setLabel("left", "partial pressure")
         self.plot.showGrid(y=True, alpha=0.2)
@@ -744,6 +824,39 @@ class CompositionPanel(Panel):
         if self._proc_id and self._remove is not None:
             self._remove(self._proc_id)
         self._proc_id = None
+
+    def _current_cfg(self) -> dict:
+        a = self._get(self._proc_id) if (self._get and self._proc_id) else None
+        if a is not None:
+            return {"mc": a.mc, "sparsity": a.sparsity, "peak_fwhm": a.peak_fwhm,
+                    "gases": list(a.gas_names)}
+        cfg = dict(self._cfg)
+        cfg.setdefault("gases", list(DEFAULT_GASES))
+        return cfg
+
+    def _open_config(self):
+        dlg = GasConfigDialog(self._current_cfg(), self)
+        if dlg.exec():
+            self._apply_config(dlg.values())
+
+    def _apply_config(self, cfg):
+        a = self._get(self._proc_id) if (self._get and self._proc_id) else None
+        if a is None:                            # not bound yet — stash for create
+            self._cfg = cfg
+            return
+        if list(cfg["gases"]) != list(a.gas_names):
+            # the output set changed → recreate (reuse the id to keep unchanged
+            # gases' source keys, so existing routes survive)
+            old = self._proc_id
+            if self._remove is not None:
+                self._remove(old)
+            self._cfg = cfg
+            self._proc_id = self._add("gas", self._src_key, pid=old, **cfg) \
+                if self._add is not None else None
+        else:
+            a.update(mc=cfg["mc"], sparsity=cfg["sparsity"],
+                     peak_fwhm=cfg["peak_fwhm"])
+            self._cfg.update(cfg)
 
     def feed(self, batch):
         if self._proc_id is None or self._get is None:
