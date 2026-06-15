@@ -22,8 +22,15 @@ from dataclasses import dataclass, field
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import QObject, Qt, Signal
-from qtpy.QtWidgets import QDockWidget, QMainWindow, QWidget
+from qtpy.QtCore import QObject, QPoint, Qt, Signal
+from qtpy.QtWidgets import (
+    QDockWidget,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QToolButton,
+    QWidget,
+)
 
 from ..core.device import SinkKind
 from ..core.markers import MarkerModel, SessionClock
@@ -32,7 +39,7 @@ from ..core.trace import Trace
 from ..analysis import PROCESSOR_TYPES
 from ..vision import CVRunner, Detector
 from ..vision.detector import CONFIG_FIELDS
-from .panels import PANEL_TYPES, Panel
+from .panels import PANEL_TYPES, Panel, PanelConfigDialog
 
 _SINK_DTYPE = {
     SinkKind.SETPOINT: "float",
@@ -78,6 +85,71 @@ class SinkPort:
 # --------------------------------------------------------------------------- #
 #  Workspace area (dockable panels)
 # --------------------------------------------------------------------------- #
+class DockTitleBar(QWidget):
+    """Custom dock title bar: a name label plus ⚙ (configure), float and close
+    buttons. Dragging the bar pulls the panel out to a floating window; the
+    float button (or a double-click) re-docks it."""
+
+    def __init__(self, dock: "PanelDock", area: "WorkspaceArea"):
+        super().__init__(dock)
+        self._dock = dock
+        self._area = area
+        self._press = None
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 2, 4, 2)
+        lay.setSpacing(2)
+        self._label = QLabel(dock.windowTitle())
+        self._label.setStyleSheet("font-weight:600; color:#cdd6e0;")
+        lay.addWidget(self._label)
+        lay.addStretch(1)
+        for sym, tip, slot in (
+            ("⚙", "Configure panel", self._configure),
+            ("▢", "Float / dock", self._toggle_float),
+            ("✕", "Close", dock.close),
+        ):
+            b = QToolButton(self)
+            b.setText(sym)
+            b.setToolTip(tip)
+            b.setAutoRaise(True)
+            b.setCursor(Qt.ArrowCursor)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(slot)
+            lay.addWidget(b)
+
+    def set_title(self, text: str) -> None:
+        self._label.setText(text)
+
+    def _configure(self) -> None:
+        if self._area.on_configure is not None:
+            self._area.on_configure(self._dock.panel)
+
+    def _toggle_float(self) -> None:
+        self._dock.setFloating(not self._dock.isFloating())
+
+    # -- drag to pull out / move --------------------------------------------
+    def mousePressEvent(self, e):  # noqa: N802
+        if e.button() == Qt.LeftButton:
+            self._press = e.globalPosition().toPoint()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        if self._press is None or not (e.buttons() & Qt.LeftButton):
+            return
+        pos = e.globalPosition().toPoint()
+        if not self._dock.isFloating():
+            if (pos - self._press).manhattanLength() < 16:
+                return
+            self._dock.setFloating(True)
+        self._dock.move(pos - QPoint(40, 12))
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        self._press = None
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e):  # noqa: N802
+        self._toggle_float()
+
+
 class PanelDock(QDockWidget):
     closed = Signal(object)
 
@@ -97,6 +169,7 @@ class WorkspaceArea(QMainWindow):
         self.setDockNestingEnabled(True)
         self._docks: dict = {}
         self._edit = True
+        self.on_configure = None        # set by the Dashboard: fn(panel)
 
     def add_panel(self, panel: Panel, title: str) -> PanelDock:
         dock = PanelDock(title, panel, self)
@@ -112,6 +185,15 @@ class WorkspaceArea(QMainWindow):
             dock.setParent(None)
             dock.deleteLater()
 
+    def set_panel_title(self, panel: Panel, title: str) -> None:
+        dock = self._docks.get(panel)
+        if dock is None:
+            return
+        dock.setWindowTitle(title)
+        bar = dock.titleBarWidget()
+        if isinstance(bar, DockTitleBar):
+            bar.set_title(title)
+
     def set_edit_mode(self, on: bool) -> None:
         self._edit = on
         for dock in self._docks.values():
@@ -124,7 +206,7 @@ class WorkspaceArea(QMainWindow):
                 | QDockWidget.DockWidgetFloatable
                 | QDockWidget.DockWidgetClosable
             )
-            dock.setTitleBarWidget(None)
+            dock.setTitleBarWidget(DockTitleBar(dock, self))
         else:
             dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
             bar = QWidget()
@@ -163,6 +245,7 @@ class Dashboard(QObject):
         self._processors: dict = {}
         self._proc_counters: dict = {}
 
+        self.area.on_configure = self._configure_panel
         engine.subscribe(self._on_batch)
         manager.active_changed.connect(self._rebuild_device_ports)
         self._rebuild_device_ports()
@@ -216,6 +299,24 @@ class Dashboard(QObject):
         tail = pid.rsplit("-", 1)[-1]
         if tail.isdigit():
             self._counter = max(self._counter, int(tail))
+
+    def _configure_panel(self, panel: Panel) -> None:
+        """Open the panel's settings dialog (the ⚙ on its title bar) and apply
+        the result, propagating any new display name to the dock + patch-bay."""
+        dlg = PanelConfigDialog(panel.title, panel.config_fields(), self.area)
+        if not dlg.exec():
+            return
+        panel.apply_config(dlg.values())
+        # the display name doubles as the dock title and the port label
+        self.area.set_panel_title(panel, panel.title)
+        pid = panel.panel_id
+        if getattr(panel, "is_input", False):
+            port = self._sources.get(f"ui/{pid}")
+        else:
+            port = self._sinks.get(pid)
+        if port is not None:
+            port.name = panel.title
+        self.ports_changed.emit()
 
     def remove_panel(self, pid: str) -> None:
         panel = self._panels.pop(pid, None)

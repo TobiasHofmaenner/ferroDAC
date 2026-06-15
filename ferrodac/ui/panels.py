@@ -30,6 +30,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -68,6 +69,82 @@ class Panel(QWidget):
     def set_state(self, state: dict) -> None:
         """Restore per-panel state from a saved session."""
 
+    # -- configuration (⚙) ---------------------------------------------------
+    def config_fields(self) -> list:
+        """Editable settings as ``[(key, label, kind, value, opts)]`` where kind
+        is text / int / float / bool / choice. Every panel has a display name."""
+        return [("name", "Display name", "text", self.title, {})]
+
+    def apply_config(self, values: dict) -> None:
+        if values.get("name"):
+            self.set_display_name(values["name"])
+
+    def set_display_name(self, name: str) -> None:
+        """Set the panel's name (dock title + patch-bay). Plot panels override to
+        also set the plot title so it appears on exported plots."""
+        self.title = name
+
+
+class PanelConfigDialog(QDialog):
+    """A generic settings dialog built from a panel's config_fields()."""
+
+    def __init__(self, title, fields, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Configure · {title}")
+        self.setMinimumWidth(280)
+        form = QFormLayout(self)
+        self._w = {}
+        for key, label, kind, value, opts in fields:
+            w = self._make(kind, value, opts)
+            self._w[key] = (kind, w)
+            form.addRow(label, w)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    @staticmethod
+    def _make(kind, value, opts):
+        if kind == "bool":
+            w = QCheckBox()
+            w.setChecked(bool(value))
+            return w
+        if kind in ("int", "float"):
+            w = QSpinBox() if kind == "int" else QDoubleSpinBox()
+            w.setRange(opts.get("min", -1e12), opts.get("max", 1e12))
+            if kind == "float":
+                w.setDecimals(opts.get("decimals", 4))
+                w.setSingleStep(opts.get("step", 0.1))
+            else:
+                w.setSingleStep(int(opts.get("step", 1)))
+            if opts.get("suffix"):
+                w.setSuffix(opts["suffix"])
+            w.setValue(value if value is not None else 0)
+            return w
+        if kind == "choice":
+            w = QComboBox()
+            for v, lbl in opts.get("options", []):
+                w.addItem(lbl, v)
+            ix = w.findData(value)
+            if ix >= 0:
+                w.setCurrentIndex(ix)
+            return w
+        w = QLineEdit("" if value is None else str(value))
+        return w
+
+    def values(self) -> dict:
+        out = {}
+        for key, (kind, w) in self._w.items():
+            if kind == "bool":
+                out[key] = w.isChecked()
+            elif kind in ("int", "float"):
+                out[key] = w.value()
+            elif kind == "choice":
+                out[key] = w.currentData()
+            else:
+                out[key] = w.text()
+        return out
+
 
 class ChartPanel(Panel):
     kind = "chart"
@@ -90,9 +167,38 @@ class ChartPanel(Panel):
         self._curves: dict = {}
         self._buf: dict = {}
         self._t0 = None
+        self._ylabel = ""
+        self._logy = True
         self.clock = None
         self.markers = None
         self._marker_lines: dict = {}
+
+    def config_fields(self):
+        return super().config_fields() + [
+            ("ylabel", "Y-axis label", "text", self._ylabel, {}),
+            ("logy", "Logarithmic Y", "bool", self._logy, {}),
+        ]
+
+    def apply_config(self, values):
+        super().apply_config(values)
+        if "ylabel" in values:
+            self._ylabel = values["ylabel"]
+            self.plot.setLabel("left", self._ylabel or None)
+        if "logy" in values:
+            self._logy = bool(values["logy"])
+            self.plot.setLogMode(x=False, y=self._logy)
+
+    def set_display_name(self, name):
+        super().set_display_name(name)
+        self.plot.setTitle(name or None)
+
+    def state(self):
+        return {"ylabel": self._ylabel, "logy": self._logy}
+
+    def set_state(self, st):
+        self.apply_config({"ylabel": st.get("ylabel", ""),
+                           "logy": st.get("logy", True)})
+        self.set_display_name(self.title)    # apply the restored name as plot title
 
     # -- shared session time base + markers ----------------------------------
     def attach_session(self, clock, markers):
@@ -335,8 +441,31 @@ class SpectrumPanel(Panel):
         self._prev_curves: dict = {}       # previous completed run (dim, overlay)
         self._last_complete: dict = {}     # key -> (x, y) of last complete scan
         self._xr = None                    # pinned X range (declared axis extent)
+        self._logy = True
         self._cursor_lines: dict = {}      # trend cursors (id -> InfiniteLine)
         self.on_cursor_move = None          # set by the Dashboard
+
+    def config_fields(self):
+        return super().config_fields() + [
+            ("logy", "Logarithmic Y", "bool", self._logy, {}),
+        ]
+
+    def apply_config(self, values):
+        super().apply_config(values)
+        if "logy" in values:
+            self._logy = bool(values["logy"])
+            self.plot.setLogMode(x=False, y=self._logy)
+
+    def set_display_name(self, name):
+        super().set_display_name(name)
+        self.plot.setTitle(name or None)
+
+    def state(self):
+        return {"logy": self._logy}
+
+    def set_state(self, st):
+        self.apply_config({"logy": st.get("logy", True)})
+        self.set_display_name(self.title)
 
     def add_source(self, key, source):
         if key in self._curves:
@@ -451,6 +580,30 @@ class WaterfallPanel(Panel):
         self._buf = None
         self._rows = 240
         self._x0, self._x1 = 0.0, 1.0
+
+    def config_fields(self):
+        return super().config_fields() + [
+            ("rows", "History (scans)", "int", self._rows, {"min": 10, "max": 2000}),
+        ]
+
+    def apply_config(self, values):
+        super().apply_config(values)
+        if values.get("rows"):
+            self._rows = max(10, int(values["rows"]))
+            self._buf = None             # rebuilt at the new height on next scan
+
+    def set_display_name(self, name):
+        super().set_display_name(name)
+        self.plot.setTitle(name or None)
+
+    def state(self):
+        return {"rows": self._rows}
+
+    def set_state(self, st):
+        if st.get("rows"):
+            self._rows = max(10, int(st["rows"]))
+            self._buf = None
+        self.set_display_name(self.title)
 
     def add_source(self, key, source):
         self._src_key = key
@@ -631,9 +784,9 @@ class SliderPanel(InputPanel):
 
     def _build_body(self):
         self._min, self._max, self._unit = 0.0, 1.0, ""
+        self._step = 0.001               # value increment per slider tick
         row = QHBoxLayout()
         self._slider = QSlider(Qt.Horizontal)
-        self._slider.setRange(0, 1000)
         self._slider.valueChanged.connect(self._on_slide)
         self._val = QLabel("—")
         self._val.setStyleSheet("font-family:monospace; font-size:14px;")
@@ -643,23 +796,69 @@ class SliderPanel(InputPanel):
         host = QWidget()
         host.setLayout(row)
         self._lay.addWidget(host)
+        self._reconfigure()
+
+    def config_fields(self):
+        return super().config_fields() + [
+            ("min", "Minimum", "float", self._min, {}),
+            ("max", "Maximum", "float", self._max, {}),
+            ("step", "Step", "float", self._step, {}),
+            ("unit", "Unit", "text", self._unit, {}),
+        ]
+
+    def apply_config(self, values):
+        super().apply_config(values)
+        if "min" in values:
+            self._min = float(values["min"])
+        if "max" in values:
+            self._max = float(values["max"])
+        if values.get("step"):
+            self._step = abs(float(values["step"])) or self._step
+        if "unit" in values:
+            self._unit = values["unit"]
+        self._reconfigure()
+
+    def _ticks(self):
+        if not self._step:
+            return 1000
+        return max(1, int(round(abs(self._max - self._min) / self._step)))
+
+    def _reconfigure(self):
+        """Map [min, max] onto integer slider ticks of size `step`, preserving
+        the current value across the change."""
+        cur = self.current_value()
+        span = self._max - self._min
+        ticks = self._ticks()
+        self._slider.blockSignals(True)
+        self._slider.setRange(0, ticks)
+        frac = (cur - self._min) / span if span else 0.0
+        self._slider.setValue(int(round(min(1.0, max(0.0, frac)) * ticks)))
+        self._slider.blockSignals(False)
         self._val.setText(fmt(self.current_value(), self._unit))
 
     def set_range(self, lo, hi, unit):
         self._min, self._max, self._unit = lo, hi, unit
-        self._val.setText(fmt(self.current_value(), self._unit))
+        self._step = (hi - lo) / 1000.0 or self._step
+        self._reconfigure()
 
     def current_value(self):
-        span = self._max - self._min
-        return self._min + (self._slider.value() / 1000.0) * span
+        if self._slider.maximum() <= 0:
+            return self._min
+        return self._min + self._slider.value() * self._step
 
     def state(self):
-        return {"pos": self._slider.value()}
+        return {"pos": self._slider.value(), "min": self._min, "max": self._max,
+                "step": self._step, "unit": self._unit}
 
     def set_state(self, state):
         # Restore silently: emitting here would push a value computed with the
         # not-yet-set range into the data plane. The route re-sync propagates it.
+        self._min = float(state.get("min", self._min))
+        self._max = float(state.get("max", self._max))
+        self._step = float(state.get("step", self._step)) or self._step
+        self._unit = state.get("unit", self._unit)
         self._slider.blockSignals(True)
+        self._slider.setRange(0, self._ticks())
         self._slider.setValue(int(state.get("pos", 0)))
         self._slider.blockSignals(False)
         self._val.setText(fmt(self.current_value(), self._unit))
@@ -680,6 +879,23 @@ class ButtonPanel(InputPanel):
         self._btn.clicked.connect(lambda: self.emitted.emit(None))
         self._lay.addWidget(self._btn)
 
+    def config_fields(self):
+        return super().config_fields() + [
+            ("label", "Button label", "text", self._btn.text(), {}),
+        ]
+
+    def apply_config(self, values):
+        super().apply_config(values)
+        if values.get("label"):
+            self._btn.setText(values["label"])
+
+    def state(self):
+        return {"label": self._btn.text()}
+
+    def set_state(self, state):
+        if state.get("label"):
+            self._btn.setText(state["label"])
+
 
 class TogglePanel(InputPanel):
     kind = "toggle"
@@ -690,13 +906,25 @@ class TogglePanel(InputPanel):
         self._chk.toggled.connect(lambda on: self.emitted.emit(on))
         self._lay.addWidget(self._chk)
 
+    def config_fields(self):
+        return super().config_fields() + [
+            ("label", "Toggle label", "text", self._chk.text(), {}),
+        ]
+
+    def apply_config(self, values):
+        super().apply_config(values)
+        if "label" in values:
+            self._chk.setText(values["label"])
+
     def current_value(self):
         return self._chk.isChecked()
 
     def state(self):
-        return {"on": self._chk.isChecked()}
+        return {"on": self._chk.isChecked(), "label": self._chk.text()}
 
     def set_state(self, state):
+        if "label" in state:
+            self._chk.setText(state["label"])
         self._chk.blockSignals(True)
         self._chk.setChecked(bool(state.get("on", False)))
         self._chk.blockSignals(False)
