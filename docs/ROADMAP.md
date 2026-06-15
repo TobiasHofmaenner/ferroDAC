@@ -166,6 +166,41 @@ MVP client features that double as on-ramps to the server data plane. See
 - **Build order**: (1) shared clock + MarkerModel + synced chart tags + Events
   dock; (2) history buffer + Recorder + Record/Stop UI + recovery.
 
+## Next: RGA / mass-spectrum modality — Pfeiffer Prisma QMS 200 (researched 2026-06-15)
+
+The first **array-valued** source: a quadrupole RGA produces a *mass spectrum*
+(intensity vs m/z), realising the waveform/spectrum modality of DESIGN §9/§11.
+
+**Hardware**: Pfeiffer **Prisma QMS 200** (QMG electronics; `SQA` reports type 4),
+RS-232-C (300…19200 baud, 8N1; LAN optional). *Not* the newer PrismaPlus QMG 220
+(Ethernet/OPC).
+
+**Protocol = the same ACK/ENQ framing as the TPG-256A** (Pfeiffer doc
+BG 805 204 BE): `"MNEMONIC[,param]\r"` → `<ACK 0x06>` → `<ENQ 0x05>` → `"data\r\n"`.
+First `CMO ,1` for ASCII/computer control. Our hardened TPG `_Link` (lstrip + retry)
+transfers directly; factor a shared `_pfeiffer` link. Command set (clean-room from
+the protocol; reference only: GPL CINF/PyExpLabSys `pfeiffer_qmg420/422.py`):
+- identify/state: `SQA`, `CMO`, `ESQ` (16-bit), `ERR`/`EWN`
+- filament/emission: `FIE ,1/0`, `EMI ,<cur>`; detector: `SEM`, `SHV`, `SDT`, `DTY`
+- scan: `MMO ,0`, `MFM`=first mass, `MWI`=width, `MSD`=speed(s/amu), `MST`=steps/amu,
+  `MRE`=resolution, range `AMO`/`ARA`/`ARL`, start `CRU ,2`
+- read: poll `MBH` (field[3]=samples ready), read each point `MDB` → intensity array
+- single-mass trend: `MMO ,3`, `MFM ,<mass>` → `MDB`
+
+**Phased build:**
+- **A — spectrum datatype + display (hardware-free).** `spectrum` dtype + a
+  `Spectrum(mass, intensity)` Reading value; a `SpectrumPanel` (intensity vs m/z,
+  log-y); a **simulated RGA** (Gaussian peaks at common masses) to prove the
+  modality + routing without hardware.
+- **B — QMS 200 driver (read).** Shared Pfeiffer ACK/ENQ link; cached serial
+  discovery (identify via `SQA`); scan config as device **Options**; emit a
+  Spectrum per scan. Validate on the real unit. Read-only first.
+- **C — control sinks.** Filament on/off, emission current, SEM on/off, detector
+  type. (Hardware action — never auto-actuated; user enables.)
+- **D — trend channels + recording.** Selected-mass partial-pressure *scalar*
+  sources (route to charts/record); spectrum recording to the folder (HDF5/block
+  store per §11 — the waveform record plane).
+
 ## Explicitly deferred (designed, not built yet)
 
 Control · multi-station · waveform/video planes · web viewer · auth · WebDAV ·

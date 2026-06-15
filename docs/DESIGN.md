@@ -397,6 +397,11 @@ pyqtgraph.
 Consequence: **the telemetry and waveform planes are different pipelines; the
 source modality decides which.**
 
+> First realization of the array/waveform modality: an **RGA mass spectrum**
+> (intensity vs m/z) from a Pfeiffer Prisma QMS 200 — see the plan in
+> [ROADMAP.md](ROADMAP.md). A spectrum source emits a whole array per scan and
+> routes (datatype-gated) to a spectrum panel, not a time-series chart.
+
 ---
 
 ## 12. Comms / server / transport
