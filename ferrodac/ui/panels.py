@@ -702,6 +702,33 @@ class TogglePanel(InputPanel):
         self._chk.blockSignals(False)
 
 
+class _VerticalAxis(pg.AxisItem):
+    """Bottom axis that draws its tick labels vertically — for category names
+    (gas labels) that would otherwise collide horizontally."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setHeight(78)
+
+    def drawPicture(self, p, axisSpec, tickSpecs, textSpecs):
+        p.setRenderHint(p.RenderHint.Antialiasing, False)
+        p.setRenderHint(p.RenderHint.TextAntialiasing, True)
+        pen, p1, p2 = axisSpec
+        p.setPen(pen)
+        p.drawLine(p1, p2)
+        for tpen, tp1, tp2 in tickSpecs:
+            p.setPen(tpen)
+            p.drawLine(tp1, tp2)
+        p.setPen(self.textPen())
+        for rect, flags, text in textSpecs:
+            p.save()
+            p.translate(rect.center().x(), rect.top())
+            p.rotate(90)                          # read top→down, below the tick
+            p.drawText(QRectF(2, -rect.height() / 2.0, 200, rect.height()),
+                       int(Qt.AlignVCenter | Qt.AlignLeft), text)
+            p.restore()
+
+
 class GasConfigDialog(QDialog):
     """Configure a gas analysis: Monte-Carlo runs, sparsity, peak width, and
     which gases to fit (the candidate set)."""
@@ -860,7 +887,7 @@ class CompositionPanel(Panel):
         self._cfg_btn.clicked.connect(self._open_config)
         hdr.addWidget(self._cfg_btn)
         lay.addLayout(hdr)
-        self.plot = pg.PlotWidget()
+        self.plot = pg.PlotWidget(axisItems={"bottom": _VerticalAxis(orientation="bottom")})
         self.plot.setLabel("left", "partial pressure")
         self.plot.showGrid(y=True, alpha=0.2)
         self._bars = pg.BarGraphItem(x=[0], height=[0], width=0.6, brush="#4fc3f7")
@@ -950,7 +977,8 @@ class CompositionPanel(Panel):
             self._err.setData(x=x, y=h, top=e, bottom=np.minimum(e, h), beam=0.25)
         else:
             self._err.setData(x=np.array([]), y=np.array([]))
-        self.plot.getAxis("bottom").setTicks([list(zip(x.tolist(), names))])
+        labels = [n if len(n) <= 18 else n[:17] + "…" for n in names]
+        self.plot.getAxis("bottom").setTicks([list(zip(x.tolist(), labels))])
         if a.unit:
             self.plot.setLabel("left", f"partial pressure [{a.unit}]")
         flags = "   ⚠ unresolved: " + ", ".join(f"{p[0]}↔{p[1]}"
