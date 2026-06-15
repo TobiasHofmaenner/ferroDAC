@@ -644,6 +644,199 @@ class WaterfallPanel(Panel):
             self._bar.setLevels((lo, hi))
 
 
+class SpectrumWaterfallPanel(Panel):
+    """Spectrum stacked over a waterfall, **sharing one m/z axis**. The live
+    line and the spectrogram of past scans line up column-for-column, so a peak
+    in the spectrum sits directly above its streak in the waterfall. Single-bind
+    (one trace source feeds both)."""
+
+    kind = "specwf"
+    accepts = frozenset({"trace"})
+    single_bind = True
+
+    _AXIS_W = 64        # equal left-axis width → the two ViewBoxes align in x
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.glw = pg.GraphicsLayoutWidget()
+        lay.addWidget(self.glw)
+        self._logy = True
+
+        # -- spectrum (top) --------------------------------------------------
+        self.p_spec = self.glw.addPlot(row=0, col=0)
+        self.p_spec.showGrid(x=True, y=True, alpha=0.25)
+        self.p_spec.setLabel("left", "Intensity")
+        self.p_spec.setLogMode(x=False, y=self._logy)
+        self.p_spec.getAxis("left").setWidth(self._AXIS_W)
+        self.p_spec.getAxis("bottom").setStyle(showValues=False)   # m/z shown below
+        self.p_spec.getAxis("bottom").enableAutoSIPrefix(False)
+        self.p_spec.enableAutoRange(x=False, y=True)
+        self.p_spec.getViewBox().setAutoVisible(y=True)
+        self.p_spec.setClipToView(True)
+        self.p_spec.addLegend(offset=(-10, 10))
+
+        # -- waterfall (bottom) ----------------------------------------------
+        self.p_wf = self.glw.addPlot(row=1, col=0)
+        self.p_wf.setLabel("left", "scan")
+        self.p_wf.setLabel("bottom", "m/z")
+        self.p_wf.getAxis("left").setWidth(self._AXIS_W)
+        self.p_wf.getAxis("bottom").enableAutoSIPrefix(False)
+        self.img = pg.ImageItem()
+        self.p_wf.addItem(self.img)
+        cmap = _trace_colormap()
+        if cmap is not None:
+            self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
+        try:
+            self._bar = pg.ColorBarItem(colorMap=cmap)
+            self._bar.setImageItem(self.img)
+            self.glw.addItem(self._bar, row=1, col=1)   # own column → x stays aligned
+        except Exception:
+            self._bar = None
+
+        self.p_wf.setXLink(self.p_spec)                 # one shared m/z axis
+        self.glw.ci.layout.setRowStretchFactor(0, 1)    # spectrum ~⅓
+        self.glw.ci.layout.setRowStretchFactor(1, 2)    # waterfall ~⅔
+
+        self._curves: dict = {}            # key -> live spectrum curve (for cursors)
+        self._prev_curve = None            # previous completed scan (dim ghost)
+        self._cursor_lines: dict = {}
+        self.on_cursor_move = None          # set by the Dashboard
+        self._src_key = None
+        self._buf = None
+        self._rows = 240
+        self._x0, self._x1, self._xr = 0.0, 1.0, None
+
+    # -- configuration -------------------------------------------------------
+    def config_fields(self):
+        return super().config_fields() + [
+            ("logy", "Logarithmic Y (spectrum)", "bool", self._logy, {}),
+            ("rows", "Waterfall history (scans)", "int", self._rows,
+             {"min": 10, "max": 2000}),
+        ]
+
+    def apply_config(self, values):
+        super().apply_config(values)
+        if "logy" in values:
+            self._logy = bool(values["logy"])
+            self.p_spec.setLogMode(x=False, y=self._logy)
+        if values.get("rows"):
+            self._rows = max(10, int(values["rows"]))
+            self._buf = None               # rebuilt at the new height next scan
+
+    def set_display_name(self, name):
+        super().set_display_name(name)
+        self.p_spec.setTitle(name or None)
+
+    def state(self):
+        return {"logy": self._logy, "rows": self._rows}
+
+    def set_state(self, st):
+        self.apply_config({"logy": st.get("logy", True)})
+        if st.get("rows"):
+            self._rows = max(10, int(st["rows"]))
+            self._buf = None
+        self.set_display_name(self.title)
+
+    # -- data ----------------------------------------------------------------
+    def add_source(self, key, source):
+        if self._src_key is not None:        # single-bind
+            return
+        self._src_key = key
+        self._prev_curve = self.p_spec.plot(
+            [], [], pen=pg.mkPen((120, 130, 145), width=1.0), name="previous")
+        self._curves[key] = self.p_spec.plot(
+            [], [], pen=pg.mkPen(color_for(key), width=1.5), name=source.name)
+        self._buf = None
+
+    def remove_source(self, key):
+        if key != self._src_key:
+            return
+        for curve in (self._curves.pop(key, None), self._prev_curve):
+            if curve is not None:
+                self.p_spec.removeItem(curve)
+        self._prev_curve = None
+        self._src_key = None
+        self.img.clear()
+        self._buf = None
+
+    def feed(self, batch):
+        show = complete = None
+        for r in batch:
+            if r.key == self._src_key and isinstance(r.value, Trace):
+                show = r.value
+                if not r.partial:
+                    complete = r.value
+        if show is None or self._src_key not in self._curves:
+            return
+        # spectrum — current run (bright), log-safe
+        y = np.where(show.y > 0, show.y, np.nan)
+        self._curves[self._src_key].setData(show.x, y, connect="finite")
+        self.p_spec.setLabel("left", _axis_text(show.y_label, show.y_unit))
+        self.p_wf.setLabel("bottom", _axis_text(show.x_label, show.x_unit))
+        lo = show.x_lo if show.x_lo is not None else float(show.x[0])
+        hi = show.x_hi if show.x_hi is not None else float(show.x[-1])
+        if hi > lo and self._xr != (lo, hi):
+            self.p_spec.setXRange(lo, hi, padding=0)    # waterfall follows via XLink
+            self._xr = (lo, hi)
+        if complete is None:
+            return
+        # completed scan → dim ghost + a new waterfall row
+        cy = np.where(complete.y > 0, complete.y, np.nan)
+        if self._prev_curve is not None:
+            self._prev_curve.setData(complete.x, cy, connect="finite")
+        wy = np.log10(np.clip(complete.y, 1e-12, None)).astype(np.float32)
+        if self._buf is None or self._buf.shape[1] != len(wy):
+            self._buf = np.full((self._rows, len(wy)), float(wy.min()), np.float32)
+            self._x0, self._x1 = lo, hi
+        self._buf = np.roll(self._buf, -1, axis=0)
+        self._buf[-1] = wy
+        loL = float(np.percentile(self._buf, 50))
+        hiL = float(self._buf.max())
+        if hiL <= loL:
+            hiL = loL + 1.0
+        self.img.setImage(self._buf.T, autoLevels=False, levels=[loL, hiL])
+        self.img.setRect(QRectF(self._x0, 0.0, self._x1 - self._x0, float(self._rows)))
+        self.p_wf.setYRange(0, self._rows, padding=0)
+        if self._bar is not None:
+            self._bar.setLevels((loL, hiL))
+
+    # -- trend cursors (mirrors SpectrumPanel, on the spectrum subplot) ------
+    def set_cursors(self, cursors):
+        current = {c[0]: c for c in cursors}
+        for cid in list(self._cursor_lines):
+            if cid not in current:
+                self.p_spec.removeItem(self._cursor_lines.pop(cid))
+        for cid, (name, mz, value, color) in {c[0]: c[1:] for c in cursors}.items():
+            label = f"{name}: {fmt(value)}"
+            line = self._cursor_lines.get(cid)
+            if line is None:
+                line = pg.InfiniteLine(
+                    pos=mz, angle=90, movable=True,
+                    pen=pg.mkPen(color, width=1, style=Qt.DashLine), label=label,
+                    labelOpts={"position": 0.96, "color": color,
+                               "fill": (10, 14, 19, 180)})
+                line.sigPositionChangeFinished.connect(
+                    lambda _=None, cid=cid: self._on_cursor_drag(cid))
+                self.p_spec.addItem(line)
+                self._cursor_lines[cid] = line
+            else:
+                if abs(line.value() - mz) > 1e-6:
+                    line.blockSignals(True)
+                    line.setValue(mz)
+                    line.blockSignals(False)
+                try:
+                    line.label.setFormat(label)
+                except Exception:
+                    pass
+
+    def _on_cursor_drag(self, cid):
+        line = self._cursor_lines.get(cid)
+        if line is not None and self.on_cursor_move is not None:
+            self.on_cursor_move(cid, float(line.value()))
+
+
 # --------------------------------------------------------------------------- #
 #  Image display — a virtual SINK for an "image" source (e.g. a camera)
 # --------------------------------------------------------------------------- #
@@ -1255,6 +1448,7 @@ PANEL_TYPES = {
     "numeric": ("7-seg display", NumericPanel),
     "spectrum": ("Spectrum", SpectrumPanel),
     "waterfall": ("Waterfall", WaterfallPanel),
+    "specwf": ("Spectrum + waterfall", SpectrumWaterfallPanel),
     "composition": ("Gas composition", CompositionPanel),
     "image": ("Camera view", ImagePanel),
     "slider": ("Slider", SliderPanel),
