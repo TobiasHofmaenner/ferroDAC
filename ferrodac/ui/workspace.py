@@ -136,7 +136,7 @@ class WorkspaceArea(QMainWindow):
         self.setDockNestingEnabled(True)
         self._docks: dict = {}
         self._gears: dict = {}
-        self._edit = True
+        self._edit = False              # start locked (presentation) mode
         self.on_configure = None        # set by the Dashboard: fn(panel)
 
     def add_panel(self, panel: Panel, title: str) -> PanelDock:
@@ -234,7 +234,7 @@ class Dashboard(QObject):
             self._bump_counter(pid)
         panel = cls()
         panel.panel_id = pid
-        panel.title = title
+        panel.set_display_name(title)        # let panels show their name (slider…)
         self._panels[pid] = panel
 
         if getattr(cls, "is_input", False):

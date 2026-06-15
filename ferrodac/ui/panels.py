@@ -785,6 +785,10 @@ class SliderPanel(InputPanel):
     def _build_body(self):
         self._min, self._max, self._unit = 0.0, 1.0, ""
         self._step = 0.001               # value increment per slider tick
+        self._name = QLabel("")          # shows the configured display name
+        self._name.setStyleSheet("font-weight:600; color:#cdd6e0;")
+        self._name.setVisible(False)
+        self._lay.addWidget(self._name)
         row = QHBoxLayout()
         self._slider = QSlider(Qt.Horizontal)
         self._slider.valueChanged.connect(self._on_slide)
@@ -797,6 +801,11 @@ class SliderPanel(InputPanel):
         host.setLayout(row)
         self._lay.addWidget(host)
         self._reconfigure()
+
+    def set_display_name(self, name):
+        super().set_display_name(name)
+        self._name.setText(name or "")
+        self._name.setVisible(bool(name))
 
     def config_fields(self):
         return super().config_fields() + [

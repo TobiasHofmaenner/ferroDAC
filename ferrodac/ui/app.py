@@ -1484,7 +1484,7 @@ class MainWindow(QMainWindow):
         view.addSeparator()
         self.edit_action = view.addAction("Edit layout")
         self.edit_action.setCheckable(True)
-        self.edit_action.setChecked(True)
+        self.edit_action.setChecked(False)          # start in locked layout
         self.edit_action.toggled.connect(self.dashboard.set_edit_mode)
 
         add = self.menuBar().addMenu("&Add")
