@@ -715,7 +715,8 @@ class CompositionPanel(Panel):
         lay.addWidget(self.plot)
         self._src_key = None
         self._proc_id = None
-        self._cfg = {"mc": 64, "sparsity": 0.0}   # creation config (+ gases)
+        # creation config for the hosted analyzer (+ optional gases)
+        self._cfg = {"mc": 64, "sparsity": 0.0, "peak_fwhm": 0.7}
         self._add = self._remove = self._get = self._for = None
 
     def set_processor_host(self, add, remove, get, procs_for):
@@ -772,12 +773,14 @@ class CompositionPanel(Panel):
     def state(self):
         a = self._get(self._proc_id) if (self._get and self._proc_id) else None
         if a is not None:
-            return {"mc": a.mc, "sparsity": a.sparsity, "gases": a.gas_names}
+            return {"mc": a.mc, "sparsity": a.sparsity, "gases": a.gas_names,
+                    "peak_fwhm": a.peak_fwhm}
         return dict(self._cfg)
 
     def set_state(self, st):
         self._cfg = {"mc": int(st.get("mc", 64)),
-                     "sparsity": float(st.get("sparsity", 0.0))}
+                     "sparsity": float(st.get("sparsity", 0.0)),
+                     "peak_fwhm": float(st.get("peak_fwhm", 0.7))}
         if st.get("gases"):
             self._cfg["gases"] = st["gases"]
 

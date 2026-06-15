@@ -15,6 +15,9 @@ from .deconvolve import deconvolve, deconvolve_mc
 from .library import DEFAULT_GASES, LIBRARY, get_gases
 from .processor import Port, Processor, register
 
+# points/amu of the fine axis a reconstructed (Gaussian) spectrum is drawn on
+_RECON_PPA = 32
+
 
 @register
 class GasAnalyzer(Processor):
@@ -24,12 +27,14 @@ class GasAnalyzer(Processor):
     id_prefix = "gas"
 
     def __init__(self, pid: str, input_key: str, gases=None,
-                 sparsity: float = 0.0, mc: int = 0, unit: str = ""):
+                 sparsity: float = 0.0, mc: int = 0, peak_fwhm: float = 0.7,
+                 unit: str = ""):
         super().__init__(pid, input_key)
         self.gas_names = list(gases) if gases else list(DEFAULT_GASES)
         self._gases = get_gases(self.gas_names)
         self.sparsity = float(sparsity)
         self.mc = int(mc)                       # 0/1 = single fit; >1 = MC runs
+        self.peak_fwhm = float(peak_fwhm)       # reconstructed peak width (amu)
         self.unit = unit
         # latest results, for the composition panel
         self.last_amounts: dict = {}
@@ -53,16 +58,21 @@ class GasAnalyzer(Processor):
         return ports
 
     def _reconstruct(self, x, name, amount) -> Trace:
-        """The spectrum this gas alone would produce at its fitted amount, on the
-        measured mass axis — its fragments placed at their m/z (so it overlays)."""
+        """The analog spectrum this gas alone would produce at its fitted amount:
+        each fragment a Gaussian at its m/z (peak_fwhm wide) on a fine axis, so it
+        looks like a real RGA scan and overlays naturally on the measured peaks."""
+        lo, hi = float(x[0]), float(x[-1])
+        fine = np.linspace(lo, hi, max(2, int(round((hi - lo) * _RECON_PPA)) + 1))
+        y = np.zeros(len(fine))
         g = LIBRARY.get(name)
-        y = np.zeros(len(x))
         if g is not None and amount > 0:
             contrib = amount * (g.rsf or 1.0)        # un-sensitivity-corrected
+            sigma = max(self.peak_fwhm, 1e-3) / 2.3548
             for m, frac in g.norm_pattern.items():
-                y[np.abs(x - m) <= 0.5] = contrib * frac
-        return Trace(np.asarray(x, float), y, x_label="m/z", y_label="Intensity",
-                     y_unit=self.unit, x_lo=float(x[0]), x_hi=float(x[-1]))
+                if lo - 1 <= m <= hi + 1:
+                    y += contrib * frac * np.exp(-0.5 * ((fine - m) / sigma) ** 2)
+        return Trace(fine, y, x_label="m/z", y_label="Intensity",
+                     y_unit=self.unit, x_lo=lo, x_hi=hi)
 
     def process(self, value) -> dict:
         sigma = getattr(value, "sigma", None)   # measured per-mass noise, if any
@@ -87,4 +97,5 @@ class GasAnalyzer(Processor):
         return out
 
     def state(self) -> dict:
-        return {"gases": self.gas_names, "sparsity": self.sparsity, "mc": self.mc}
+        return {"gases": self.gas_names, "sparsity": self.sparsity, "mc": self.mc,
+                "peak_fwhm": self.peak_fwhm}
