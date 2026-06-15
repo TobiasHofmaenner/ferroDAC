@@ -1,44 +1,46 @@
 # ferroDAC
 
-*A local-first, plain-files lab data-acquisition & documentation platform.*
+*A local-first, plain-files lab data-acquisition, control & documentation platform.*
 
-**(working name · design phase — no implementation yet)**
+ferroDAC unifies live multi-instrument acquisition, a **universal routing
+patch-bay** (any data source → any datatype-compatible display or control),
+on-demand recording to portable open-format files, and lightweight
+electronic-lab-notebook annotation — extensible to any instrument via a driver
+library, local-first with a networked hub planned.
 
-ferroDAC unifies live multi-instrument data acquisition, on-demand recording to a
-portable project folder, and lightweight electronic-lab-notebook (ELN)
-documentation — extensible to any instrument via a driver library, and viewable
-locally or streamed to remote clients.
+It grew out of two single-purpose tools — a Pfeiffer **TPG-256A** vacuum-gauge
+monitor and a **Modbus RTU temperature** monitor — generalised into one platform.
 
-It generalises two existing single-purpose tools — a Pfeiffer **TPG-256A**
-vacuum-gauge monitor and a **Modbus RTU temperature** monitor — into one
-extensible platform.
-
-## Status
-
-**v0.4 — configurable dashboard.** The `Source` contract + driver registry +
-discovery, a generated **configuration UI**, the **data plane** (sources push
-`Reading`s → an `Engine` fans them out to sinks), and an **IDE-style dockable
-shell** whose central area is a **workspace of panels** you add yourself:
-
-- **Add** menu creates **Chart** and **7-seg display** panels; each is a dock you
-  drag/resize/tile. An **Edit layout** toggle locks panels and hides their title
-  bars for clean interaction (chart zoom/pan always works).
-- The right **Channels** dock lists every channel; each card has a **Route ▾**
-  dropdown selecting which panel(s) it feeds (a channel can feed several).
-- The left **Sources** dock (device management) is hidden by default; opened via
-  the toolbar / View menu.
-- **Input panels** (Slider / Button / Toggle) bind to a device **control** and
-  drive it via `invoke` — so the dashboard does **bidirectional** control, not
-  just display.
-
-Three fake discoverable sources prove it end-to-end with no hardware, including a
-**simulated bench power supply** (set voltage / current-limit / output on-off;
-live voltage / current / power over a 100 Ω load with CV→CC behaviour).
+## Status — v0.14 (early, but usable for real experiments)
 
 ```bash
 pip install -r requirements.txt
 python -m ferrodac
 ```
+
+What works today:
+
+- **Universal patch-bay.** Every data endpoint is a port. Any **Source** routes
+  to any datatype-compatible **Sink** (float / bool / image / string) — including
+  a device source straight into another device's control input (closed loop).
+  Virtual sources (slider / button / toggle) and virtual sinks (chart / 7-seg /
+  camera view) sit on the same graph as device ports.
+- **Devices.** Hardware-free **simulated** gauge / thermometer / bench power
+  supply; a host **camera** (Qt Multimedia, with format/resolution selection);
+  and the **Pfeiffer TPG-256A** vacuum gauge controller over serial
+  (auto-discovery, per-gauge pressures, gauge on/off, hardened framing).
+- **Computer-vision sources.** Point a camera at a gauge or LCD, draw a box over
+  the value, and OCR (Tesseract) turns it into a routable number — a *soft
+  sensor* for instruments with no digital output.
+- **Stable identity & resilience.** Each device gets a **UUID** (registry +
+  fingerprint resolver), so layouts are portable. A device that disappears keeps
+  its routes as offline placeholders and **auto-rebinds** when it returns.
+- **Record & timeline.** Crash-safe **append-only** capture; each recording is a
+  draggable **region** you can zoom to / export to CSV / export plots from. Event
+  **tags** (timestamp + note) render **synced across every chart** on a shared
+  clock. Full-session **save / restore** (portable JSON) + autosave.
+- **Dockable IDE shell.** Add and tile panels; an *Edit layout* toggle locks them
+  for clean interaction.
 
 ### Building a Windows executable
 
@@ -55,43 +57,71 @@ pyinstaller packaging/ferrodac.spec      :: -> dist\ferroDAC.exe
 The camera-OCR feature additionally needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
 installed and on `PATH`; it degrades gracefully without it.
 
-Design docs:
+## Concepts
 
-- [docs/DESIGN.md](docs/DESIGN.md) — the full architecture (the ideal we aim at).
-- [docs/ROADMAP.md](docs/ROADMAP.md) — phasing, MVP scope, and open decisions.
+- **Device / Source / Sink.** A **Device** is an instrument (a driver instance);
+  it exposes **Sources** (data outputs) and **Sinks** (control inputs). Endpoints
+  are addressed by `(device-uuid, id)`, so routes and saved layouts survive
+  renames, re-plugs and moving between machines.
+- **Two planes.** An always-on **live** plane (sources push `Reading`s into an
+  `Engine` that fans them out to sinks) and an on-demand **Record** plane that
+  materialises a slice to open files. Lock-in is forbidden only in the second.
+- **Local-first.** Everything works at the bench with no server; the networked
+  hub is additive (the data plane and identity already address devices the way
+  the hub will).
 
-### Layout
+## Layout
 
 ```
 ferrodac/
-  core/source.py     the Source contract (descriptor + ABC) — the deliverable
-  core/base.py       BaseSource convenience base (state machine + poll loop)
-  core/reading.py    Reading — the unit of the push stream
-  core/engine.py     data-plane hub: fan-out to sinks, latest cache, drain timer
-  core/registry.py   loads source modules, collects Source subclasses
-  core/manager.py    background discovery + available/active + streaming wiring
-  sources/fake.py    hardware-free example sources (with simulated data)
-  ui/app.py          source-management + config dialog + live cards + chart sink
+  core/
+    device.py     the Device contract (Device/Source/Sink descriptors + ABC)
+    base.py       BaseDevice convenience base (status machine + poll loop)
+    reading.py    Reading — the unit of the push stream
+    engine.py     data-plane hub: fan-out to sinks, latest cache, drain timer
+    manager.py    background discovery + available/active + UUID onboarding
+    registry.py   loads device modules, collects Device subclasses
+    identity.py   UUID registry + fingerprint resolution
+    markers.py    shared session clock + tag / recording markers
+    history.py    bounded in-memory hot buffer (live display + Record pre-roll)
+    recorder.py   append-only capture -> materialised CSV
+  devices/
+    fake.py       hardware-free simulated instruments
+    camera.py     host webcam via Qt Multimedia (image source)
+    tpg256a.py    Pfeiffer TPG-256A vacuum gauge controller (serial)
+  vision/
+    detector.py   OCR text-detection source (ROI -> parsed value)
+    ocr.py        Tesseract backend + OpenCV preprocessing
+    runner.py     worker thread driving detectors off the GUI
+  ui/
+    app.py        the shell: Devices/Sources/Sinks/Events docks, menus, Record
+    workspace.py  the dashboard router (patch-bay) + dockable panel area
+    panels.py     chart / 7-seg / camera-view / slider / button / toggle
 ```
 
 ## Guiding principles (short version)
 
 1. **The folder is the system of record.** Captured data lives in a portable,
-   human-readable / open-format project folder (Nextcloud-friendly) that is still
-   usable in 10 years with no tool.
+   human-readable / open-format project folder (Nextcloud-friendly) still usable
+   in 10 years with no tool.
 2. **Two planes.** An always-on *live* plane (performant, replaceable, any tech)
    and an on-demand *Record* plane (durable, open files). Lock-in is forbidden
    only in the second.
 3. **Local-first.** Everything works at the bench with no server; remote is
    additive, never required.
-4. **Self-describing, extensible drivers.** Add an instrument by dropping a YAML
-   description (structured protocols) or a code driver (everything else) into the
-   library.
+4. **Self-describing, extensible drivers.** Add an instrument by dropping a
+   driver into the library; the UI, routing and config are generated from its
+   descriptor.
 5. **Meet physicists where they are.** Analysis is Python-native: the folder + a
    client SDK + a scaffolded notebook per run.
 6. **Design the whole; build incrementally.** Every slot for the full vision
-   (control, multi-station, waveforms, video) is designed now and implemented in
-   phases.
+   (the networked hub, a historic-replay timeline, waveforms, video) is designed
+   now and implemented in phases.
+
+## Design docs
+
+- [docs/DESIGN.md](docs/DESIGN.md) — the full architecture (the ideal we aim at).
+- [docs/ROADMAP.md](docs/ROADMAP.md) — phasing, MVP scope, and open decisions.
 
 ## License
 
