@@ -466,12 +466,51 @@ class DevicesPanel(QWidget):
 # --------------------------------------------------------------------------- #
 #  Sources panel (right dock) — data outputs
 # --------------------------------------------------------------------------- #
+class CollapsibleGroup(QWidget):
+    """A titled, collapsible container — groups cards by what created them."""
+
+    def __init__(self, title, count, collapsed, on_toggle, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._on_toggle = on_toggle
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+        self._btn = QToolButton()
+        self._btn.setText(f"{title}  ({count})")
+        self._btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._btn.setArrowType(Qt.RightArrow if collapsed else Qt.DownArrow)
+        self._btn.setCursor(Qt.PointingHandCursor)
+        self._btn.setStyleSheet(
+            "QToolButton { color:#8b95a4; font-size:11px; font-weight:700;"
+            " border:none; padding:3px 2px; text-align:left; }"
+            "QToolButton:hover { color:#c7d0db; }")
+        self._btn.clicked.connect(self._toggle)
+        self._body = QWidget()
+        self._bl = QVBoxLayout(self._body)
+        self._bl.setContentsMargins(6, 0, 0, 4)
+        self._bl.setSpacing(6)
+        self._body.setVisible(not collapsed)
+        v.addWidget(self._btn)
+        v.addWidget(self._body)
+
+    def add(self, widget):
+        self._bl.addWidget(widget)
+
+    def _toggle(self):
+        vis = not self._body.isVisible()
+        self._body.setVisible(vis)
+        self._btn.setArrowType(Qt.DownArrow if vis else Qt.RightArrow)
+        self._on_toggle(self._title, not vis)
+
+
 class SourcesPanel(QWidget):
     def __init__(self, manager: DeviceManager, dashboard: Dashboard, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.dashboard = dashboard
         self._cards: dict[str, SourceCard] = {}
+        self._collapsed: set[str] = set()        # origins folded by the user
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -497,22 +536,37 @@ class SourcesPanel(QWidget):
         clear_layout(self._layout)
         self._cards = {}
         ports = self.dashboard.source_ports()
+        self._label.setText(f"Sources  ({len(ports)})")
         if not ports:
             ph = QLabel("No sources yet.\nAdd a device (Devices) or an input (Add menu).")
             ph.setStyleSheet("color:#7f8a99;")
             ph.setWordWrap(True)
             self._layout.addWidget(ph)
+            self._layout.addStretch(1)
+            return
+        groups: dict[str, list] = {}             # origin -> ports (insertion order)
         for port in ports:
-            card = SourceCard(
-                port, color_for(port.key),
-                self.dashboard.compatible_sinks(port.key),
-                self.dashboard.routed(port.key),
-                lambda skey, on, key=port.key: self.dashboard.set_route(key, skey, on),
-            )
-            self._cards[port.key] = card
-            self._layout.addWidget(card)
+            groups.setdefault(port.origin or "other", []).append(port)
+        for origin, gports in groups.items():
+            grp = CollapsibleGroup(origin, len(gports), origin in self._collapsed,
+                                   self._on_group_toggle)
+            for port in gports:
+                card = SourceCard(
+                    port, color_for(port.key),
+                    self.dashboard.compatible_sinks(port.key),
+                    self.dashboard.routed(port.key),
+                    lambda skey, on, key=port.key: self.dashboard.set_route(key, skey, on),
+                )
+                self._cards[port.key] = card
+                grp.add(card)
+            self._layout.addWidget(grp)
         self._layout.addStretch(1)
-        self._label.setText(f"Sources  ({len(ports)})")
+
+    def _on_group_toggle(self, origin, collapsed):
+        if collapsed:
+            self._collapsed.add(origin)
+        else:
+            self._collapsed.discard(origin)
 
     def update_live(self, latest: dict):
         for key, card in self._cards.items():
