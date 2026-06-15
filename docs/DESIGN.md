@@ -210,6 +210,8 @@ artifact — "add any module as long as it's in the library."
   don't break references. **Multi-station namespacing from day one.**
 - **Reading/Sample** is modality-tagged:
   - `scalar`  → `(t, value, unit, status)`
+  - `trace`   → `(t, x[], y[], x_unit, y_unit, status)` — a spectrum/curve with
+    an explicit (possibly non-uniform, possibly *changing*) x-axis, e.g. RGA m/z
   - `waveform`→ `(t0, dt, array, unit, status)` (a block, not N points)
   - `image`   → reference to a stored frame
   - `video`   → reference to a stream/segment
@@ -297,6 +299,61 @@ markers) — so dragging a marker never re-serialises a long run.
   graphs**. Tags are session/run metadata: saved with the layout, auto-appended to
   `log.md` (§10), and (later) jump-to points on the replay timeline.
 
+### 7.2 Historic plane: reimport, replay & the query interface (decided 2026-06-15)
+
+**Invariant: everything we produce is reimportable.** A capture is never a dead
+export — any recorded run can be brought *back into the running app* with its
+original signature intact, so the same layouts, routes and analysis pipelines
+rebind to it untouched.
+
+- **Two tiers, by the operator's intent.** *Ambient* (un-recorded) live data is
+  performance-format, retention-bounded, **expendable** — it feeds live charts and
+  scroll-back and may be lost. *Recorded* captures are the sacred, self-describing,
+  **pinned** tier (§8). Small captures (gauges, RGA) are materialised in full on
+  Stop, so "always recoverable on restart" holds transparently and forever; a
+  genuine firehose stays ambient and is kept only via deliberate **Export**.
+
+- **Reimport / replay is a playback *Device*, not a bespoke loader.** A capture is
+  opened as a **`FileDevice`** whose Sources are the captured channels,
+  **reclaiming the original `(uuid, source-id)` keys** from the run manifest.
+  Because identity matches, the §6.1 placeholder **auto-rebind** is the entire
+  mechanism: load the file → the run's greyed ports come online → every route,
+  processor and panel bound to them lights up with replayed data, **zero
+  reconfiguration**. One component is the offline reimporter, the restart-recovery
+  loader, *and* the replay input; the server mirror is *historic-query-as-a-source*.
+  (A bare, manifest-less CSV still imports, but as a lower-fidelity *new* device
+  whose columns are mapped by hand.)
+
+- **Replay runs in its own clock.** Nothing in the data path reads wall-time
+  directly: a `SessionClock` (live) and a `PlaybackClock` (driven by the file's
+  timestamps) implement one interface. A loaded capture plays in its **own
+  context**, so historic timestamps never collide with live data (or a still-
+  connected source of the same UUID). v1 is **bulk-load-and-render** (emit rows in
+  order; charts repopulate, processors fire once per scan); scrub / play-at-speed
+  is a later use of the same clock seam.
+
+- **Store raw, recompute derived.** Only measured series are truth; processor
+  outputs (gas composition, cursors, normalisation) are **never persisted as
+  data** — they are re-derived by replaying raw through the pipeline. The pipeline
+  config travels in the run manifest, so replay offers *as-recorded* vs
+  *with-current-pipeline*. ⇒ Replaying the **analysis** pipeline requires the raw
+  **traces** in the capture (§8 format rule), not just the scalar outputs.
+
+- **One windowed, resolution-aware query interface** is the only way panels read
+  data, live or historic: `query(series, t0, t1, max_points)` returning **min/max
+  envelope buckets** (so peaks survive downsampling) + `subscribe(series)` for the
+  live tail. Live is just the special case "window = follow the tail." The same
+  call powers live charts, historic navigation, and feature-hunting a downsampled
+  firehose streamed back from the server. Backed by the RAM ring + per-run files
+  now; VictoriaMetrics + object store later — panels don't change.
+
+- **Autoscale is viewport-scoped.** Y auto-ranges over the data **inside the
+  current X window**, never all of history — so a week-old capture loading on
+  restart can't squash the view. The live chart holds only its bounded tail;
+  recorded runs are *not* poured into it — they open on demand (region zoom / the
+  time navigator), which sets the X window and queries that range at display
+  resolution.
+
 ---
 
 ## 8. Project folder = system of record
@@ -325,9 +382,12 @@ MyExperiment/
   **firmware** (we already read the TPG's `PNR`), driver versions, full config,
   sampling rates, operator, software version, start/stop times. The best
   documentation is the boring part done for you.
-- **Format rule:** text for low-rate tabular; HDF5/Parquet for high-rate arrays;
-  standard containers for media. The invariant is *open + self-describing*, not
-  literally "everything is text".
+- **Format rule:** text for low-rate tabular; **traces/spectra as a 2-D CSV
+  matrix** — a timestamp column + one column per x-bin, the **header row carrying
+  the x-axis** (self-describing and reimportable; a *changed* axis starts a new
+  segment); HDF5/Parquet reserved for genuine high-rate waveform/firehose arrays;
+  standard containers for media. The invariant is *open + self-describing +
+  reimportable*, not literally "everything is text".
 - **Nextcloud:** folder-first via the desktop sync client now (zero special
   integration); optional **WebDAV** later (headless agents, sharing, versioning).
 
