@@ -316,6 +316,8 @@ class SpectrumPanel(Panel):
         self.plot.getPlotItem().setClipToView(True)
         lay.addWidget(self.plot)
         self._curves: dict = {}
+        self._cursor_lines: dict = {}      # trend cursors (id -> InfiniteLine)
+        self.on_cursor_move = None          # set by the Dashboard
 
     def add_source(self, key, source):
         if key in self._curves:
@@ -338,6 +340,40 @@ class SpectrumPanel(Panel):
             self._curves[key].setData(tr.x, y, connect="finite")
             self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
             self.plot.setLabel("left", _axis_text(tr.y_label, tr.y_unit))
+
+    def set_cursors(self, cursors):
+        """Draw trend-cursor lines: cursors = [(id, name, mz, value, color)]."""
+        current = {c[0]: c for c in cursors}
+        for cid in list(self._cursor_lines):
+            if cid not in current:
+                self.plot.removeItem(self._cursor_lines.pop(cid))
+        for cid, (name, mz, value, color) in {c[0]: c[1:] for c in cursors}.items():
+            label = f"{name}: {fmt(value)}"
+            line = self._cursor_lines.get(cid)
+            if line is None:
+                line = pg.InfiniteLine(
+                    pos=mz, angle=90, movable=True,
+                    pen=pg.mkPen(color, width=1, style=Qt.DashLine), label=label,
+                    labelOpts={"position": 0.96, "color": color,
+                               "fill": (10, 14, 19, 180)})
+                line.sigPositionChangeFinished.connect(
+                    lambda _=None, cid=cid: self._on_cursor_drag(cid))
+                self.plot.addItem(line)
+                self._cursor_lines[cid] = line
+            else:
+                if abs(line.value() - mz) > 1e-6:
+                    line.blockSignals(True)
+                    line.setValue(mz)
+                    line.blockSignals(False)
+                try:
+                    line.label.setFormat(label)
+                except Exception:
+                    pass
+
+    def _on_cursor_drag(self, cid):
+        line = self._cursor_lines.get(cid)
+        if line is not None and self.on_cursor_move is not None:
+            self.on_cursor_move(cid, float(line.value()))
 
 
 class WaterfallPanel(Panel):

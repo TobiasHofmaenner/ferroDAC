@@ -525,7 +525,8 @@ class SourcesPanel(QWidget):
 #  Sinks panel (right dock) — data consumers (device controls + displays)
 # --------------------------------------------------------------------------- #
 class SinkCard(QFrame):
-    def __init__(self, port, value_text, bound, color, on_cv=None, parent=None):
+    def __init__(self, port, value_text, bound, color, on_cv=None, on_peaks=None,
+                 parent=None):
         super().__init__(parent)
         self.online = getattr(port, "online", True)
         if not self.online:
@@ -554,6 +555,11 @@ class SinkCard(QFrame):
             det.setText("◎ Detections…")
             det.clicked.connect(on_cv)
             top.addWidget(det)
+        if on_peaks is not None:
+            pk = QToolButton()
+            pk.setText("◷ Peaks…")
+            pk.clicked.connect(on_peaks)
+            top.addWidget(pk)
         lay.addLayout(top)
 
         self.value_label = QLabel(value_text)
@@ -576,11 +582,12 @@ class SinkCard(QFrame):
 
 class SinksPanel(QWidget):
     def __init__(self, manager: DeviceManager, dashboard: Dashboard,
-                 on_cv=None, parent=None):
+                 on_cv=None, on_peaks=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.dashboard = dashboard
         self._on_cv = on_cv
+        self._on_peaks = on_peaks
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -625,12 +632,16 @@ class SinksPanel(QWidget):
                 srcs = self.dashboard.sources_into(port.key)
                 value_text = f"{len(srcs)} source{'s' if len(srcs) != 1 else ''}"
                 bound = ", ".join(srcs) if srcs else None
-            on_cv = None
-            if (port.kind == "display" and "image" in port.accepts
-                    and self._on_cv is not None):
+            on_cv = on_peaks = None
+            if port.kind == "display" and "image" in port.accepts \
+                    and self._on_cv is not None:
                 on_cv = lambda _=False, k=port.key: self._on_cv(k)
+            if port.kind == "display" and "trace" in port.accepts \
+                    and self._on_peaks is not None:
+                on_peaks = lambda _=False, k=port.key: self._on_peaks(k)
             card = SinkCard(port, value_text, bound,
-                            color_for("sink:" + port.key), on_cv=on_cv)
+                            color_for("sink:" + port.key), on_cv=on_cv,
+                            on_peaks=on_peaks)
             self._cards[port.key] = (card, port)
             self._layout.addWidget(card)
         self._layout.addStretch(1)
@@ -1225,6 +1236,104 @@ class ImageConfigDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- #
+#  Trend cursors — pick peaks off a spectrum as scalar sources
+# --------------------------------------------------------------------------- #
+class CursorDialog(QDialog):
+    """Add/remove trend cursors on a spectrum panel: each extracts a scalar
+    (peak / value-at / area) from a trace at an m/z and becomes a Source."""
+
+    def __init__(self, dashboard: Dashboard, sink_key: str, parent=None):
+        super().__init__(parent)
+        self.dashboard = dashboard
+        self.sink_key = sink_key
+        sink = dashboard._sinks.get(sink_key)
+        self.panel = sink.panel if sink is not None else None
+        self.setWindowTitle(f"Peaks — {sink.name if sink else ''}")
+        self.setMinimumWidth(380)
+
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self._source = QComboBox()
+        form.addRow("Trace", self._source)
+        self._name = QLineEdit()
+        self._name.setPlaceholderText("name (optional)")
+        form.addRow("Name", self._name)
+        self._mz = QDoubleSpinBox()
+        self._mz.setRange(0, 1000)
+        self._mz.setDecimals(1)
+        self._mz.setValue(18)
+        self._mz.setSuffix(" m/z")
+        form.addRow("Mass", self._mz)
+        self._mode = QComboBox()
+        for v, lbl in (("peak", "Peak"), ("value", "Value at"), ("area", "Area")):
+            self._mode.addItem(lbl, v)
+        self._width = QDoubleSpinBox()
+        self._width.setRange(0.1, 20)
+        self._width.setDecimals(1)
+        self._width.setValue(1.0)
+        self._width.setSuffix(" u")
+        er = QHBoxLayout()
+        er.addWidget(self._mode)
+        er.addWidget(QLabel("±"))
+        er.addWidget(self._width)
+        er.addStretch(1)
+        w = QWidget()
+        w.setLayout(er)
+        form.addRow("Extract", w)
+        root.addLayout(form)
+        add = QPushButton("Add peak")
+        add.clicked.connect(self._add)
+        root.addWidget(add)
+        lbl = QLabel("Peaks")
+        lbl.setStyleSheet("font-weight:700; margin-top:6px;")
+        root.addWidget(lbl)
+        self._list = QListWidget()
+        root.addWidget(self._list, 1)
+        rm = QPushButton("Remove selected")
+        rm.clicked.connect(self._remove)
+        root.addWidget(rm)
+        dashboard.ports_changed.connect(self._reload)
+        self._reload()
+
+    def _trace_sources(self):
+        return list(getattr(self.panel, "_curves", {}))
+
+    def _add(self):
+        key = self._source.currentData()
+        if not key:
+            self._name.setPlaceholderText("route a trace source to this panel first")
+            return
+        self.dashboard.add_cursor(
+            key, self._mz.value(), name=self._name.text().strip() or None,
+            mode=self._mode.currentData(), width=self._width.value())
+        self._name.clear()
+
+    def _remove(self):
+        row = self._list.currentRow()
+        if row >= 0:
+            self.dashboard.remove_cursor(self._list.item(row).data(Qt.UserRole))
+
+    def _reload(self):
+        keys = self._trace_sources()
+        cur = self._source.currentData()
+        self._source.blockSignals(True)
+        self._source.clear()
+        for key in keys:
+            sp = self.dashboard._sources.get(key)
+            self._source.addItem(sp.name if sp else key, key)
+        ix = self._source.findData(cur)
+        if ix >= 0:
+            self._source.setCurrentIndex(ix)
+        self._source.blockSignals(False)
+        self._list.clear()
+        for key in keys:
+            for c in self.dashboard.cursors_for(key):
+                item = QListWidgetItem(f"{c.name}  ·  m/z {c.mz:g} · {c.mode}")
+                item.setData(Qt.UserRole, c.id)
+                self._list.addItem(item)
+
+
+# --------------------------------------------------------------------------- #
 #  Main window — dockable shell
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
@@ -1267,7 +1376,8 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.sources_dock)
 
         self.sinks_panel = SinksPanel(manager, self.dashboard,
-                                      on_cv=self._open_cv_config)
+                                      on_cv=self._open_cv_config,
+                                      on_peaks=self._open_peaks_config)
         self.sinks_dock = QDockWidget("Sinks", self)
         self.sinks_dock.setObjectName("SinksDock")
         self.sinks_dock.setWidget(self.sinks_panel)
@@ -1458,6 +1568,19 @@ class MainWindow(QMainWindow):
         self.sources_panel.update_live(self.engine.latest())
         self.sinks_panel.update_live()
         self._update_image_overlays()
+        self._update_trace_cursors()
+
+    def _update_trace_cursors(self):
+        for panel in self.dashboard._panels.values():
+            if getattr(panel, "kind", "") != "spectrum" \
+                    or not hasattr(panel, "set_cursors"):
+                continue
+            cursors = []
+            for src_key in getattr(panel, "_curves", {}):
+                for cur in self.dashboard.cursors_for(src_key):
+                    cursors.append((cur.id, cur.name, cur.mz, cur.last_value,
+                                    color_for(f"cur/{cur.id}")))
+            panel.set_cursors(cursors)
 
     def _update_image_overlays(self):
         for pid, panel in self.dashboard._panels.items():
@@ -1500,6 +1623,18 @@ class MainWindow(QMainWindow):
             dlg.activateWindow()
             return
         dlg = ImageConfigDialog(self.dashboard, sink_key, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.destroyed.connect(lambda *_: self._cv_dialogs.pop(sink_key, None))
+        self._cv_dialogs[sink_key] = dlg
+        dlg.show()
+
+    def _open_peaks_config(self, sink_key: str) -> None:
+        dlg = self._cv_dialogs.get(sink_key)
+        if dlg is not None:
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        dlg = CursorDialog(self.dashboard, sink_key, self)
         dlg.setAttribute(Qt.WA_DeleteOnClose, True)
         dlg.destroyed.connect(lambda *_: self._cv_dialogs.pop(sink_key, None))
         self._cv_dialogs[sink_key] = dlg

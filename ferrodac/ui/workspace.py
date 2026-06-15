@@ -28,6 +28,7 @@ from qtpy.QtWidgets import QDockWidget, QMainWindow, QWidget
 from ..core.device import SinkKind
 from ..core.markers import MarkerModel, SessionClock
 from ..core.reading import Reading
+from ..core.trace import Trace, extract
 from ..vision import CVRunner, Detector
 from ..vision.detector import CONFIG_FIELDS
 from .panels import PANEL_TYPES, Panel
@@ -53,6 +54,18 @@ class SourcePort:
     kind: str            # "device" | "virtual"
     panel: object = None
     online: bool = True   # False = referenced-but-absent placeholder
+
+
+@dataclass
+class Cursor:
+    """A trend cursor: a scalar extracted from a trace source at a given m/z."""
+    id: str
+    source_key: str
+    name: str
+    mz: float
+    width: float = 1.0
+    mode: str = "peak"          # peak | value | area
+    last_value: float = float("nan")
 
 
 @dataclass
@@ -156,6 +169,10 @@ class Dashboard(QObject):
         self._det_counter = 0
         self._cv: CVRunner | None = None
 
+        # trend cursors (scalar sources extracted from a trace at an m/z)
+        self._cursors: dict[str, Cursor] = {}
+        self._cur_counter = 0
+
         engine.subscribe(self._on_batch)
         manager.active_changed.connect(self._rebuild_device_ports)
         self._rebuild_device_ports()
@@ -193,6 +210,8 @@ class Dashboard(QObject):
 
         if hasattr(panel, "attach_session"):
             panel.attach_session(self.clock, self.markers)
+        if hasattr(panel, "on_cursor_move"):
+            panel.on_cursor_move = lambda cid, mz: self.update_cursor(cid, mz=mz)
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -302,6 +321,50 @@ class Dashboard(QObject):
         with self._det_lock:
             return self._detectors.get(did)
 
+    # -- trend cursors (scalar from a trace at an m/z) -----------------------
+    def add_cursor(self, source_key: str, mz: float, name: str = None,
+                   mode: str = "peak", width: float = 1.0, cid: str = None) -> str:
+        if cid is None:
+            self._cur_counter += 1
+            cid = f"cur{self._cur_counter}"
+        else:
+            tail = cid[3:] if cid.startswith("cur") else ""
+            if tail.isdigit():
+                self._cur_counter = max(self._cur_counter, int(tail))
+        name = name or f"m/z {mz:g}"
+        src = self._sources.get(source_key)
+        self._cursors[cid] = Cursor(cid, source_key, name, float(mz), float(width), mode)
+        key = f"cur/{cid}"
+        origin = f"peak · {src.name}" if src is not None else "peak"
+        self._sources[key] = SourcePort(key, name, "float",
+                                        src.unit if src else "", origin, "virtual")
+        self._routes.setdefault(key, set())
+        self.ports_changed.emit()
+        return cid
+
+    def update_cursor(self, cid: str, **fields) -> None:
+        cur = self._cursors.get(cid)
+        if cur is None:
+            return
+        for k, v in fields.items():
+            setattr(cur, k, v)
+        sp = self._sources.get(f"cur/{cid}")
+        if sp is not None:
+            sp.name = cur.name
+        self.ports_changed.emit()
+
+    def remove_cursor(self, cid: str) -> None:
+        self._cursors.pop(cid, None)
+        self._sources.pop(f"cur/{cid}", None)
+        self._routes.pop(f"cur/{cid}", None)
+        self.ports_changed.emit()
+
+    def cursors_for(self, source_key: str) -> list:
+        return [c for c in self._cursors.values() if c.source_key == source_key]
+
+    def cursor(self, cid: str):
+        return self._cursors.get(cid)
+
     def _snapshot_detectors(self) -> list:
         with self._det_lock:
             return list(self._detectors.values())
@@ -332,14 +395,19 @@ class Dashboard(QObject):
                      "roi": list(det.roi)}
             entry.update({f: getattr(det, f) for f in CONFIG_FIELDS})
             detectors.append(entry)
+        cursors = [{"id": c.id, "source": c.source_key, "name": c.name,
+                    "mz": c.mz, "width": c.width, "mode": c.mode}
+                   for c in self._cursors.values()]
         routes = {k: sorted(v) for k, v in self._routes.items() if v}
-        return {"panels": panels, "detectors": detectors, "routes": routes,
-                "default_sink": self.default_sink_id,
+        return {"panels": panels, "detectors": detectors, "cursors": cursors,
+                "routes": routes, "default_sink": self.default_sink_id,
                 "markers": self.markers.to_list()}
 
     def clear_layout(self) -> None:
         for pid in list(self._panels):
             self.remove_panel(pid)
+        for cid in list(self._cursors):
+            self.remove_cursor(cid)
         self._routes.clear()
         self.default_sink_id = None
         self._rebuild_device_ports()
@@ -358,6 +426,10 @@ class Dashboard(QObject):
             cfg = {f: d[f] for f in CONFIG_FIELDS if f in d}
             self.add_detector(d["sink"], name=d.get("name", "Reading"),
                               roi=tuple(d["roi"]), did=d["id"], **cfg)
+        for c in data.get("cursors", []):
+            self.add_cursor(c["source"], c["mz"], name=c.get("name"),
+                            mode=c.get("mode", "peak"), width=c.get("width", 1.0),
+                            cid=c["id"])
         for src, sinks in data.get("routes", {}).items():
             for sink in sinks:
                 self.set_route(src, sink, True)
@@ -516,12 +588,24 @@ class Dashboard(QObject):
 
     # -- data flow -----------------------------------------------------------
     def _on_batch(self, batch):
-        """Engine sink: write routed source values to *device* sinks."""
+        """Engine sink: extract trend cursors + write routed sources to sinks."""
         for r in batch:
+            if isinstance(r.value, Trace):
+                self._extract_cursors(r)
             for sink_key in self._routes.get(r.key, ()):
                 sp = self._sinks.get(sink_key)
                 if sp is not None and sp.kind == "device":
                     self._write_to_device(sp, r.value)
+
+    def _extract_cursors(self, r):
+        for cur in self._cursors.values():
+            if cur.source_key != r.key:
+                continue
+            cur.last_value = extract(r.value, cur.mz, cur.width, cur.mode)
+            self.engine.publish(Reading("cur", cur.id, r.t, cur.last_value))
+            sp = self._sources.get(f"cur/{cur.id}")
+            if sp is not None and not sp.unit and r.value.y_unit:
+                sp.unit = r.value.y_unit
 
     def _on_virtual_emit(self, source_key: str, value):
         src = self._sources.get(source_key)
