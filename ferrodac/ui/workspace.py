@@ -28,7 +28,8 @@ from qtpy.QtWidgets import QDockWidget, QMainWindow, QWidget
 from ..core.device import SinkKind
 from ..core.markers import MarkerModel, SessionClock
 from ..core.reading import Reading
-from ..core.trace import Trace, extract
+from ..core.trace import Trace
+from ..analysis import PROCESSOR_TYPES
 from ..vision import CVRunner, Detector
 from ..vision.detector import CONFIG_FIELDS
 from .panels import PANEL_TYPES, Panel
@@ -54,18 +55,6 @@ class SourcePort:
     kind: str            # "device" | "virtual"
     panel: object = None
     online: bool = True   # False = referenced-but-absent placeholder
-
-
-@dataclass
-class Cursor:
-    """A trend cursor: a scalar extracted from a trace source at a given m/z."""
-    id: str
-    source_key: str
-    name: str
-    mz: float
-    width: float = 1.0
-    mode: str = "peak"          # peak | value | area
-    last_value: float = float("nan")
 
 
 @dataclass
@@ -169,9 +158,10 @@ class Dashboard(QObject):
         self._det_counter = 0
         self._cv: CVRunner | None = None
 
-        # trend cursors (scalar sources extracted from a trace at an m/z)
-        self._cursors: dict[str, Cursor] = {}
-        self._cur_counter = 0
+        # processors: data-plane transforms (trend cursors today; gas-composition
+        # analyzer next) that consume a source and publish derived sources.
+        self._processors: dict = {}
+        self._proc_counters: dict = {}
 
         engine.subscribe(self._on_batch)
         manager.active_changed.connect(self._rebuild_device_ports)
@@ -327,49 +317,73 @@ class Dashboard(QObject):
         with self._det_lock:
             return self._detectors.get(did)
 
-    # -- trend cursors (scalar from a trace at an m/z) -----------------------
+    # -- processors (data-plane transforms) ----------------------------------
+    def add_processor(self, kind: str, input_key: str, pid: str = None,
+                      **params) -> str:
+        """Instantiate a registered Processor bound to `input_key` and register
+        its output ports as virtual sources."""
+        cls = PROCESSOR_TYPES[kind]
+        if pid is None:
+            n = self._proc_counters.get(kind, 0) + 1
+            self._proc_counters[kind] = n
+            pid = f"{cls.id_prefix}{n}"
+        else:
+            tail = pid[len(cls.id_prefix):] if pid.startswith(cls.id_prefix) else ""
+            if tail.isdigit():
+                self._proc_counters[kind] = max(self._proc_counters.get(kind, 0),
+                                                int(tail))
+        proc = cls(pid, input_key, **params)
+        self._processors[pid] = proc
+        src = self._sources.get(input_key)
+        for port in proc.outputs():
+            origin = f"{cls.label} · {src.name}" if src is not None else cls.label
+            self._sources[port.key] = SourcePort(port.key, port.name, port.dtype,
+                                                 port.unit or (src.unit if src else ""),
+                                                 origin, "virtual")
+            self._routes.setdefault(port.key, set())
+        self.ports_changed.emit()
+        return pid
+
+    def remove_processor(self, pid: str) -> None:
+        proc = self._processors.pop(pid, None)
+        if proc is None:
+            return
+        for port in proc.outputs():
+            self._sources.pop(port.key, None)
+            self._routes.pop(port.key, None)
+        self.ports_changed.emit()
+
+    def processor(self, pid: str):
+        return self._processors.get(pid)
+
+    def processors_for(self, input_key: str, kind: str = None) -> list:
+        return [p for p in self._processors.values()
+                if p.input_key == input_key and (kind is None or p.kind == kind)]
+
+    # -- trend cursors: thin wrappers over the processor machinery -----------
     def add_cursor(self, source_key: str, mz: float, name: str = None,
                    mode: str = "peak", width: float = 1.0, cid: str = None) -> str:
-        if cid is None:
-            self._cur_counter += 1
-            cid = f"cur{self._cur_counter}"
-        else:
-            tail = cid[3:] if cid.startswith("cur") else ""
-            if tail.isdigit():
-                self._cur_counter = max(self._cur_counter, int(tail))
-        name = name or f"m/z {mz:g}"
-        src = self._sources.get(source_key)
-        self._cursors[cid] = Cursor(cid, source_key, name, float(mz), float(width), mode)
-        key = f"cur/{cid}"
-        origin = f"peak · {src.name}" if src is not None else "peak"
-        self._sources[key] = SourcePort(key, name, "float",
-                                        src.unit if src else "", origin, "virtual")
-        self._routes.setdefault(key, set())
-        self.ports_changed.emit()
-        return cid
+        return self.add_processor("cursor", source_key, pid=cid, mz=mz, name=name,
+                                  mode=mode, width=width)
 
     def update_cursor(self, cid: str, **fields) -> None:
-        cur = self._cursors.get(cid)
-        if cur is None:
+        proc = self._processors.get(cid)
+        if proc is None:
             return
-        for k, v in fields.items():
-            setattr(cur, k, v)
+        proc.update(**fields)
         sp = self._sources.get(f"cur/{cid}")
         if sp is not None:
-            sp.name = cur.name
+            sp.name = proc.name
         self.ports_changed.emit()
 
     def remove_cursor(self, cid: str) -> None:
-        self._cursors.pop(cid, None)
-        self._sources.pop(f"cur/{cid}", None)
-        self._routes.pop(f"cur/{cid}", None)
-        self.ports_changed.emit()
+        self.remove_processor(cid)
 
     def cursors_for(self, source_key: str) -> list:
-        return [c for c in self._cursors.values() if c.source_key == source_key]
+        return self.processors_for(source_key, kind="cursor")
 
     def cursor(self, cid: str):
-        return self._cursors.get(cid)
+        return self._processors.get(cid)
 
     def _snapshot_detectors(self) -> list:
         with self._det_lock:
@@ -401,19 +415,18 @@ class Dashboard(QObject):
                      "roi": list(det.roi)}
             entry.update({f: getattr(det, f) for f in CONFIG_FIELDS})
             detectors.append(entry)
-        cursors = [{"id": c.id, "source": c.source_key, "name": c.name,
-                    "mz": c.mz, "width": c.width, "mode": c.mode}
-                   for c in self._cursors.values()]
+        processors = [{"kind": p.kind, "id": p.id, "input": p.input_key,
+                       "state": p.state()} for p in self._processors.values()]
         routes = {k: sorted(v) for k, v in self._routes.items() if v}
-        return {"panels": panels, "detectors": detectors, "cursors": cursors,
+        return {"panels": panels, "detectors": detectors, "processors": processors,
                 "routes": routes, "default_sink": self.default_sink_id,
                 "markers": self.markers.to_list()}
 
     def clear_layout(self) -> None:
         for pid in list(self._panels):
             self.remove_panel(pid)
-        for cid in list(self._cursors):
-            self.remove_cursor(cid)
+        for pid in list(self._processors):
+            self.remove_processor(pid)
         self._routes.clear()
         self.default_sink_id = None
         self._rebuild_device_ports()
@@ -432,7 +445,9 @@ class Dashboard(QObject):
             cfg = {f: d[f] for f in CONFIG_FIELDS if f in d}
             self.add_detector(d["sink"], name=d.get("name", "Reading"),
                               roi=tuple(d["roi"]), did=d["id"], **cfg)
-        for c in data.get("cursors", []):
+        for p in data.get("processors", []):
+            self.add_processor(p["kind"], p["input"], pid=p["id"], **p.get("state", {}))
+        for c in data.get("cursors", []):         # legacy sessions (pre-processors)
             self.add_cursor(c["source"], c["mz"], name=c.get("name"),
                             mode=c.get("mode", "peak"), width=c.get("width", 1.0),
                             cid=c["id"])
@@ -594,24 +609,29 @@ class Dashboard(QObject):
 
     # -- data flow -----------------------------------------------------------
     def _on_batch(self, batch):
-        """Engine sink: extract trend cursors + write routed sources to sinks."""
+        """Engine sink: run trace processors + write routed sources to sinks."""
         for r in batch:
             if isinstance(r.value, Trace) and not r.partial:
-                self._extract_cursors(r)        # complete scans only
+                self._run_processors(r)         # complete scans only
             for sink_key in self._routes.get(r.key, ()):
                 sp = self._sinks.get(sink_key)
                 if sp is not None and sp.kind == "device":
                     self._write_to_device(sp, r.value)
 
-    def _extract_cursors(self, r):
-        for cur in self._cursors.values():
-            if cur.source_key != r.key:
+    def _run_processors(self, r):
+        """Feed a reading to every processor bound to its source, publishing the
+        derived values back into the data plane."""
+        for proc in self._processors.values():
+            if proc.input_key != r.key:
                 continue
-            cur.last_value = extract(r.value, cur.mz, cur.width, cur.mode)
-            self.engine.publish(Reading("cur", cur.id, r.t, cur.last_value))
-            sp = self._sources.get(f"cur/{cur.id}")
-            if sp is not None and not sp.unit and r.value.y_unit:
-                sp.unit = r.value.y_unit
+            out = proc.process(r.value)
+            for port in proc.outputs():
+                sp = self._sources.get(port.key)
+                if sp is not None and not sp.unit and port.unit:
+                    sp.unit = port.unit          # adopt unit once known
+                if port.key in out:
+                    dev, _, src = port.key.partition("/")
+                    self.engine.publish(Reading(dev, src, r.t, out[port.key]))
 
     def _on_virtual_emit(self, source_key: str, value):
         src = self._sources.get(source_key)
