@@ -46,7 +46,7 @@ from qtpy.QtWidgets import (
 from ..core.engine import Engine
 from ..core.history import HistoryBuffer
 from ..core.manager import DeviceManager
-from ..core.markers import REC_START, REC_STOP
+from ..core.markers import RECORDING
 from ..core import recorder as rec
 from ..core.recorder import Recorder
 from ..core.registry import load_builtin_drivers
@@ -667,10 +667,14 @@ class _MarkerDialog(QDialog):
 class EventsPanel(QWidget):
     """Lists session markers (tags + record bookmarks); edit/remove."""
 
-    def __init__(self, markers, clock, parent=None):
+    def __init__(self, markers, clock, on_zoom=None, on_export_csv=None,
+                 on_export_plots=None, parent=None):
         super().__init__(parent)
         self.markers = markers
         self.clock = clock
+        self._on_zoom = on_zoom
+        self._on_export_csv = on_export_csv
+        self._on_export_plots = on_export_plots
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
@@ -711,20 +715,25 @@ class EventsPanel(QWidget):
             " border-radius:8px; }")
         lay = QVBoxLayout(card)
         lay.setContentsMargins(10, 6, 10, 6)
-        lay.setSpacing(2)
+        lay.setSpacing(4)
+        is_rec = m.is_region
         top = QHBoxLayout()
         top.setSpacing(6)
         dot = QLabel()
         dot.setFixedSize(10, 10)
         dot.setStyleSheet(f"background:{m.color}; border-radius:5px;")
-        name = QLabel(m.label)
+        name = QLabel(("◧ " if is_rec else "") + m.label)
         name.setStyleSheet("font-weight:700;")
-        t = QLabel(f"t={self.clock.rel(m.t):.1f}s")
-        t.setStyleSheet("color:#7f8a99; font-size:10px;")
+        if is_rec:
+            info = QLabel(f"{self.clock.rel(m.t):.0f}–{self.clock.rel(m.t_end):.0f}s "
+                          f"· {m.duration:.0f}s")
+        else:
+            info = QLabel(f"t={self.clock.rel(m.t):.1f}s")
+        info.setStyleSheet("color:#7f8a99; font-size:10px;")
         top.addWidget(dot)
         top.addWidget(name)
         top.addStretch(1)
-        top.addWidget(t)
+        top.addWidget(info)
         edit = QToolButton()
         edit.setText("✎")
         edit.clicked.connect(lambda _=False, mid=m.id: self._edit(mid))
@@ -739,6 +748,20 @@ class EventsPanel(QWidget):
             c.setStyleSheet("color:#8b95a4; font-size:11px;")
             c.setWordWrap(True)
             lay.addWidget(c)
+        if is_rec:
+            acts = QHBoxLayout()
+            acts.setSpacing(4)
+            for text, cb in (("⤢ Zoom", self._on_zoom),
+                             ("⬇ CSV", self._on_export_csv),
+                             ("🖼 Plots", self._on_export_plots)):
+                if cb is None:
+                    continue
+                b = QToolButton()
+                b.setText(text)
+                b.clicked.connect(lambda _=False, cb=cb, mid=m.id: cb(mid))
+                acts.addWidget(b)
+            acts.addStretch(1)
+            lay.addLayout(acts)
         return card
 
     def _edit(self, mid):
@@ -1133,7 +1156,10 @@ class MainWindow(QMainWindow):
         self.sinks_dock.setWidget(self.sinks_panel)
         self.sinks_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.RightDockWidgetArea, self.sinks_dock)
-        self.events_panel = EventsPanel(self.dashboard.markers, self.dashboard.clock)
+        self.events_panel = EventsPanel(
+            self.dashboard.markers, self.dashboard.clock,
+            on_zoom=self._zoom_recording, on_export_csv=self._export_recording_csv,
+            on_export_plots=self._export_plots)
         self.events_dock = QDockWidget("Events", self)
         self.events_dock.setObjectName("EventsDock")
         self.events_dock.setWidget(self.events_panel)
@@ -1212,6 +1238,8 @@ class MainWindow(QMainWindow):
         return os.path.join(self._app_dir(), "runs")
 
     def _on_export(self):
+        """File ▸ Export CSV — dumps the current in-memory history. Per-recording
+        slice export lives on each recording card in the Events dock."""
         sources = self.dashboard.capture_sources()
         if not sources:
             self.statusBar().showMessage(
@@ -1222,20 +1250,47 @@ class MainWindow(QMainWindow):
             return
         if not path.endswith(".csv"):
             path += ".csv"
-        ms = self.dashboard.markers
-        starts, stops = ms.of_kind(REC_START), ms.of_kind(REC_STOP)
-        t0 = min(m.t for m in starts) if starts else None
-        t1 = max(m.t for m in stops) if stops else None
-        run_dir = self.recorder.run_dir
-        if run_dir and os.path.exists(os.path.join(run_dir, "_capture.csv")):
-            out = rec.materialize_capture(
-                run_dir, sources, t_start=t0, t_stop=t1, history=self.history,
-                cap_start=getattr(self.recorder, "_cap_start", None), out_path=path)
-        else:
-            out = rec.materialize_from_history(path, sources, self.history, t0, t1)
+        out = rec.materialize_from_history(path, sources, self.history)
         self.statusBar().showMessage(f"Exported → {out}", 6000)
 
+    # -- recording-region actions (from the Events dock) ---------------------
+    def _zoom_recording(self, mid):
+        m = self.dashboard.markers.get(mid)
+        if m and m.t_end is not None:
+            self.dashboard.zoom_to(m.t, m.t_end)
+
+    def _export_recording_csv(self, mid):
+        m = self.dashboard.markers.get(mid)
+        if m is None or not m.run_dir:
+            return
+        sources = rec.run_sources(m.run_dir)
+        if not sources:
+            self.statusBar().showMessage("This recording has no saved data.", 5000)
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export recording", (m.label or "recording") + ".csv",
+            "CSV (*.csv)")
+        if not path:
+            return
+        if not path.endswith(".csv"):
+            path += ".csv"
+        out = rec.materialize_capture(m.run_dir, sources, t_start=m.t,
+                                      t_stop=m.t_end, out_path=path)
+        self.statusBar().showMessage(f"Exported recording → {out}", 6000)
+
+    def _export_plots(self, _mid=None):
+        folder = QFileDialog.getExistingDirectory(self, "Export plots to folder")
+        if not folder:
+            return
+        n = 0
+        for pid, p in self.dashboard._panels.items():
+            if getattr(p, "plot", None) is not None:
+                p.plot.grab().save(os.path.join(folder, f"{pid}.png"))
+                n += 1
+        self.statusBar().showMessage(f"Exported {n} plot(s) → {folder}", 6000)
+
     def _toggle_record(self):
+        ms = self.dashboard.markers
         if not self.recorder.active:
             sources = self.dashboard.capture_sources()
             if not sources:
@@ -1244,16 +1299,16 @@ class MainWindow(QMainWindow):
                 return
             run_dir = os.path.join(self._runs_dir(),
                                    "run_" + time.strftime("%Y-%m-%dT%H-%M-%S"))
-            self._rec_start_mid = self.dashboard.markers.add(
-                time.time(), kind=REC_START, comment=f"{len(sources)} sources")
+            self._rec_start_mid = ms.add(
+                time.time(), kind=RECORDING, label="REC",
+                comment=f"{len(sources)} sources", run_dir=run_dir)
             self.recorder.start(run_dir, sources)
             self.statusBar().showMessage(f"● Recording → {run_dir}")
         else:
-            stop_mid = self.dashboard.markers.add(time.time(), kind=REC_STOP)
-            ms = self.dashboard.markers
-            t0 = ms.get(self._rec_start_mid).t if self._rec_start_mid \
-                and ms.get(self._rec_start_mid) else None
-            t1 = ms.get(stop_mid).t
+            m = ms.get(self._rec_start_mid)
+            t0 = m.t if m else None
+            t1 = time.time()
+            ms.update(self._rec_start_mid, t_end=t1)   # close the region
             out = self.recorder.stop(t_start=t0, t_stop=t1)
             self._rec_start_mid = None
             self.statusBar().showMessage(f"■ Saved {out}", 8000)
@@ -1390,9 +1445,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802
         if self.recorder.active:        # finalize rather than leave it dangling
             ms = self.dashboard.markers
-            t0 = ms.get(self._rec_start_mid).t if self._rec_start_mid \
-                and ms.get(self._rec_start_mid) else None
-            self.recorder.stop(t_start=t0, t_stop=time.time())
+            m = ms.get(self._rec_start_mid) if self._rec_start_mid else None
+            t1 = time.time()
+            if m:
+                ms.update(self._rec_start_mid, t_end=t1)
+            self.recorder.stop(t_start=m.t if m else None, t_stop=t1)
         if self._autosave_on:
             self._do_autosave()
         self.dashboard.shutdown()

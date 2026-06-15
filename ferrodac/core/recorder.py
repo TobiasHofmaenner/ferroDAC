@@ -89,6 +89,15 @@ def materialize_from_history(out_path: str, sources: dict, history,
     return _write_wide(out_path, sources, rows)
 
 
+def run_sources(run_dir: str) -> dict:
+    """The capture set of a finished run (from meta.json), for re-export."""
+    try:
+        with open(os.path.join(run_dir, "meta.json")) as fh:
+            return json.load(fh).get("sources", {})
+    except Exception:
+        return {}
+
+
 def find_unfinalized(base_dir: str) -> list[str]:
     """Run dirs under base_dir with an unfinalised capture (crash recovery)."""
     out = []
@@ -179,6 +188,10 @@ class Recorder:
             self._raw = None
         out = materialize_capture(self._dir, self._sources, t_start, t_stop,
                                   history=self.history, cap_start=self._cap_start)
+        # persistent run metadata (kept) — lets the recording be re-exported later
+        with open(os.path.join(self._dir, "meta.json"), "w") as fh:
+            json.dump({"sources": self._sources, "cap_start": self._cap_start,
+                       "t_start": t_start, "t_stop": t_stop}, fh, indent=2)
         try:
             os.remove(os.path.join(self._dir, "_recording.json"))
         except OSError:

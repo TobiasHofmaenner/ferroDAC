@@ -17,11 +17,14 @@ from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 from qtpy.QtCore import QObject, Signal
 
 TAG = "tag"
+RECORDING = "recording"
+# legacy point kinds (still parsed from old sessions)
 REC_START = "record-start"
 REC_STOP = "record-stop"
 
-_KIND_COLOR = {TAG: "#ffd54f", REC_START: "#69db7c", REC_STOP: "#ff6b6b"}
-_KIND_LABEL = {REC_START: "REC", REC_STOP: "STOP"}
+_KIND_COLOR = {TAG: "#ffd54f", RECORDING: "#ff6b6b",
+               REC_START: "#69db7c", REC_STOP: "#ff6b6b"}
+_KIND_LABEL = {RECORDING: "REC", REC_START: "REC", REC_STOP: "STOP"}
 
 
 class SessionClock:
@@ -43,11 +46,21 @@ class SessionClock:
 @dataclass
 class Marker:
     id: str
-    t: float                 # absolute epoch seconds
-    kind: str = TAG          # tag | record-start | record-stop
+    t: float                 # absolute epoch seconds (point, or region start)
+    kind: str = TAG          # tag | recording
     label: str = ""
     comment: str = ""
     color: str = "#ffd54f"
+    t_end: float | None = None    # region end (None = point, or live recording)
+    run_dir: str | None = None    # for recordings: where the captured data lives
+
+    @property
+    def is_region(self) -> bool:
+        return self.t_end is not None
+
+    @property
+    def duration(self) -> float:
+        return (self.t_end - self.t) if self.t_end is not None else 0.0
 
 
 class MarkerModel(QObject):
@@ -59,7 +72,8 @@ class MarkerModel(QObject):
         self._counter = 0
 
     def add(self, t: float, label: str = "", comment: str = "", kind: str = TAG,
-            color: str = None, mid: str = None) -> str:
+            color: str = None, mid: str = None, t_end: float = None,
+            run_dir: str = None) -> str:
         if mid is None:
             self._counter += 1
             mid = f"m{self._counter}"
@@ -70,7 +84,8 @@ class MarkerModel(QObject):
         color = color or _KIND_COLOR.get(kind, "#ffd54f")
         if not label:
             label = _KIND_LABEL.get(kind, f"T{self._counter}")
-        self._markers[mid] = Marker(mid, float(t), kind, label, comment, color)
+        self._markers[mid] = Marker(mid, float(t), kind, label, comment, color,
+                                    t_end, run_dir)
         self.changed.emit()
         return mid
 
@@ -104,7 +119,8 @@ class MarkerModel(QObject):
     # -- serialization -------------------------------------------------------
     def to_list(self) -> list[dict]:
         return [{"id": m.id, "t": m.t, "kind": m.kind, "label": m.label,
-                 "comment": m.comment, "color": m.color} for m in self.all()]
+                 "comment": m.comment, "color": m.color,
+                 "t_end": m.t_end, "run_dir": m.run_dir} for m in self.all()]
 
     def from_list(self, data: list[dict]) -> None:
         self._markers.clear()
@@ -118,7 +134,8 @@ class MarkerModel(QObject):
                 self._counter = max(self._counter, int(tail))
             self._markers[mid] = Marker(
                 mid, float(d["t"]), d.get("kind", TAG), d.get("label", ""),
-                d.get("comment", ""), d.get("color", "#ffd54f"))
+                d.get("comment", ""), d.get("color", "#ffd54f"),
+                d.get("t_end"), d.get("run_dir"))
         self.changed.emit()
 
     def clear(self) -> None:

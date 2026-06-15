@@ -25,6 +25,7 @@ from qtpy.QtWidgets import (
 
 import pyqtgraph as pg
 
+from ..core.markers import RECORDING
 from ._common import color_for, fmt
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
@@ -99,37 +100,78 @@ class ChartPanel(Panel):
         current = {m.id: m for m in self.markers.all()}
         for mid in list(self._marker_lines):
             if mid not in current:
-                self.plot.removeItem(self._marker_lines.pop(mid))
+                self.plot.removeItem(self._marker_lines.pop(mid)[0])
         for mid, m in current.items():
-            x = self._x(m.t)
-            line = self._marker_lines.get(mid)
-            if line is None:
-                line = pg.InfiniteLine(
-                    pos=x, angle=90, movable=True,
-                    pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
-                    label=m.label,
-                    labelOpts={"position": 0.92, "color": m.color,
-                               "fill": (10, 14, 19, 180)})
-                line.sigPositionChangeFinished.connect(
-                    lambda _=None, mid=mid: self._on_marker_drag(mid))
-                self.plot.addItem(line)
-                self._marker_lines[mid] = line
+            want = "region" if (m.kind == RECORDING and m.t_end is not None) else "line"
+            entry = self._marker_lines.get(mid)
+            if entry is not None and entry[1] != want:    # type changed (live→region)
+                self.plot.removeItem(entry[0])
+                self._marker_lines.pop(mid, None)
+                entry = None
+            if want == "region":
+                self._sync_region(mid, m, entry)
             else:
-                if abs(line.value() - x) > 1e-9:
-                    line.blockSignals(True)
-                    line.setValue(x)
-                    line.blockSignals(False)
-                try:
-                    line.label.setFormat(m.label)
-                except Exception:
-                    pass
+                self._sync_line(mid, m, entry)
+
+    def _sync_line(self, mid, m, entry):
+        x = self._x(m.t)
+        if entry is None:
+            line = pg.InfiniteLine(
+                pos=x, angle=90, movable=True,
+                pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
+                label=m.label,
+                labelOpts={"position": 0.92, "color": m.color,
+                           "fill": (10, 14, 19, 180)})
+            line.sigPositionChangeFinished.connect(
+                lambda _=None, mid=mid: self._on_marker_drag(mid))
+            self.plot.addItem(line)
+            self._marker_lines[mid] = (line, "line")
+        else:
+            line = entry[0]
+            if abs(line.value() - x) > 1e-9:
+                line.blockSignals(True)
+                line.setValue(x)
+                line.blockSignals(False)
+            try:
+                line.label.setFormat(m.label)
+            except Exception:
+                pass
+
+    def _sync_region(self, mid, m, entry):
+        x0, x1 = self._x(m.t), self._x(m.t_end)
+        if entry is None:
+            reg = pg.LinearRegionItem(
+                values=[x0, x1], movable=True,
+                brush=pg.mkBrush(255, 107, 107, 38),
+                pen=pg.mkPen(m.color, width=1, style=Qt.DashLine))
+            reg.setZValue(-10)
+            reg.sigRegionChangeFinished.connect(
+                lambda _=None, mid=mid: self._on_region_drag(mid))
+            self.plot.addItem(reg)
+            self._marker_lines[mid] = (reg, "region")
+        else:
+            reg = entry[0]
+            cur = reg.getRegion()
+            if abs(cur[0] - x0) > 1e-9 or abs(cur[1] - x1) > 1e-9:
+                reg.blockSignals(True)
+                reg.setRegion([x0, x1])
+                reg.blockSignals(False)
 
     def _on_marker_drag(self, mid):
-        line = self._marker_lines.get(mid)
-        if line is None or self.markers is None:
+        entry = self._marker_lines.get(mid)
+        if entry is None or self.markers is None:
             return
-        t = self.clock.abs(line.value()) if self.clock else line.value()
+        t = self.clock.abs(entry[0].value()) if self.clock else entry[0].value()
         self.markers.move(mid, t)
+
+    def _on_region_drag(self, mid):
+        entry = self._marker_lines.get(mid)
+        if entry is None or self.markers is None:
+            return
+        x0, x1 = entry[0].getRegion()
+        t0 = self.clock.abs(x0) if self.clock else x0
+        t1 = self.clock.abs(x1) if self.clock else x1
+        self.markers.update(mid, t=min(t0, t1), t_end=max(t0, t1))
 
     def add_source(self, key, source):
         if key in self._curves:

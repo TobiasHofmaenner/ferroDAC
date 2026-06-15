@@ -273,6 +273,16 @@ class Dashboard(QObject):
         if _emit:
             self.ports_changed.emit()
 
+    def zoom_to(self, t0: float, t1: float) -> None:
+        """Set every chart's x-range to a time window (for a recording region)."""
+        x0, x1 = self.clock.rel(t0), self.clock.rel(t1)
+        if x1 <= x0:
+            x1 = x0 + 1.0
+        for p in self._panels.values():
+            plot = getattr(p, "plot", None)
+            if plot is not None:
+                plot.setXRange(x0, x1, padding=0.05)
+
     def capture_sources(self) -> dict:
         """Numeric sources currently routed somewhere — the Record capture set
         (open-decision #4: the active dashboard's channels)."""
