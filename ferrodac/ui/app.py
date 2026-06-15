@@ -916,6 +916,7 @@ class ImageConfigDialog(QDialog):
         root.addLayout(left, 3)
         root.addLayout(self._build_form(), 2)
 
+        self._selected_did = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_frame)
         self._timer.start(150)
@@ -1151,6 +1152,7 @@ class ImageConfigDialog(QDialog):
         det = self.dashboard.detector(did)
         if det is None:
             return
+        self._selected_did = did
         self._name.setText(det.name)
         self._unit.setText(det.unit)
         self._engine.setCurrentIndex(max(0, self._engine.findData(det.engine)))
@@ -1173,38 +1175,42 @@ class ImageConfigDialog(QDialog):
         self._reload_list()
 
     def _update(self):
-        row = self._list.currentRow()
-        if row < 0:
+        if not self._selected_did:
             return
-        did = self._list.item(row).data(Qt.UserRole)
         cfg = self._gather()
         roi = self.editor.current_roi()
         if roi is not None:
             cfg["roi"] = roi
-        self.dashboard.update_detector(did, **cfg)
+        self.dashboard.update_detector(self._selected_did, **cfg)
         self._reload_list()
 
     def _remove(self):
-        row = self._list.currentRow()
-        if row < 0:
+        if not self._selected_did:
+            self._result.setText("select a detection in the list to remove it")
             return
-        did = self._list.item(row).data(Qt.UserRole)
-        self.dashboard.remove_detector(did)
+        self.dashboard.remove_detector(self._selected_did)
+        self._selected_did = None
         self.editor.set_current_roi(None)
         self._reload_list()
 
     def _reload_list(self):
         dets = self.dashboard.detectors_for(self.sink_key)
-        cur = self._list.currentRow()
         self._list.blockSignals(True)
         self._list.clear()
-        rois = []
+        sel_row = -1
         for i, det in enumerate(dets):
             item = QListWidgetItem(f"{det.name}  ·  {det.parse_as}")
             item.setData(Qt.UserRole, det.id)
             self._list.addItem(item)
-            rois.append((det.name, det.roi, color_for(f"cv/{det.id}"), i == cur))
+            if det.id == self._selected_did:
+                sel_row = i
+        if sel_row >= 0:
+            self._list.setCurrentRow(sel_row)      # restore selection (signals off)
+        else:
+            self._selected_did = None
         self._list.blockSignals(False)
+        rois = [(d.name, d.roi, color_for(f"cv/{d.id}"), d.id == self._selected_did)
+                for d in dets]
         self.editor.set_rois(rois)
 
     def closeEvent(self, event):  # noqa: N802
