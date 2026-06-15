@@ -28,6 +28,7 @@ import pyqtgraph as pg
 
 from ..core.markers import RECORDING
 from ..core.trace import Trace
+from ..analysis.gas import GasAnalyzer
 from ._common import color_for, fmt
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
@@ -690,11 +691,83 @@ class TogglePanel(InputPanel):
         self._chk.blockSignals(False)
 
 
+class CompositionPanel(Panel):
+    """Gas composition: deconvolves a bound mass-spectrum into partial pressures
+    and shows them as bars. With Monte-Carlo on, each bar carries a 1-sigma error
+    bar and unresolvable (anti-correlated) gas pairs are flagged. Single-bind."""
+
+    kind = "composition"
+    accepts = frozenset({"trace"})
+    single_bind = True
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.plot = pg.PlotWidget()
+        self.plot.setLabel("left", "partial pressure")
+        self.plot.showGrid(y=True, alpha=0.2)
+        self._bars = pg.BarGraphItem(x=[0], height=[0], width=0.6, brush="#4fc3f7")
+        self.plot.addItem(self._bars)
+        self._err = pg.ErrorBarItem(pen=pg.mkPen("#c7d0db"))
+        self.plot.addItem(self._err)
+        lay.addWidget(self.plot)
+        self._src_key = None
+        self._analyzer = GasAnalyzer("comp", "", mc=64)
+
+    def add_source(self, key, source):
+        self._src_key = key
+
+    def remove_source(self, key):
+        if key == self._src_key:
+            self._src_key = None
+            self._bars.setOpts(x=[0], height=[0])
+            self.plot.setTitle("")
+
+    def feed(self, batch):
+        tr = None
+        for r in batch:                          # complete scans only
+            if r.key == self._src_key and isinstance(r.value, Trace) \
+                    and not r.partial:
+                tr = r.value
+        if tr is None:
+            return
+        a = self._analyzer
+        a.process(tr)
+        names = a.gas_names
+        x = np.arange(len(names), dtype=float)
+        h = np.array([max(0.0, a.last_amounts.get(n, 0.0)) for n in names])
+        self._bars.setOpts(x=x, height=h, width=0.6)
+        if a.last_sd:
+            e = np.array([a.last_sd.get(n, 0.0) for n in names])
+            self._err.setData(x=x, y=h, top=e, bottom=np.minimum(e, h), beam=0.25)
+        else:
+            self._err.setData(x=np.array([]), y=np.array([]))
+        self.plot.getAxis("bottom").setTicks([list(zip(x.tolist(), names))])
+        if a.unit:
+            self.plot.setLabel("left", f"partial pressure [{a.unit}]")
+        flags = "   ⚠ unresolved: " + ", ".join(f"{p[0]}↔{p[1]}" for p in
+                                                  a.last_degenerate) \
+            if a.last_degenerate else ""
+        self.plot.setTitle(f"fit residual {a.last_residual:.2f}{flags}")
+
+    def state(self):
+        return {"mc": self._analyzer.mc, "sparsity": self._analyzer.sparsity,
+                "gases": self._analyzer.gas_names}
+
+    def set_state(self, st):
+        self._analyzer.mc = int(st.get("mc", 64))
+        self._analyzer.sparsity = float(st.get("sparsity", 0.0))
+        if st.get("gases"):
+            self._analyzer.update(gases=st["gases"])
+
+
 PANEL_TYPES = {
     "chart": ("Chart", ChartPanel),
     "numeric": ("7-seg display", NumericPanel),
     "spectrum": ("Spectrum", SpectrumPanel),
     "waterfall": ("Waterfall", WaterfallPanel),
+    "composition": ("Gas composition", CompositionPanel),
     "image": ("Camera view", ImagePanel),
     "slider": ("Slider", SliderPanel),
     "button": ("Button", ButtonPanel),
