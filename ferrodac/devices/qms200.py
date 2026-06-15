@@ -26,6 +26,7 @@ NB: shares the Pfeiffer link pattern with tpg256a.py; factor a common
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -98,6 +99,11 @@ def _dbg(msg: str) -> None:
         print(f"[qms200] {msg}", file=sys.stderr, flush=True)
 
 
+# A measurement value is a single signed float in scientific notation, e.g.
+# '+1.00300E-11'. Anything else on the MDB channel is a stray/partial frame.
+_VALUE_RE = re.compile(r"^[+-]?\d+\.\d+E[+-]?\d+$")
+
+
 # --------------------------------------------------------------------------- #
 #  Serial link (ACK/ENQ, hardened)
 # --------------------------------------------------------------------------- #
@@ -107,11 +113,16 @@ class _Link:
         self.port = port
         self.baud = baud
 
-    def _send(self, mnemonic: str) -> None:
-        try:
-            self.ser.reset_input_buffer()
-        except Exception:
-            pass
+    def _send(self, mnemonic: str, flush: bool = True) -> None:
+        # `flush` clears stale RX before a command. It is left ON for config /
+        # control / MBH, but turned OFF for the rapid per-point MDB drain: at
+        # speed the reset chops bytes out of an in-flight value and desyncs the
+        # framing (seen as half-values like b'8258E-12').
+        if flush:
+            try:
+                self.ser.reset_input_buffer()
+            except Exception:
+                pass
         self.ser.write(mnemonic.encode("ascii") + CR)
         self.ser.flush()
         resp = self.ser.read_until(expected=LF).lstrip(b"\r\n\x00")
@@ -131,23 +142,27 @@ class _Link:
             raise ProtocolError("no data after ENQ")
         return line.decode("ascii", "replace").strip("\r\n \t")
 
-    def query(self, mnemonic: str, attempts: int = 3) -> str:
+    def query(self, mnemonic: str, attempts: int = 3, flush: bool = True) -> str:
         last = None
         for _ in range(attempts):
             try:
-                self._send(mnemonic)
+                self._send(mnemonic, flush=flush)
                 resp = self._enquire()
                 _dbg(f"{mnemonic!r} -> {resp!r}")
                 return resp
             except ProtocolError as exc:
                 last = exc
                 _dbg(f"{mnemonic!r} !! {exc}")
-                try:
-                    self.ser.reset_input_buffer()
-                except Exception:
-                    pass
+                self.resync()
                 time.sleep(0.05)
         raise ProtocolError(f"{mnemonic} failed: {last}")
+
+    def resync(self) -> None:
+        """Drop any unread/partial frame so the next query re-aligns."""
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
 
     def close(self) -> None:
         try:
@@ -436,6 +451,8 @@ class QMS200Device(BaseDevice):
         scan stops producing or we time out. Point count defines the m/z axis."""
         points: list = []
         idle = 0
+        resyncs = 0
+        dropped = 0
         deadline = time.monotonic() + self._scan_time() + 5.0
         # `_streaming` lets stop()/disconnect() abort a long scan promptly instead
         # of blocking on the IO lock until the scan deadline.
@@ -456,8 +473,25 @@ class QMS200Device(BaseDevice):
                 if not self._streaming:
                     break
                 try:
-                    val = self._link.query("MDB").split(",")[0]
-                    points.append(float(val))
-                except (ProtocolError, ValueError):
+                    raw = self._link.query("MDB", flush=False)
+                except ProtocolError as exc:
+                    # No clean reply at all → genuine desync; flush and re-poll.
+                    self._link.resync()
+                    resyncs += 1
+                    _dbg(f"MDB resync #{resyncs}: {exc}")
                     break
+                if _VALUE_RE.match(raw):
+                    points.append(float(raw))
+                else:
+                    # A stray non-value frame jumped the queue (e.g. '3,4,10').
+                    # Skip it WITHOUT flushing: the real buffered values are kept
+                    # and resurface on the next MBH poll, so the sweep stays
+                    # complete and the m/z axis stays aligned.
+                    dropped += 1
+                    _dbg(f"skipped stray MDB frame {raw!r}")
+            if resyncs > 20:                        # runaway desync — give up
+                _dbg("too many resyncs, aborting drain")
+                break
+        if dropped:
+            _dbg(f"{dropped} stray frame(s) skipped this scan")
         return points
