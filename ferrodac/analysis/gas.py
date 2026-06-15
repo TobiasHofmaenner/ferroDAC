@@ -57,10 +57,23 @@ class GasAnalyzer(Processor):
             ports.append(Port(f"fit/{self.id}/{n}", f"{n} fit", "trace", self.unit))
         return ports
 
-    def _reconstruct(self, x, name, amount) -> Trace:
+    @staticmethod
+    def _recon_floor(y) -> float:
+        """A baseline floor for the reconstruction, derived from the measured
+        spectrum's noise (robust MAD) so Gaussian tails sit on a sensible
+        baseline instead of plunging to ~1e-227 on a log overlay."""
+        yv = np.asarray(y, float)
+        yv = yv[np.isfinite(yv)]
+        if yv.size == 0:
+            return 0.0
+        sigma = float(1.4826 * np.median(np.abs(yv - np.median(yv))))
+        return max(sigma, float(np.max(yv)) * 1e-5)   # noise, or 5 decades down
+
+    def _reconstruct(self, x, name, amount, floor=0.0) -> Trace:
         """The analog spectrum this gas alone would produce at its fitted amount:
         each fragment a Gaussian at its m/z (peak_fwhm wide) on a fine axis, so it
-        looks like a real RGA scan and overlays naturally on the measured peaks."""
+        looks like a real RGA scan and overlays naturally on the measured peaks.
+        Clamped to `floor` (the data's noise level) so the tails stay on baseline."""
         lo, hi = float(x[0]), float(x[-1])
         fine = np.linspace(lo, hi, max(2, int(round((hi - lo) * _RECON_PPA)) + 1))
         y = np.zeros(len(fine))
@@ -71,6 +84,8 @@ class GasAnalyzer(Processor):
             for m, frac in g.norm_pattern.items():
                 if lo - 1 <= m <= hi + 1:
                     y += contrib * frac * np.exp(-0.5 * ((fine - m) / sigma) ** 2)
+        if floor > 0:
+            y = np.maximum(y, floor)
         return Trace(fine, y, x_label="m/z", y_label="Intensity",
                      y_unit=self.unit, x_lo=lo, x_hi=hi)
 
@@ -89,11 +104,12 @@ class GasAnalyzer(Processor):
             self.last_residual, self.last_degenerate = resid, []
         if not self.unit and getattr(value, "y_unit", ""):
             self.unit = value.y_unit
+        floor = self._recon_floor(value.y)      # baseline from the measured noise
         out = {}
         for n in self.gas_names:
             amt = self.last_amounts.get(n, 0.0)
             out[f"gas/{self.id}/{n}"] = amt
-            out[f"fit/{self.id}/{n}"] = self._reconstruct(value.x, n, amt)
+            out[f"fit/{self.id}/{n}"] = self._reconstruct(value.x, n, amt, floor)
         return out
 
     def state(self) -> dict:
