@@ -157,6 +157,12 @@ class ChartPanel(Panel):
                 reg.setRegion([x0, x1])
                 reg.blockSignals(False)
 
+    def set_regions_visible(self, visible: bool) -> None:
+        """Hide/show recording-region overlays (used to keep them out of exports)."""
+        for item, kind in self._marker_lines.values():
+            if kind == "region":
+                item.setVisible(visible)
+
     def _on_marker_drag(self, mid):
         entry = self._marker_lines.get(mid)
         if entry is None or self.markers is None:

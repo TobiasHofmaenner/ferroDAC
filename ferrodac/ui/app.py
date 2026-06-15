@@ -1282,11 +1282,18 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Export plots to folder")
         if not folder:
             return
+        charts = [p for p in self.dashboard._panels.values()
+                  if getattr(p, "plot", None) is not None]
+        for p in charts:                       # keep the record overlay out of exports
+            if hasattr(p, "set_regions_visible"):
+                p.set_regions_visible(False)
         n = 0
-        for pid, p in self.dashboard._panels.items():
-            if getattr(p, "plot", None) is not None:
-                p.plot.grab().save(os.path.join(folder, f"{pid}.png"))
-                n += 1
+        for p in charts:
+            p.plot.grab().save(os.path.join(folder, f"{p.panel_id}.png"))
+            n += 1
+        for p in charts:
+            if hasattr(p, "set_regions_visible"):
+                p.set_regions_visible(True)
         self.statusBar().showMessage(f"Exported {n} plot(s) → {folder}", 6000)
 
     def _toggle_record(self):
