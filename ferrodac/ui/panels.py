@@ -28,7 +28,6 @@ import pyqtgraph as pg
 
 from ..core.markers import RECORDING
 from ..core.trace import Trace
-from ..analysis.gas import GasAnalyzer
 from ._common import color_for, fmt
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
@@ -692,9 +691,11 @@ class TogglePanel(InputPanel):
 
 
 class CompositionPanel(Panel):
-    """Gas composition: deconvolves a bound mass-spectrum into partial pressures
-    and shows them as bars. With Monte-Carlo on, each bar carries a 1-sigma error
-    bar and unresolvable (anti-correlated) gas pairs are flagged. Single-bind."""
+    """Gas composition: hosts a Dashboard GasAnalyzer on the bound mass-spectrum
+    and shows the partial pressures as bars (Monte-Carlo error bars + flagged
+    unresolvable pairs). Because the analyzer is a real processor, it also emits
+    a partial-pressure source and a reconstructed-spectrum source per gas — route
+    a gas's "fit" source back onto the Spectrum panel to see the fit. Single-bind."""
 
     kind = "composition"
     accepts = frozenset({"trace"})
@@ -713,27 +714,44 @@ class CompositionPanel(Panel):
         self.plot.addItem(self._err)
         lay.addWidget(self.plot)
         self._src_key = None
-        self._analyzer = GasAnalyzer("comp", "", mc=64)
+        self._proc_id = None
+        self._cfg = {"mc": 64, "sparsity": 0.0}   # creation config (+ gases)
+        self._add = self._remove = self._get = self._for = None
+
+    def set_processor_host(self, add, remove, get, procs_for):
+        """Dashboard wires its processor methods in (called from add_panel)."""
+        self._add, self._remove, self._get, self._for = add, remove, get, procs_for
 
     def add_source(self, key, source):
         self._src_key = key
+        if self._for is not None:                 # adopt one restored on import
+            existing = self._for(key, "gas")
+            if existing:
+                self._proc_id = existing[0].id
+                return
+        if self._add is not None:
+            self._proc_id = self._add("gas", key, **self._cfg)
 
     def remove_source(self, key):
         if key == self._src_key:
             self._src_key = None
+            self.cleanup()
             self._bars.setOpts(x=[0], height=[0])
             self.plot.setTitle("")
 
+    def cleanup(self):
+        if self._proc_id and self._remove is not None:
+            self._remove(self._proc_id)
+        self._proc_id = None
+
     def feed(self, batch):
-        tr = None
-        for r in batch:                          # complete scans only
-            if r.key == self._src_key and isinstance(r.value, Trace) \
-                    and not r.partial:
-                tr = r.value
-        if tr is None:
+        if self._proc_id is None or self._get is None:
             return
-        a = self._analyzer
-        a.process(tr)
+        a = self._get(self._proc_id)
+        if a is None or not any(
+                r.key == self._src_key and isinstance(r.value, Trace)
+                and not r.partial for r in batch):
+            return
         names = a.gas_names
         x = np.arange(len(names), dtype=float)
         h = np.array([max(0.0, a.last_amounts.get(n, 0.0)) for n in names])
@@ -746,20 +764,22 @@ class CompositionPanel(Panel):
         self.plot.getAxis("bottom").setTicks([list(zip(x.tolist(), names))])
         if a.unit:
             self.plot.setLabel("left", f"partial pressure [{a.unit}]")
-        flags = "   ⚠ unresolved: " + ", ".join(f"{p[0]}↔{p[1]}" for p in
-                                                  a.last_degenerate) \
+        flags = "   ⚠ unresolved: " + ", ".join(f"{p[0]}↔{p[1]}"
+                                                 for p in a.last_degenerate) \
             if a.last_degenerate else ""
         self.plot.setTitle(f"fit residual {a.last_residual:.2f}{flags}")
 
     def state(self):
-        return {"mc": self._analyzer.mc, "sparsity": self._analyzer.sparsity,
-                "gases": self._analyzer.gas_names}
+        a = self._get(self._proc_id) if (self._get and self._proc_id) else None
+        if a is not None:
+            return {"mc": a.mc, "sparsity": a.sparsity, "gases": a.gas_names}
+        return dict(self._cfg)
 
     def set_state(self, st):
-        self._analyzer.mc = int(st.get("mc", 64))
-        self._analyzer.sparsity = float(st.get("sparsity", 0.0))
+        self._cfg = {"mc": int(st.get("mc", 64)),
+                     "sparsity": float(st.get("sparsity", 0.0))}
         if st.get("gases"):
-            self._analyzer.update(gases=st["gases"])
+            self._cfg["gases"] = st["gases"]
 
 
 PANEL_TYPES = {

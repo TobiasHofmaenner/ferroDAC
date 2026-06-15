@@ -8,8 +8,11 @@ total-pressure normalisation for partial pressures in real units (mbar).
 
 from __future__ import annotations
 
+import numpy as np
+
+from ..core.trace import Trace
 from .deconvolve import deconvolve, deconvolve_mc
-from .library import DEFAULT_GASES, get_gases
+from .library import DEFAULT_GASES, LIBRARY, get_gases
 from .processor import Port, Processor, register
 
 
@@ -41,8 +44,25 @@ class GasAnalyzer(Processor):
             self._gases = get_gases(self.gas_names)
 
     def outputs(self) -> list[Port]:
-        return [Port(f"gas/{self.id}/{n}", n, "float", self.unit)
-                for n in self.gas_names]
+        """Per gas: a scalar partial-pressure source and a reconstructed-spectrum
+        trace source (route the latter back onto the spectrum to see the fit)."""
+        ports = []
+        for n in self.gas_names:
+            ports.append(Port(f"gas/{self.id}/{n}", n, "float", self.unit))
+            ports.append(Port(f"fit/{self.id}/{n}", f"{n} fit", "trace", self.unit))
+        return ports
+
+    def _reconstruct(self, x, name, amount) -> Trace:
+        """The spectrum this gas alone would produce at its fitted amount, on the
+        measured mass axis — its fragments placed at their m/z (so it overlays)."""
+        g = LIBRARY.get(name)
+        y = np.zeros(len(x))
+        if g is not None and amount > 0:
+            contrib = amount * (g.rsf or 1.0)        # un-sensitivity-corrected
+            for m, frac in g.norm_pattern.items():
+                y[np.abs(x - m) <= 0.5] = contrib * frac
+        return Trace(np.asarray(x, float), y, x_label="m/z", y_label="Intensity",
+                     y_unit=self.unit, x_lo=float(x[0]), x_hi=float(x[-1]))
 
     def process(self, value) -> dict:
         sigma = getattr(value, "sigma", None)   # measured per-mass noise, if any
@@ -59,8 +79,12 @@ class GasAnalyzer(Processor):
             self.last_residual, self.last_degenerate = resid, []
         if not self.unit and getattr(value, "y_unit", ""):
             self.unit = value.y_unit
-        return {f"gas/{self.id}/{n}": self.last_amounts.get(n, 0.0)
-                for n in self.gas_names}
+        out = {}
+        for n in self.gas_names:
+            amt = self.last_amounts.get(n, 0.0)
+            out[f"gas/{self.id}/{n}"] = amt
+            out[f"fit/{self.id}/{n}"] = self._reconstruct(value.x, n, amt)
+        return out
 
     def state(self) -> dict:
         return {"gases": self.gas_names, "sparsity": self.sparsity, "mc": self.mc}

@@ -202,6 +202,9 @@ class Dashboard(QObject):
             panel.attach_session(self.clock, self.markers)
         if hasattr(panel, "on_cursor_move"):
             panel.on_cursor_move = lambda cid, mz: self.update_cursor(cid, mz=mz)
+        if hasattr(panel, "set_processor_host"):
+            panel.set_processor_host(self.add_processor, self.remove_processor,
+                                     self.processor, self.processors_for)
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -218,6 +221,8 @@ class Dashboard(QObject):
         panel = self._panels.pop(pid, None)
         if panel is None:
             return
+        if hasattr(panel, "cleanup"):            # drop any hosted processor
+            panel.cleanup()
         if getattr(panel, "is_input", False):
             key = f"ui/{pid}"
             self._sources.pop(key, None)
