@@ -27,6 +27,8 @@ class Trace:
     y_unit: str = ""
     x_lo: float = None            # declared full-axis range (so a partial fill or
     x_hi: float = None            # stale view doesn't dictate the plotted extent)
+    sigma: np.ndarray = None      # optional per-point measured noise (1 sigma),
+    #                               e.g. the sweep-to-sweep std of an average
 
     def __len__(self) -> int:
         return len(self.x)

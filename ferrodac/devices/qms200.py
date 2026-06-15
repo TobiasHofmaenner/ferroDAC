@@ -533,22 +533,28 @@ class QMS200Device(BaseDevice):
         rate = self._steps_per_amu or _DEFAULT_PPA
         return self._first + self._offset + np.arange(n) / rate
 
-    def _reduce(self, x, y) -> Trace:
-        """Apply the readout reduction to a (mass, intensity) signal. In "peak"
-        each integer mass becomes the peak intensity in its ±0.5 u window, which
+    def _reduce(self, x, y, sigma=None) -> Trace:
+        """Apply the readout reduction to a (mass, intensity) signal, carrying an
+        optional per-point noise array. In "peak" each integer mass becomes the
+        peak intensity in its ±0.5 u window (and that point's noise), which
         collapses the dense, log-unfriendly analog sweep into a clean per-mass
         spectrum and rejects single-point noise/valley spikes."""
         if self._readout == "peak":
             masses = np.arange(self._first, self._last + 1, dtype=float)
             inten = np.full(len(masses), np.nan)
+            sig = np.full(len(masses), np.nan) if sigma is not None else None
             for k, m in enumerate(masses):
-                vals = y[(x >= m - 0.5) & (x <= m + 0.5)]
-                vals = vals[np.isfinite(vals)]
-                if vals.size:
-                    inten[k] = vals.max()
-            x, y = masses, inten
+                sel = (x >= m - 0.5) & (x <= m + 0.5)
+                vals = y[sel]
+                ok = np.isfinite(vals)
+                if ok.any():
+                    j = np.flatnonzero(sel)[ok][np.argmax(vals[ok])]
+                    inten[k] = y[j]
+                    if sigma is not None:
+                        sig[k] = sigma[j]
+            x, y, sigma = masses, inten, sig
         return Trace(x, y, x_label="m/z", y_label="Intensity", y_unit="A",
-                     x_lo=float(self._first), x_hi=float(self._last))
+                     x_lo=float(self._first), x_hi=float(self._last), sigma=sigma)
 
     def _smooth(self, y: np.ndarray) -> np.ndarray:
         """Within-sweep boxcar: average the dense raw points over a window of
@@ -572,6 +578,8 @@ class QMS200Device(BaseDevice):
                 self._norm_scale = self._ref_pressure / total
         if self._norm_scale:
             trace.y = trace.y * self._norm_scale
+            if trace.sigma is not None:
+                trace.sigma = trace.sigma * self._norm_scale
             trace.y_unit = "mbar"
         return trace
 
@@ -601,10 +609,14 @@ class QMS200Device(BaseDevice):
             buf.append(gy)
             del buf[:-self._avg_n]                # keep only the last N
             self._avg_buf = buf
+            stack = np.vstack(buf)
             with warnings.catch_warnings():       # edge grid points can be all-NaN
                 warnings.simplefilter("ignore", RuntimeWarning)
-                avg = np.nanmean(np.vstack(buf), axis=0)
-            trace = self._reduce(grid, avg)
+                avg = np.nanmean(stack, axis=0)
+                # measured per-mass noise of the average = sweep std / sqrt(N)
+                sd = (np.nanstd(stack, axis=0) / np.sqrt(len(buf))
+                      if len(buf) >= 2 else None)
+            trace = self._reduce(grid, avg, sigma=sd)
         return self._normalize(trace, recompute=True)
 
     def _read(self, source):
