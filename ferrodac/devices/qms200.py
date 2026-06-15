@@ -25,6 +25,8 @@ NB: shares the Pfeiffer link pattern with tpg256a.py; factor a common
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -82,6 +84,16 @@ class ProtocolError(Exception):
     pass
 
 
+# Opt-in raw-protocol trace for hardware bring-up: run with FERRODAC_QMS_DEBUG=1
+# to dump every mnemonic + its raw reply to stderr (CRU/MBH/MDB scan draining).
+_DEBUG = bool(os.environ.get("FERRODAC_QMS_DEBUG"))
+
+
+def _dbg(msg: str) -> None:
+    if _DEBUG:
+        print(f"[qms200] {msg}", file=sys.stderr, flush=True)
+
+
 # --------------------------------------------------------------------------- #
 #  Serial link (ACK/ENQ, hardened)
 # --------------------------------------------------------------------------- #
@@ -120,9 +132,12 @@ class _Link:
         for _ in range(attempts):
             try:
                 self._send(mnemonic)
-                return self._enquire()
+                resp = self._enquire()
+                _dbg(f"{mnemonic!r} -> {resp!r}")
+                return resp
             except ProtocolError as exc:
                 last = exc
+                _dbg(f"{mnemonic!r} !! {exc}")
                 try:
                     self.ser.reset_input_buffer()
                 except Exception:
@@ -393,7 +408,11 @@ class QMS200Device(BaseDevice):
             except ProtocolError as exc:
                 self._drop_link(str(exc))
                 return self._empty(), 1
+        _dbg(f"scan drained {len(points)} points "
+             f"(range {self._first}-{self._last}, speed {self._speed})")
         if len(points) < 2:
+            self._last_error = (f"scan returned {len(points)} point(s) — check "
+                                "MBH/MDB framing (FERRODAC_QMS_DEBUG=1 for trace)")
             return self._empty(), 1
         x = np.linspace(self._first, self._last, len(points))
         return Trace(x, np.asarray(points, dtype=float),
@@ -405,7 +424,9 @@ class QMS200Device(BaseDevice):
         points: list = []
         idle = 0
         deadline = time.monotonic() + self._scan_time() + 5.0
-        while time.monotonic() < deadline:
+        # `_streaming` lets stop()/disconnect() abort a long scan promptly instead
+        # of blocking on the IO lock until the scan deadline.
+        while self._streaming and time.monotonic() < deadline:
             try:
                 hdr = self._link.query("MBH").split(",")
                 avail = int(hdr[3]) if len(hdr) > 3 else 0
@@ -419,6 +440,8 @@ class QMS200Device(BaseDevice):
                 continue
             idle = 0
             for _ in range(avail):
+                if not self._streaming:
+                    break
                 try:
                     val = self._link.query("MDB").split(",")[0]
                     points.append(float(val))

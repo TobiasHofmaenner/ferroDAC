@@ -28,7 +28,14 @@ def color_for(key: str) -> str:
 
 
 def fmt(value, unit: str = "") -> str:
-    if value is None or value != value:        # None / NaN
+    if value is None:
+        return "—"
+    if isinstance(value, bool):                # bool is an int — handle first
+        return "on" if value else "off"
+    if not isinstance(value, (int, float)):    # ENUM strings, etc.
+        s = str(value)
+        return f"{s} {unit}".rstrip() if unit else s
+    if value != value:                         # NaN
         return "—"
     a = abs(value)
     s = f"{value:.3e}" if (a != 0 and (a < 1e-3 or a >= 1e4)) else f"{value:.4g}"
