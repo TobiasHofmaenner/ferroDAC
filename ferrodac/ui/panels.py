@@ -12,19 +12,23 @@ from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 from qtpy.QtCore import QRect, QRectF, Qt, Signal
 from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen
 from qtpy.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLCDNumber,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPushButton,
-    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -732,32 +736,103 @@ class GasConfigDialog(QDialog):
         form.addRow("Peak width", self._fw)
         root.addLayout(form)
         root.addWidget(QLabel("Gases to fit:"))
-        sel = set(cfg.get("gases") or DEFAULT_GASES)
-        host = QWidget()
-        grid = QGridLayout(host)
-        grid.setContentsMargins(2, 2, 2, 2)
-        self._checks = {}
-        for i, name in enumerate(LIBRARY):
-            cb = QCheckBox(f"{name}  ({LIBRARY[name].formula})")
-            cb.setChecked(name in sel)
-            self._checks[name] = cb
-            grid.addWidget(cb, i // 2, i % 2)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(host)
-        scroll.setMaximumHeight(190)
-        root.addWidget(scroll)
+        self._selected = set(cfg.get("gases") or DEFAULT_GASES)
+        srow = QHBoxLayout()
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("search compounds (name or formula)…")
+        self._search.textChanged.connect(self._refresh_list)
+        srow.addWidget(self._search, 1)
+        imp = QPushButton("Import MSP…")
+        imp.setToolTip("Import a NIST/MoNA EI .msp library file")
+        imp.clicked.connect(self._import)
+        srow.addWidget(imp)
+        dl = QPushButton("Download")
+        dl.setToolTip("Best-effort fetch of the MoNA GC-MS library")
+        dl.clicked.connect(self._download)
+        srow.addWidget(dl)
+        root.addLayout(srow)
+        self._list = QListWidget()
+        self._list.setMaximumHeight(180)
+        self._list.itemChanged.connect(self._on_item)
+        root.addWidget(self._list)
+        self._sel_lbl = QLabel()
+        self._sel_lbl.setStyleSheet("color:#8b95a4; font-size:11px;")
+        root.addWidget(self._sel_lbl)
+        self._refresh_list()
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         root.addWidget(bb)
 
+    def _refresh_list(self):
+        from ..analysis import library as lib
+        self._list.blockSignals(True)
+        self._list.clear()
+        q = self._search.text()
+        names = sorted(self._selected) if not q.strip() else []
+        seen = set(names)
+        for g in lib.search(q, limit=200):
+            if g.name not in seen:
+                names.append(g.name)
+                seen.add(g.name)
+        for n in names:
+            g = lib.LIBRARY.get(n)
+            it = QListWidgetItem(f"{n}  ({g.formula})" if g and g.formula else n)
+            it.setData(Qt.UserRole, n)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if n in self._selected else Qt.Unchecked)
+            self._list.addItem(it)
+        self._list.blockSignals(False)
+        self._sel_lbl.setText(f"{len(self._selected)} selected  ·  "
+                              f"{len(lib.LIBRARY)} in library")
+
+    def _on_item(self, it):
+        n = it.data(Qt.UserRole)
+        if it.checkState() == Qt.Checked:
+            self._selected.add(n)
+        else:
+            self._selected.discard(n)
+        self._sel_lbl.setText(f"{len(self._selected)} selected  ·  "
+                              f"{len(LIBRARY)} in library")
+
+    def _import(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import MSP library", "", "MSP (*.msp *.txt);;All files (*)")
+        if not path:
+            return
+        from ..analysis import library as lib
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            n = lib.import_msp(path)
+        except Exception as exc:                 # noqa: BLE001 — surface to user
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        QMessageBox.information(self, "Import", f"Imported {n} compounds.")
+        self._refresh_list()
+
+    def _download(self):
+        from ..analysis import library as lib
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            n = lib.download_library()
+        except Exception as exc:                 # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(
+                self, "Download failed",
+                f"{exc}\n\nThe MoNA link may have changed — download the GC-MS "
+                "MSP from mona.fiehnlab.ucdavis.edu/downloads and use Import MSP….")
+            return
+        QApplication.restoreOverrideCursor()
+        QMessageBox.information(self, "Download", f"Imported {n} compounds.")
+        self._refresh_list()
+
     def values(self) -> dict:
-        gases = [n for n, cb in self._checks.items() if cb.isChecked()]
         return {"mc": self._mc.currentData(),
                 "sparsity": round(self._sp.value(), 3),
                 "peak_fwhm": round(self._fw.value(), 3),
-                "gases": gases or list(DEFAULT_GASES)}
+                "gases": sorted(self._selected) or list(DEFAULT_GASES)}
 
 
 class CompositionPanel(Panel):

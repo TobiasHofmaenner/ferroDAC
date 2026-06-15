@@ -70,3 +70,141 @@ def get_gases(names) -> list[Gas]:
 
 def all_names() -> list[str]:
     return list(LIBRARY)
+
+
+# --------------------------------------------------------------------------- #
+#  Extensible store: import EI spectra (NIST/MoNA MSP) into the live library
+# --------------------------------------------------------------------------- #
+import json
+import os
+import re
+import urllib.request
+
+_CURATED_NAMES = set(LIBRARY)            # the bundled defaults (never cached out)
+
+
+def _cache_dir() -> str:
+    d = os.path.join(os.path.expanduser("~"), "Documents", "ferroDAC", "library")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _cache_file() -> str:
+    return os.path.join(_cache_dir(), "compounds.json")
+
+
+def add_compounds(gases) -> None:
+    """Merge gases into the live library (overwriting same-name entries)."""
+    for g in gases:
+        LIBRARY[g.name] = g
+
+
+def search(query: str, limit: int = 300) -> list:
+    """Library entries whose name or formula contains `query` (case-insensitive)."""
+    q = (query or "").lower().strip()
+    if not q:
+        return list(LIBRARY.values())[:limit]
+    hit = [g for g in LIBRARY.values()
+           if q in g.name.lower() or q in g.formula.lower()]
+    hit.sort(key=lambda g: (not g.name.lower().startswith(q), g.name.lower()))
+    return hit[:limit]
+
+
+def parse_msp(text: str, max_mw: float = 250.0) -> list:
+    """Parse an MSP file (NIST/MoNA EI export) into Gas patterns, keeping
+    low-mass (RGA-relevant) compounds and normalising to base peak = 100."""
+    out, by_name = [], {}
+    for block in re.split(r"\n[ \t]*\n", text):
+        if not block.strip():
+            continue
+        name = formula = None
+        mw = None
+        peaks: dict = {}
+        for line in block.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            kv = re.match(r"([A-Za-z][\w ]*?)\s*[:=]\s*(.*)", line)
+            if kv and not re.match(r"^[\d.+-]", line):
+                key = kv.group(1).lower().strip()
+                val = kv.group(2).strip()
+                if key == "name" and name is None:
+                    name = val
+                elif key == "formula":
+                    formula = val
+                elif key in ("mw", "molecular weight") and mw is None:
+                    try:
+                        mw = float(val)
+                    except ValueError:
+                        pass
+                elif key in ("exactmass", "exact mass") and mw is None:
+                    try:
+                        mw = float(re.split(r"[ /]", val)[0])
+                    except ValueError:
+                        pass
+                continue
+            for a, b in re.findall(r"(\d+\.?\d*)[\s,;:]+(\d+\.?\d*)", line):
+                m = int(round(float(a)))
+                peaks[m] = peaks.get(m, 0.0) + float(b)
+        if not (name and peaks):
+            continue
+        if mw is not None and mw > max_mw:
+            continue
+        mx = max(peaks.values()) or 1.0
+        pat = {k: round(v / mx * 100.0, 2) for k, v in peaks.items()
+               if v / mx * 100.0 >= 0.5}            # drop noise < 0.5 % of base
+        if not pat:
+            continue
+        g = Gas(name, formula or "", pat, rsf=1.0)   # generic sensitivity factor
+        if name not in by_name:                      # de-dupe by name (keep first)
+            by_name[name] = g
+            out.append(g)
+    return out
+
+
+def import_msp(path: str, max_mw: float = 250.0) -> int:
+    """Import an MSP file into the library and persist it; returns #compounds."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        gases = parse_msp(fh.read(), max_mw)
+    add_compounds(gases)
+    _save_cache()
+    return len(gases)
+
+
+# Best-effort bulk URL (MoNA GC-MS MSP, CC BY 4.0). The download page generates
+# links dynamically, so this can rot — Import-from-file is the reliable path.
+MONA_GCMS_MSP = ("https://mona.fiehnlab.ucdavis.edu/rest/downloads/retrieve/"
+                 "MoNA-export-GC-MS_Spectra.msp")
+
+
+def download_library(url: str = MONA_GCMS_MSP, max_mw: float = 250.0) -> int:
+    """Best-effort: fetch an MSP bulk export and import it. May fail if the URL
+    has changed — callers should fall back to import_msp()."""
+    dest = os.path.join(_cache_dir(), "download.msp")
+    urllib.request.urlretrieve(url, dest)
+    return import_msp(dest, max_mw)
+
+
+def _save_cache() -> None:
+    data = [{"name": g.name, "formula": g.formula, "rsf": g.rsf,
+             "pattern": {str(k): v for k, v in g.pattern.items()}}
+            for g in LIBRARY.values() if g.name not in _CURATED_NAMES]
+    try:
+        with open(_cache_file(), "w") as fh:
+            json.dump(data, fh)
+    except OSError:
+        pass
+
+
+def _load_cache() -> None:
+    try:
+        with open(_cache_file()) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return
+    add_compounds([Gas(d["name"], d.get("formula", ""),
+                       {int(k): v for k, v in d["pattern"].items()},
+                       d.get("rsf", 1.0)) for d in data])
+
+
+_load_cache()                                        # restore imports on startup
