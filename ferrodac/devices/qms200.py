@@ -30,6 +30,7 @@ import re
 import sys
 import threading
 import time
+import warnings
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -78,6 +79,11 @@ SPEED_S_PER_AMU = {7: 0.1, 8: 0.2, 9: 0.5, 10: 1.0, 11: 2.0}
 # density is measured from a completed sweep. The X axis is pinned to the scan
 # range, so an over/under estimate just clips — it self-corrects on completion.
 _DEFAULT_PPA = 32.0
+
+# Fixed mass grid (points/amu) that completed sweeps are resampled onto before
+# rolling-averaging — makes the average robust to small per-sweep length
+# differences and lets a truncated sweep contribute only over its real range.
+_GRID_PPA = 64
 
 # Optional fixed mass-axis offset (amu) to correct a start-of-sweep lead-in,
 # tuned against a known peak (e.g. water @ 18). Software-only; default 0.
@@ -276,6 +282,10 @@ class QMS200Device(BaseDevice):
                      params=(Param("v", "float", "V",
                                    minimum=0.0, maximum=SEM_HV_MAX),),
                      value=900.0),
+                Sink(id="average", name="Average sweeps", kind=SinkKind.ENUM,
+                     params=(Param("n", "str",
+                                   options=("1", "2", "4", "8", "16", "32")),),
+                     value="1"),
             ],
             rate=RateControl(mode=RateMode.SETTABLE, native_hz=1.0,
                              default_hz=0.5, min_hz=0.02, max_hz=2.0),
@@ -298,6 +308,11 @@ class QMS200Device(BaseDevice):
         # Learned from completed sweeps; range-independent, so only a resolution
         # or speed change forces a relearn (recalibrate-on-change).
         self._steps_per_amu = None
+        # Rolling sweep-average (driver-level, noise drops as √N). _avg_n is set
+        # from the "Average sweeps" sink; _avg_buf holds recent sweeps resampled
+        # onto a fixed mass grid. Only the poll thread touches _avg_buf.
+        self._avg_n = 1
+        self._avg_buf: list = []
         self._apply_scan_params()
 
     # -- discovery -----------------------------------------------------------
@@ -379,6 +394,12 @@ class QMS200Device(BaseDevice):
         """Queue a control change; the poll thread applies it at the next safe
         serial boundary (no GUI-thread blocking on the scan). Only fires when
         the user writes the sink; the ion source is never auto-enabled."""
+        if sink.id == "average":                 # software-only, no serial
+            try:
+                self._avg_n = max(1, int(value))
+            except (TypeError, ValueError):
+                self._avg_n = 1
+            return
         self._write_q.append((sink.id, value))
 
     def _on_option(self, key: str, value) -> None:
@@ -387,6 +408,8 @@ class QMS200Device(BaseDevice):
         self._apply_scan_params()
         if key in ("resolution", "speed"):       # density may change → recalibrate
             self._steps_per_amu = None
+        if key != "readout":                     # grid/signal changed → drop the
+            self._avg_buf = []                   # rolling-average history
         if key in ("range", "resolution", "speed"):
             self._reconfig_pending = True        # needs a hardware reprogram
         # "readout" / "mass_offset" are software-only: applied on the next frame,
@@ -481,23 +504,51 @@ class QMS200Device(BaseDevice):
         rate = self._steps_per_amu or _DEFAULT_PPA
         return self._first + self._offset + np.arange(n) / rate
 
-    def _make_trace(self, points) -> Trace:
-        """Map a (possibly partial) sweep onto its m/z axis. In "peak" readout
+    def _reduce(self, x, y) -> Trace:
+        """Apply the readout reduction to a (mass, intensity) signal. In "peak"
         each integer mass becomes the peak intensity in its ±0.5 u window, which
         collapses the dense, log-unfriendly analog sweep into a clean per-mass
         spectrum and rejects single-point noise/valley spikes."""
-        y = np.asarray(points, dtype=float)
-        x = self._mass_axis(len(y))
         if self._readout == "peak":
             masses = np.arange(self._first, self._last + 1, dtype=float)
             inten = np.full(len(masses), np.nan)
             for k, m in enumerate(masses):
-                sel = (x >= m - 0.5) & (x <= m + 0.5)
-                if sel.any():
-                    inten[k] = np.nanmax(y[sel])
+                vals = y[(x >= m - 0.5) & (x <= m + 0.5)]
+                vals = vals[np.isfinite(vals)]
+                if vals.size:
+                    inten[k] = vals.max()
             x, y = masses, inten
         return Trace(x, y, x_label="m/z", y_label="Intensity", y_unit="A",
                      x_lo=float(self._first), x_hi=float(self._last))
+
+    def _make_trace(self, points) -> Trace:
+        """Reduce one raw sweep (no averaging) — used for live partial frames."""
+        y = np.asarray(points, dtype=float)
+        return self._reduce(self._mass_axis(len(y)), y)
+
+    def _make_avg_trace(self, points) -> Trace:
+        """Reduce a completed sweep, rolling-averaging the last N raw sweeps
+        first (noise ∝ 1/√N). Sweeps are resampled onto a fixed mass grid so
+        small per-sweep length differences don't matter and a truncated sweep
+        contributes only over the masses it actually reached (NaN elsewhere)."""
+        y = np.asarray(points, dtype=float)
+        if self._avg_n <= 1:
+            self._avg_buf = []
+            return self._reduce(self._mass_axis(len(y)), y)
+        x = self._mass_axis(len(y))
+        grid = self._first + np.arange(int((self._last - self._first) * _GRID_PPA)
+                                       + 1) / _GRID_PPA
+        gy = np.interp(grid, x, y, left=np.nan, right=np.nan)
+        buf = self._avg_buf
+        if buf and len(buf[0]) != len(gy):       # grid changed → restart
+            buf = []
+        buf.append(gy)
+        del buf[:-self._avg_n]                    # keep only the last N
+        self._avg_buf = buf
+        with warnings.catch_warnings():           # edge grid points can be all-NaN
+            warnings.simplefilter("ignore", RuntimeWarning)
+            avg = np.nanmean(np.vstack(buf), axis=0)
+        return self._reduce(grid, avg)
 
     def _read(self, source):
         with self._io_lock:
@@ -532,8 +583,8 @@ class QMS200Device(BaseDevice):
         self._steps_per_amu = max(self._steps_per_amu or 0.0, (len(points) - 1) / width)
         _dbg(f"scan drained {len(points)} points in {time.monotonic()-t0:.1f}s "
              f"(range {self._first}-{self._last}, speed {self._speed}, "
-             f"rate {self._steps_per_amu:.1f}/amu)")
-        return self._make_trace(points), 0
+             f"rate {self._steps_per_amu:.1f}/amu, avg {self._avg_n})")
+        return self._make_avg_trace(points), 0
 
     def _drain_scan(self, source=None) -> list:
         """Read one scan: pull points (MDB) as the buffer (MBH) fills, until the
