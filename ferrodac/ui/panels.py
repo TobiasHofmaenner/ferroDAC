@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import QRect, Qt, Signal
+from qtpy.QtCore import QRect, QRectF, Qt, Signal
 from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen
 from qtpy.QtWidgets import (
     QCheckBox,
@@ -27,7 +27,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from ..core.markers import RECORDING
-from ..core.spectrum import Spectrum
+from ..core.trace import Trace
 from ._common import color_for, fmt
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
@@ -278,14 +278,29 @@ class NumericPanel(Panel):
 
 
 # --------------------------------------------------------------------------- #
-#  Mass-spectrum display — a virtual SINK for a "spectrum" source (e.g. an RGA)
+#  Trace displays — virtual SINKS for a "trace" source (RGA / RF / audio …)
 # --------------------------------------------------------------------------- #
+def _axis_text(label, unit):
+    return f"{label} [{unit}]" if unit else label
+
+
+def _trace_colormap():
+    for name in ("inferno", "viridis", "CET-L17", "CET-L9", "CET-L4"):
+        try:
+            cm = pg.colormap.get(name)
+            if cm is not None:
+                return cm
+        except Exception:
+            continue
+    return None
+
+
 class SpectrumPanel(Panel):
-    """Intensity vs m/z. Unlike a chart, each scan *replaces* the curve rather
-    than scrolling. Log-y (intensities span decades)."""
+    """A trace as a line — intensity vs its swept axis. Unlike a chart, each scan
+    *replaces* the curve rather than scrolling. Log-y (values span decades)."""
 
     kind = "spectrum"
-    accepts = frozenset({"spectrum"})
+    accepts = frozenset({"trace"})
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -293,7 +308,7 @@ class SpectrumPanel(Panel):
         lay.setContentsMargins(0, 0, 0, 0)
         self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.setLabel("bottom", "m/z")
+        self.plot.setLabel("bottom", "x")
         self.plot.setLabel("left", "Intensity")
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot.setLogMode(x=False, y=True)
@@ -316,11 +331,84 @@ class SpectrumPanel(Panel):
     def feed(self, batch):
         latest = {}
         for r in batch:
-            if r.key in self._curves and isinstance(r.value, Spectrum):
+            if r.key in self._curves and isinstance(r.value, Trace):
                 latest[r.key] = r.value
-        for key, spec in latest.items():
-            y = np.where(spec.intensity > 0, spec.intensity, np.nan)  # log-safe
-            self._curves[key].setData(spec.mass, y, connect="finite")
+        for key, tr in latest.items():
+            y = np.where(tr.y > 0, tr.y, np.nan)            # log-safe
+            self._curves[key].setData(tr.x, y, connect="finite")
+            self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
+            self.plot.setLabel("left", _axis_text(tr.y_label, tr.y_unit))
+
+
+class WaterfallPanel(Panel):
+    """A trace over time as a heatmap (spectrogram): x = swept axis, y = scan,
+    colour = log intensity. Single-bind — one source per waterfall."""
+
+    kind = "waterfall"
+    accepts = frozenset({"trace"})
+    single_bind = True
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.plot = pg.PlotWidget()
+        self.plot.setLabel("bottom", "x")
+        self.plot.setLabel("left", "scan")
+        self.plot.getAxis("bottom").enableAutoSIPrefix(False)
+        self.img = pg.ImageItem()
+        self.plot.addItem(self.img)
+        cmap = _trace_colormap()
+        if cmap is not None:
+            self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
+        self._bar = None
+        try:
+            self._bar = pg.ColorBarItem(colorMap=cmap)
+            self._bar.setImageItem(self.img, insert_in=self.plot.getPlotItem())
+        except Exception:
+            self._bar = None
+        lay.addWidget(self.plot)
+        self._src_key = None
+        self._buf = None
+        self._rows = 240
+        self._x0, self._x1 = 0.0, 1.0
+
+    def add_source(self, key, source):
+        self._src_key = key
+        self._buf = None
+
+    def remove_source(self, key):
+        if key == self._src_key:
+            self._src_key = None
+            self._buf = None
+            self.img.clear()
+
+    def feed(self, batch):
+        tr = None
+        for r in batch:
+            if r.key == self._src_key and isinstance(r.value, Trace):
+                tr = r.value
+        if tr is None:
+            return
+        y = np.log10(np.clip(tr.y, 1e-12, None)).astype(np.float32)
+        if self._buf is None or self._buf.shape[1] != len(y):
+            self._buf = np.full((self._rows, len(y)), float(y.min()), np.float32)
+            self._x0, self._x1 = float(tr.x[0]), float(tr.x[-1])
+            self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
+        self._buf = np.roll(self._buf, -1, axis=0)
+        self._buf[-1] = y
+        # levels span baseline → peak so the narrow peaks stay visible
+        lo = float(np.percentile(self._buf, 50))
+        hi = float(self._buf.max())
+        if hi <= lo:
+            hi = lo + 1.0
+        self.img.setImage(self._buf.T, autoLevels=False, levels=[lo, hi])
+        # setImage resets the rect — re-apply the m/z × scan mapping each frame
+        self.img.setRect(QRectF(self._x0, 0.0, self._x1 - self._x0, float(self._rows)))
+        self.plot.setXRange(self._x0, self._x1, padding=0)
+        self.plot.setYRange(0, self._rows, padding=0)
+        if self._bar is not None:
+            self._bar.setLevels((lo, hi))
 
 
 # --------------------------------------------------------------------------- #
@@ -537,7 +625,8 @@ class TogglePanel(InputPanel):
 PANEL_TYPES = {
     "chart": ("Chart", ChartPanel),
     "numeric": ("7-seg display", NumericPanel),
-    "spectrum": ("Mass spectrum", SpectrumPanel),
+    "spectrum": ("Spectrum", SpectrumPanel),
+    "waterfall": ("Waterfall", WaterfallPanel),
     "image": ("Camera view", ImagePanel),
     "slider": ("Slider", SliderPanel),
     "button": ("Button", ButtonPanel),

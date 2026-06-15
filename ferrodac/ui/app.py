@@ -139,12 +139,12 @@ class SourceCard(QFrame):
                 self.value_label.setText(f"▷ {value.width()}×{value.height()}")
             else:
                 self.value_label.setText("▷ live")
-        elif self.dtype == "spectrum":
+        elif self.dtype == "trace":
             if hasattr(value, "peak"):
                 self.value_label.setText(
                     f"▆ {len(value)} pts · max {fmt(value.peak, self.unit)}")
             else:
-                self.value_label.setText("▆ spectrum")
+                self.value_label.setText("▆ trace")
         elif self.dtype == "string":
             self.value_label.setText(str(value) if value not in (None, "") else "—")
         elif isinstance(value, bool):

@@ -23,7 +23,7 @@ from ..core.device import (
     SinkKind,
     Source,
 )
-from ..core.spectrum import Spectrum
+from ..core.trace import Trace
 
 
 class FakeGaugeController(BaseDevice):
@@ -201,7 +201,7 @@ class FakeRGA(BaseDevice):
             name="Sim RGA",
             interface=Interface(kind="sim", params={"addr": "RGA1"}),
             sources=[Source(id="spectrum", name="Mass spectrum", unit="mbar",
-                            modality=Modality.WAVEFORM, dtype="spectrum",
+                            modality=Modality.WAVEFORM, dtype="trace",
                             prefer_log=True)],
             sinks=[Sink(id="emission", name="Emission", kind=SinkKind.TOGGLE,
                         value=True)],
@@ -226,4 +226,5 @@ class FakeRGA(BaseDevice):
                     * np.exp(-((mass - m) ** 2) / (2 * 0.25 ** 2))
         inten = inten * (1 + 0.03 * np.random.uniform(-1, 1, size=mass.shape))
         inten = np.clip(inten, 1e-12, None)
-        return Spectrum(mass, inten, unit="mbar"), 0
+        return Trace(mass, inten, x_label="m/z", y_label="Intensity",
+                     y_unit="mbar"), 0
