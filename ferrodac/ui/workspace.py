@@ -22,15 +22,8 @@ from dataclasses import dataclass, field
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import QObject, QPoint, Qt, Signal
-from qtpy.QtWidgets import (
-    QDockWidget,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QToolButton,
-    QWidget,
-)
+from qtpy.QtCore import QEvent, QObject, Qt, Signal
+from qtpy.QtWidgets import QDockWidget, QMainWindow, QToolButton, QWidget
 
 from ..core.device import SinkKind
 from ..core.markers import MarkerModel, SessionClock
@@ -85,69 +78,43 @@ class SinkPort:
 # --------------------------------------------------------------------------- #
 #  Workspace area (dockable panels)
 # --------------------------------------------------------------------------- #
-class DockTitleBar(QWidget):
-    """Custom dock title bar: a name label plus ⚙ (configure), float and close
-    buttons. Dragging the bar pulls the panel out to a floating window; the
-    float button (or a double-click) re-docks it."""
+class _GearButton(QToolButton):
+    """A small ⚙ overlay pinned to a panel's top-right corner, shown only in
+    edit mode. Kept off the dock title bar so Qt's native drag-to-dock (with
+    snap indicators) stays fully intact."""
 
-    def __init__(self, dock: "PanelDock", area: "WorkspaceArea"):
-        super().__init__(dock)
-        self._dock = dock
+    def __init__(self, panel: Panel, area: "WorkspaceArea"):
+        super().__init__(panel)
+        self._panel = panel
         self._area = area
-        self._press = None
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 2, 4, 2)
-        lay.setSpacing(2)
-        self._label = QLabel(dock.windowTitle())
-        self._label.setStyleSheet("font-weight:600; color:#cdd6e0;")
-        lay.addWidget(self._label)
-        lay.addStretch(1)
-        for sym, tip, slot in (
-            ("⚙", "Configure panel", self._configure),
-            ("▢", "Float / dock", self._toggle_float),
-            ("✕", "Close", dock.close),
-        ):
-            b = QToolButton(self)
-            b.setText(sym)
-            b.setToolTip(tip)
-            b.setAutoRaise(True)
-            b.setCursor(Qt.ArrowCursor)
-            b.setFocusPolicy(Qt.NoFocus)
-            b.clicked.connect(slot)
-            lay.addWidget(b)
+        self.setText("⚙")
+        self.setToolTip("Configure panel")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setStyleSheet(
+            "QToolButton{background:rgba(20,26,34,210);border:1px solid #3a4250;"
+            "border-radius:4px;color:#cdd6e0;font-size:13px;padding:0 4px;}"
+            "QToolButton:hover{background:rgba(46,57,74,235);border-color:#5b6675;}")
+        self.clicked.connect(self._go)
+        panel.installEventFilter(self)
+        self._reposition()
+        self.raise_()
 
-    def set_title(self, text: str) -> None:
-        self._label.setText(text)
-
-    def _configure(self) -> None:
+    def _go(self) -> None:
         if self._area.on_configure is not None:
-            self._area.on_configure(self._dock.panel)
+            self._area.on_configure(self._panel)
 
-    def _toggle_float(self) -> None:
-        self._dock.setFloating(not self._dock.isFloating())
+    def eventFilter(self, obj, ev):  # noqa: N802
+        if obj is self._panel and ev.type() in (
+            QEvent.Resize, QEvent.Show, QEvent.ChildAdded
+        ):
+            self._reposition()
+        return False
 
-    # -- drag to pull out / move --------------------------------------------
-    def mousePressEvent(self, e):  # noqa: N802
-        if e.button() == Qt.LeftButton:
-            self._press = e.globalPosition().toPoint()
-        super().mousePressEvent(e)
-
-    def mouseMoveEvent(self, e):  # noqa: N802
-        if self._press is None or not (e.buttons() & Qt.LeftButton):
-            return
-        pos = e.globalPosition().toPoint()
-        if not self._dock.isFloating():
-            if (pos - self._press).manhattanLength() < 16:
-                return
-            self._dock.setFloating(True)
-        self._dock.move(pos - QPoint(40, 12))
-
-    def mouseReleaseEvent(self, e):  # noqa: N802
-        self._press = None
-        super().mouseReleaseEvent(e)
-
-    def mouseDoubleClickEvent(self, e):  # noqa: N802
-        self._toggle_float()
+    def _reposition(self) -> None:
+        self.adjustSize()
+        self.move(max(0, self._panel.width() - self.width() - 6), 6)
+        self.raise_()
 
 
 class PanelDock(QDockWidget):
@@ -168,6 +135,7 @@ class WorkspaceArea(QMainWindow):
         super().__init__(parent)
         self.setDockNestingEnabled(True)
         self._docks: dict = {}
+        self._gears: dict = {}
         self._edit = True
         self.on_configure = None        # set by the Dashboard: fn(panel)
 
@@ -176,10 +144,14 @@ class WorkspaceArea(QMainWindow):
         dock.setObjectName(f"panel::{panel.panel_id}")   # for saveState/restoreState
         self.addDockWidget(Qt.TopDockWidgetArea, dock)
         self._docks[panel] = dock
+        gear = _GearButton(panel, self)
+        gear.setVisible(self._edit)
+        self._gears[panel] = gear
         self._apply(dock)
         return dock
 
     def remove_panel(self, panel: Panel) -> None:
+        self._gears.pop(panel, None)        # child of the panel — dies with it
         dock = self._docks.pop(panel, None)
         if dock is not None:
             dock.setParent(None)
@@ -187,15 +159,15 @@ class WorkspaceArea(QMainWindow):
 
     def set_panel_title(self, panel: Panel, title: str) -> None:
         dock = self._docks.get(panel)
-        if dock is None:
-            return
-        dock.setWindowTitle(title)
-        bar = dock.titleBarWidget()
-        if isinstance(bar, DockTitleBar):
-            bar.set_title(title)
+        if dock is not None:
+            dock.setWindowTitle(title)
 
     def set_edit_mode(self, on: bool) -> None:
         self._edit = on
+        for gear in self._gears.values():
+            gear.setVisible(on)
+            if on:
+                gear._reposition()
         for dock in self._docks.values():
             self._apply(dock)
 
@@ -206,7 +178,7 @@ class WorkspaceArea(QMainWindow):
                 | QDockWidget.DockWidgetFloatable
                 | QDockWidget.DockWidgetClosable
             )
-            dock.setTitleBarWidget(DockTitleBar(dock, self))
+            dock.setTitleBarWidget(None)            # native bar → native dragging
         else:
             dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
             bar = QWidget()
