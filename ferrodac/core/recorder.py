@@ -22,8 +22,31 @@ def _col(key: str, info: dict) -> str:
     return f"{name} [{unit}]" if unit else name
 
 
+def _write_wide(out_path: str, sources: dict, rows: list) -> str:
+    """rows = [(t, key, value)] (any order) → wide forward-filled CSV."""
+    rows = sorted(rows, key=lambda x: x[0])
+    keys = list(sources)
+    t0 = rows[0][0] if rows else 0.0
+    last = {k: "" for k in keys}
+    with open(out_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["time_s"] + [_col(k, sources[k]) for k in keys])
+        cur_t = None
+        for t, key, v in rows:
+            if cur_t is None:
+                cur_t = t
+            if t != cur_t:
+                w.writerow([f"{cur_t - t0:.6f}"] + [last[k] for k in keys])
+                cur_t = t
+            if key in last:
+                last[key] = v
+        if cur_t is not None:
+            w.writerow([f"{cur_t - t0:.6f}"] + [last[k] for k in keys])
+    return out_path
+
+
 def materialize_capture(run_dir: str, sources: dict, t_start=None, t_stop=None,
-                        history=None, cap_start=None) -> str:
+                        history=None, cap_start=None, out_path=None) -> str:
     """Long capture (+ optional pre-roll from history) → wide forward-filled CSV."""
     rows: list[tuple] = []
     cap_start = cap_start if cap_start is not None else (t_start or 0.0)
@@ -53,26 +76,17 @@ def materialize_capture(run_dir: str, sources: dict, t_start=None, t_stop=None,
                    (t_stop is not None and t > t_stop):
                     continue
                 rows.append((t, key, v))
-    rows.sort(key=lambda x: x[0])
+    return _write_wide(out_path or os.path.join(run_dir, "data.csv"), sources, rows)
 
-    keys = list(sources)
-    out_path = os.path.join(run_dir, "data.csv")
-    t0 = rows[0][0] if rows else 0.0
-    last = {k: "" for k in keys}
-    with open(out_path, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["time_s"] + [_col(k, sources[k]) for k in keys])
-        cur_t = None
-        for t, key, v in rows:
-            if cur_t is None:
-                cur_t = t
-            if t != cur_t:
-                w.writerow([f"{cur_t - t0:.6f}"] + [last[k] for k in keys])
-                cur_t = t
-            last[key] = v
-        if cur_t is not None:
-            w.writerow([f"{cur_t - t0:.6f}"] + [last[k] for k in keys])
-    return out_path
+
+def materialize_from_history(out_path: str, sources: dict, history,
+                             t_start=None, t_stop=None) -> str:
+    """Export the in-memory history slice for these sources → wide CSV."""
+    lo = t_start if t_start is not None else -1e18
+    hi = t_stop if t_stop is not None else 1e18
+    rows = [(t, key, v) for key in sources
+            for (t, v, s) in history.slice(key, lo, hi) if s == 0]
+    return _write_wide(out_path, sources, rows)
 
 
 def find_unfinalized(base_dir: str) -> list[str]:

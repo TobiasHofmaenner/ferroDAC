@@ -1110,6 +1110,15 @@ class MainWindow(QMainWindow):
         self.recorder = Recorder(engine, self.history, on_change=self._on_record_change)
         self._rec_start_mid = None
 
+        # working-session autosave (tags/layout survive restart & crashes)
+        self._autosave_on = False
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(1500)
+        self._autosave_timer.timeout.connect(self._do_autosave)
+        self.dashboard.ports_changed.connect(self._schedule_autosave)
+        self.dashboard.markers.changed.connect(self._schedule_autosave)
+
         self.sources_panel = SourcesPanel(manager, self.dashboard)
         self.sources_dock = QDockWidget("Sources", self)
         self.sources_dock.setObjectName("SourcesDock")
@@ -1151,10 +1160,12 @@ class MainWindow(QMainWindow):
         self.manager.start()
         self._check_recovery()
         if self._restore_last:
-            self._maybe_restore_last()
+            self._init_session_persistence()
 
     def _build_menus(self):
         filemenu = self.menuBar().addMenu("&File")
+        filemenu.addAction("Export CSV…", self._on_export)
+        filemenu.addSeparator()
         filemenu.addAction("Save Layout…", self._on_save)
         filemenu.addAction("Open Layout…", self._on_open)
 
@@ -1191,11 +1202,38 @@ class MainWindow(QMainWindow):
             self.events_dock.raise_()
 
     # -- record --------------------------------------------------------------
-    def _runs_dir(self) -> str:
+    def _app_dir(self) -> str:
         from qtpy.QtCore import QStandardPaths
         docs = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) \
             or os.path.expanduser("~")
-        return os.path.join(docs, "ferroDAC", "runs")
+        return os.path.join(docs, "ferroDAC")
+
+    def _runs_dir(self) -> str:
+        return os.path.join(self._app_dir(), "runs")
+
+    def _on_export(self):
+        sources = self.dashboard.capture_sources()
+        if not sources:
+            self.statusBar().showMessage(
+                "Nothing to export — route some sources to a chart first.", 5000)
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export CSV", "", "CSV (*.csv)")
+        if not path:
+            return
+        if not path.endswith(".csv"):
+            path += ".csv"
+        ms = self.dashboard.markers
+        starts, stops = ms.of_kind(REC_START), ms.of_kind(REC_STOP)
+        t0 = min(m.t for m in starts) if starts else None
+        t1 = max(m.t for m in stops) if stops else None
+        run_dir = self.recorder.run_dir
+        if run_dir and os.path.exists(os.path.join(run_dir, "_capture.csv")):
+            out = rec.materialize_capture(
+                run_dir, sources, t_start=t0, t_stop=t1, history=self.history,
+                cap_start=getattr(self.recorder, "_cap_start", None), out_path=path)
+        else:
+            out = rec.materialize_from_history(path, sources, self.history, t0, t1)
+        self.statusBar().showMessage(f"Exported → {out}", 6000)
 
     def _toggle_record(self):
         if not self.recorder.active:
@@ -1270,7 +1308,7 @@ class MainWindow(QMainWindow):
     def _b64(qba) -> str:
         return bytes(qba.toBase64().data()).decode("ascii")
 
-    def save_session(self, path: str) -> None:
+    def _write_session(self, path: str) -> None:
         data = {
             "version": 1,
             "devices": self.manager.export_active(),
@@ -1281,10 +1319,35 @@ class MainWindow(QMainWindow):
                 "workspace": self._b64(self.workspace.saveState()),
             },
         }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2)
+
+    def save_session(self, path: str) -> None:
+        self._write_session(path)
         self._remember(path)
         self.statusBar().showMessage(f"Saved {os.path.basename(path)}", 4000)
+
+    # -- working-session autosave (so tags/layout survive a restart or crash) -
+    def _schedule_autosave(self):
+        if getattr(self, "_autosave_on", False):
+            self._autosave_timer.start()
+
+    def _do_autosave(self):
+        try:
+            self._write_session(os.path.join(self._app_dir(), "session.json"))
+        except Exception:
+            pass
+
+    def _init_session_persistence(self):
+        if os.path.exists(os.path.join(self._app_dir(), "session.json")):
+            QTimer.singleShot(300, self._restore_and_enable_autosave)
+        else:
+            self._autosave_on = True
+
+    def _restore_and_enable_autosave(self):
+        self.open_session(os.path.join(self._app_dir(), "session.json"))
+        self._autosave_on = True
 
     def open_session(self, path: str) -> None:
         try:
@@ -1324,17 +1387,14 @@ class MainWindow(QMainWindow):
     def _remember(path: str) -> None:
         QSettings("ferroDAC", "ferroDAC").setValue("lastSession", path)
 
-    def _maybe_restore_last(self) -> None:
-        last = QSettings("ferroDAC", "ferroDAC").value("lastSession")
-        if last and os.path.exists(last):
-            QTimer.singleShot(300, lambda: self.open_session(last))
-
     def closeEvent(self, event):  # noqa: N802
         if self.recorder.active:        # finalize rather than leave it dangling
             ms = self.dashboard.markers
             t0 = ms.get(self._rec_start_mid).t if self._rec_start_mid \
                 and ms.get(self._rec_start_mid) else None
             self.recorder.stop(t_start=t0, t_stop=time.time())
+        if self._autosave_on:
+            self._do_autosave()
         self.dashboard.shutdown()
         self.manager.stop()
         self.engine.shutdown()
