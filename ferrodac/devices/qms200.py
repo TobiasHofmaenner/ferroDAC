@@ -30,6 +30,7 @@ import re
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -275,6 +276,11 @@ class QMS200Device(BaseDevice):
         self._link = None
         self._io_lock = threading.Lock()
         self._last_reopen = 0.0
+        # Control writes / option changes are queued from the GUI thread and
+        # applied by the poll thread at a safe serial boundary, so the UI never
+        # blocks waiting for a scan to finish. deque ops are atomic in CPython.
+        self._write_q: deque = deque()
+        self._reconfig_pending = False
         self._apply_scan_params()
 
     # -- discovery -----------------------------------------------------------
@@ -352,30 +358,39 @@ class QMS200Device(BaseDevice):
 
     # -- control sinks (filament / detector / SEM) ---------------------------
     def _write(self, sink, value) -> None:
-        """Actuate a control. Only fires when the user writes the sink; the ion
-        source is never auto-enabled. Serialised with scans via the IO lock."""
-        with self._io_lock:
-            if self._link is None and not self._reopen():
-                raise RuntimeError("QMS 200 link is down")
-            if sink.id == "filament":
-                self._link.query("FIE ,1" if value else "FIE ,0")
-            elif sink.id == "multiplier":
-                self._link.query("SEM ,1" if value else "SEM ,0")
-            elif sink.id == "detector":
-                self._link.query("SDT ,1" if value == "SEM" else "SDT ,0")
-            elif sink.id == "sem_voltage":
-                # Stage the multiplier HV; only physically applied while the
-                # multiplier (SEM) is on, which the user controls separately.
-                self._link.query(f"SHV ,{int(round(value))}")
+        """Queue a control change; the poll thread applies it at the next safe
+        serial boundary (no GUI-thread blocking on the scan). Only fires when
+        the user writes the sink; the ion source is never auto-enabled."""
+        self._write_q.append((sink.id, value))
 
     def _on_option(self, key: str, value) -> None:
+        # Update local scan params immediately (cheap), and flag the poll thread
+        # to reprogram the analyzer between scans — no GUI-thread serial I/O.
         self._apply_scan_params()
-        with self._io_lock:
-            if self._link is not None:
-                try:
-                    self._configure_scan()
-                except ProtocolError as exc:
-                    self._drop_link(str(exc))
+        self._reconfig_pending = True
+
+    def _send_control(self, sink_id: str, value) -> None:
+        """The actual serial send for a control sink (poll thread, IO lock held)."""
+        if sink_id == "filament":
+            self._link.query("FIE ,1" if value else "FIE ,0")
+        elif sink_id == "multiplier":
+            self._link.query("SEM ,1" if value else "SEM ,0")
+        elif sink_id == "detector":
+            self._link.query("SDT ,1" if value == "SEM" else "SDT ,0")
+        elif sink_id == "sem_voltage":
+            # Stage the multiplier HV; only physically applied while the
+            # multiplier (SEM) is on, which the user controls separately.
+            self._link.query(f"SHV ,{int(round(value))}")
+
+    def _service_writes(self) -> None:
+        """Drain queued control writes onto the link. Poll thread, IO lock held."""
+        while self._write_q and self._link is not None:
+            sink_id, value = self._write_q.popleft()
+            try:
+                self._send_control(sink_id, value)
+            except ProtocolError as exc:
+                self._drop_link(str(exc))
+                break
 
     # -- lifecycle -----------------------------------------------------------
     def _connect(self) -> None:
@@ -393,6 +408,7 @@ class QMS200Device(BaseDevice):
             type(self)._cache.pop(self._port, None)
 
     def _disconnect(self) -> None:
+        self._write_q.clear()
         with self._io_lock:
             if self._link is not None:
                 try:
@@ -453,6 +469,14 @@ class QMS200Device(BaseDevice):
         with self._io_lock:
             if self._link is None and not self._reopen():
                 return self._empty(), 1
+            if self._reconfig_pending:              # apply option changes here,
+                self._reconfig_pending = False      # between scans (coherent axis)
+                try:
+                    self._configure_scan()
+                except ProtocolError as exc:
+                    self._drop_link(str(exc))
+                    return self._empty(), 1
+            self._service_writes()                  # apply queued controls
             try:
                 self._link.query("CRU ,2")          # start a scan
                 points = self._drain_scan()
@@ -478,6 +502,10 @@ class QMS200Device(BaseDevice):
         # `_streaming` lets stop()/disconnect() abort a long scan promptly instead
         # of blocking on the IO lock until the scan deadline.
         while self._streaming and time.monotonic() < deadline:
+            if self._reconfig_pending:              # option changed → end this
+                break                               # sweep so the new config
+            self._service_writes()                  # applies promptly; controls
+            #                                         apply between chunks too
             try:
                 hdr = self._link.query("MBH").split(",")
                 avail = int(hdr[3]) if len(hdr) > 3 else 0
