@@ -526,8 +526,12 @@ class QMS200Device(BaseDevice):
             self._service_writes()                  # applies promptly; controls
             #                                         apply between chunks too
             now = time.monotonic()
+            # Emit partials a touch faster than the engine's ~50 ms (20 Hz) drain
+            # so every repaint has a fresh frame — the panel coalesces, so extra
+            # emits are cheap and the spectrum fills in smoothly rather than in
+            # visible chunks.
             if (source is not None and self._emit is not None and self._full_len
-                    and points and now - last_partial >= 0.15):
+                    and points and now - last_partial >= 0.04):
                 self._emit(Reading(self.data_id, source.id, time.time(),
                                    self._make_trace(points, total=self._full_len),
                                    0, partial=True))

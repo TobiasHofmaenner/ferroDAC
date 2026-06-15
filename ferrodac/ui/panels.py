@@ -348,21 +348,21 @@ class SpectrumPanel(Panel):
                     slot[1] = r.value
         autorange = False
         for key, (tr, complete) in latest.items():
-            # ghost the last completed scan so a new (live-filling) run overlays it
-            prev = self._prev_curves.get(key)
-            if prev is not None and key in self._last_complete:
-                px, py = self._last_complete[key]
-                prev.setData(px, py, connect="finite")
             y = np.where(tr.y > 0, tr.y, np.nan)            # log-safe
-            self._curves[key].setData(tr.x, y, connect="finite")
+            self._curves[key].setData(tr.x, y, connect="finite")   # current (bright)
             self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
             self.plot.setLabel("left", _axis_text(tr.y_label, tr.y_unit))
-            if complete is not None:                        # rotate on full scans
-                self._last_complete[key] = (complete.x,
-                                            np.where(complete.y > 0, complete.y, np.nan))
-            # rescale only on a completed scan (or before the first one), so the
-            # live fill doesn't jitter the view every partial frame
-            if complete is not None or key not in self._last_complete:
+            if complete is not None:
+                # The finished scan becomes the dim "previous" ghost that the next
+                # live-filling run overlays. Redrawn only here (on a full scan),
+                # not on every partial frame.
+                cy = np.where(complete.y > 0, complete.y, np.nan)
+                prev = self._prev_curves.get(key)
+                if prev is not None:
+                    prev.setData(complete.x, cy, connect="finite")
+                self._last_complete[key] = (complete.x, cy)
+                autorange = True
+            elif key not in self._last_complete:            # first build: frame it
                 autorange = True
         if autorange:
             self.plot.autoRange()
