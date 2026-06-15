@@ -38,8 +38,11 @@ from ..core.device import (
     Interface,
     Modality,
     Option,
+    Param,
     RateControl,
     RateMode,
+    Sink,
+    SinkKind,
     Source,
     Status,
 )
@@ -210,6 +213,15 @@ class QMS200Device(BaseDevice):
             sources=[Source(id="spectrum", name="Mass spectrum", unit="",
                             modality=Modality.WAVEFORM, dtype="trace",
                             prefer_log=True)],
+            sinks=[
+                Sink(id="filament", name="Filament", kind=SinkKind.TOGGLE,
+                     value=False),
+                Sink(id="detector", name="Detector", kind=SinkKind.ENUM,
+                     params=(Param("mode", "str", options=("Faraday", "SEM")),),
+                     value="Faraday"),
+                Sink(id="multiplier", name="Multiplier (SEM HV)",
+                     kind=SinkKind.TOGGLE, value=False),
+            ],
             rate=RateControl(mode=RateMode.SETTABLE, native_hz=1.0,
                              default_hz=0.5, min_hz=0.02, max_hz=2.0),
             primary_source="spectrum",
@@ -280,6 +292,33 @@ class QMS200Device(BaseDevice):
         ):
             link.query(cmd)
 
+    def _read_control_state(self) -> None:
+        """Sync the filament / detector / multiplier sinks to the instrument."""
+        for sink_id, cmd, parse in (
+            ("filament", "FIE", lambda r: r.strip() == "1"),
+            ("multiplier", "SEM", lambda r: r.strip() == "1"),
+            ("detector", "SDT", lambda r: "SEM" if (r.strip() and int(r) > 0)
+             else "Faraday"),
+        ):
+            try:
+                self._sink_values[sink_id] = parse(self._link.query(cmd))
+            except (ProtocolError, ValueError):
+                pass
+
+    # -- control sinks (filament / detector / SEM) ---------------------------
+    def _write(self, sink, value) -> None:
+        """Actuate a control. Only fires when the user writes the sink; the ion
+        source is never auto-enabled. Serialised with scans via the IO lock."""
+        with self._io_lock:
+            if self._link is None and not self._reopen():
+                raise RuntimeError("QMS 200 link is down")
+            if sink.id == "filament":
+                self._link.query("FIE ,1" if value else "FIE ,0")
+            elif sink.id == "multiplier":
+                self._link.query("SEM ,1" if value else "SEM ,0")
+            elif sink.id == "detector":
+                self._link.query("SDT ,1" if value == "SEM" else "SDT ,0")
+
     def _on_option(self, key: str, value) -> None:
         self._apply_scan_params()
         with self._io_lock:
@@ -299,6 +338,7 @@ class QMS200Device(BaseDevice):
         except ProtocolError:
             self._firmware = None
         self._configure_scan()
+        self._read_control_state()
         with type(self)._cls_lock:
             type(self)._active_ports.add(self._port)
             type(self)._cache.pop(self._port, None)
