@@ -54,7 +54,7 @@ excludes = [
 ]
 
 a = Analysis(
-    [os.path.join(ROOT, "ferrodac", "__main__.py")],
+    [os.path.join(ROOT, "main.py")],     # absolute-import launcher (see main.py)
     pathex=[ROOT],
     binaries=[],
     datas=datas,
