@@ -50,11 +50,15 @@ class GasAnalyzer(Processor):
 
     def outputs(self) -> list[Port]:
         """Per gas: a scalar partial-pressure source and a reconstructed-spectrum
-        trace source (route the latter back onto the spectrum to see the fit)."""
+        trace (route the latter onto the spectrum to see the fit). Plus a total
+        Model trace and a Residual trace (measured - model: its leftover peaks
+        are the species not being accounted for)."""
         ports = []
         for n in self.gas_names:
             ports.append(Port(f"gas/{self.id}/{n}", n, "float", self.unit))
             ports.append(Port(f"fit/{self.id}/{n}", f"{n} fit", "trace", self.unit))
+        ports.append(Port(f"model/{self.id}", "Model fit", "trace", self.unit))
+        ports.append(Port(f"residual/{self.id}", "Residual", "trace", self.unit))
         return ports
 
     @staticmethod
@@ -69,25 +73,37 @@ class GasAnalyzer(Processor):
         sigma = float(1.4826 * np.median(np.abs(yv - np.median(yv))))
         return max(sigma, float(np.max(yv)) * 1e-5)   # noise, or 5 decades down
 
-    def _reconstruct(self, x, name, amount, floor=0.0) -> Trace:
+    def _trace(self, x, y, lo, hi) -> Trace:
+        return Trace(np.asarray(x, float), y, x_label="m/z", y_label="Intensity",
+                     y_unit=self.unit, x_lo=lo, x_hi=hi)
+
+    def _gaussian(self, fine, name, amount) -> np.ndarray:
         """The analog spectrum this gas alone would produce at its fitted amount:
-        each fragment a Gaussian at its m/z (peak_fwhm wide) on a fine axis, so it
-        looks like a real RGA scan and overlays naturally on the measured peaks.
-        Clamped to `floor` (the data's noise level) so the tails stay on baseline."""
-        lo, hi = float(x[0]), float(x[-1])
-        fine = np.linspace(lo, hi, max(2, int(round((hi - lo) * _RECON_PPA)) + 1))
+        each fragment a Gaussian (peak_fwhm wide) at its m/z, so it looks like a
+        real RGA scan and overlays the measured peaks."""
         y = np.zeros(len(fine))
         g = LIBRARY.get(name)
         if g is not None and amount > 0:
             contrib = amount * (g.rsf or 1.0)        # un-sensitivity-corrected
             sigma = max(self.peak_fwhm, 1e-3) / 2.3548
             for m, frac in g.norm_pattern.items():
-                if lo - 1 <= m <= hi + 1:
-                    y += contrib * frac * np.exp(-0.5 * ((fine - m) / sigma) ** 2)
-        if floor > 0:
-            y = np.maximum(y, floor)
-        return Trace(fine, y, x_label="m/z", y_label="Intensity",
-                     y_unit=self.unit, x_lo=lo, x_hi=hi)
+                y += contrib * frac * np.exp(-0.5 * ((fine - m) / sigma) ** 2)
+        return y
+
+    def _stick_model(self, x) -> np.ndarray:
+        """The fitted intensity at each measured mass — sum of every gas's
+        fragment contributions there — for the residual (measured - model)."""
+        x = np.asarray(x, float)
+        model = np.zeros(len(x))
+        for n in self.gas_names:
+            amt = self.last_amounts.get(n, 0.0)
+            g = LIBRARY.get(n)
+            if g is None or amt <= 0:
+                continue
+            contrib = amt * (g.rsf or 1.0)
+            for m, frac in g.norm_pattern.items():
+                model[np.abs(x - m) <= 0.5] += contrib * frac
+        return model
 
     def process(self, value) -> dict:
         sigma = getattr(value, "sigma", None)   # measured per-mass noise, if any
@@ -105,11 +121,21 @@ class GasAnalyzer(Processor):
         if not self.unit and getattr(value, "y_unit", ""):
             self.unit = value.y_unit
         floor = self._recon_floor(value.y)      # baseline from the measured noise
+        lo, hi = float(value.x[0]), float(value.x[-1])
+        fine = np.linspace(lo, hi, max(2, int(round((hi - lo) * _RECON_PPA)) + 1))
+        clamp = (lambda y: np.maximum(y, floor)) if floor > 0 else (lambda y: y)
         out = {}
+        model = np.zeros(len(fine))
         for n in self.gas_names:
             amt = self.last_amounts.get(n, 0.0)
+            gy = self._gaussian(fine, n, amt)
+            model += gy
             out[f"gas/{self.id}/{n}"] = amt
-            out[f"fit/{self.id}/{n}"] = self._reconstruct(value.x, n, amt, floor)
+            out[f"fit/{self.id}/{n}"] = self._trace(fine, clamp(gy), lo, hi)
+        out[f"model/{self.id}"] = self._trace(fine, clamp(model), lo, hi)
+        # residual on the measured axis: leftover peaks = unaccounted species
+        resid = np.asarray(value.y, float) - self._stick_model(value.x)
+        out[f"residual/{self.id}"] = self._trace(value.x, resid, lo, hi)
         return out
 
     def state(self) -> dict:
