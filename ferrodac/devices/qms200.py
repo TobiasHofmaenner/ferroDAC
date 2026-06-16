@@ -85,6 +85,13 @@ _DEFAULT_PPA = 32.0
 # differences and lets a truncated sweep contribute only over its real range.
 _GRID_PPA = 64
 
+# If a sweep reports no new data for this long while still "measuring" (MBH
+# running flag never reaching 1), treat it as stalled and restart — bounds the
+# rare freeze to a few seconds instead of the full backstop deadline. Points
+# arrive every <0.2 s even at the slowest speed, so this won't trip a healthy
+# sweep; it only catches a wedged device buffer or a serial desync.
+_STALL_TIMEOUT = 4.0
+
 # Within-sweep boxcar smoothing: averages the dense raw points over a window
 # (in amu). Kept well under 1 u so noise drops without blurring the peaks.
 SMOOTH_AMU = {"Off": 0.0, "0.1 u": 0.1, "0.2 u": 0.2, "0.5 u": 0.5}
@@ -707,7 +714,7 @@ class QMS200Device(BaseDevice):
         """
         points: list = []
         dropped = emitted = resyncs = 0
-        last_partial = drain_start = time.monotonic()
+        last_partial = drain_start = last_progress = time.monotonic()
         # Backstop only — normal completion is the field-[0] flag, not a timer.
         # Sized to the expected point count (per-point serial readout dominates).
         deadline = drain_start + max(60.0, (self._expected_n or 400) * 0.08 + 30.0)
@@ -725,6 +732,7 @@ class QMS200Device(BaseDevice):
         while self._streaming and time.monotonic() < deadline:
             if self._reconfig_pending:              # option changed → end the sweep
                 break
+            n0 = len(points)
             try:
                 hdr = self._link.query("MBH").split(",")
                 running = int(hdr[0])               # 1 = measurement complete
@@ -749,12 +757,23 @@ class QMS200Device(BaseDevice):
                     dropped += 1
                     _dbg(f"skipped stray MDB frame {raw!r}")
                 maybe_emit()
+            now = time.monotonic()
+            if len(points) > n0:                    # made progress this poll
+                last_progress = now
             if running == 1 and avail == 0:         # ← deterministic completion
                 _dbg(f"complete: {len(points)} pts, {emitted} partial(s), "
                      f"{dropped} stray(s)")
                 return points, True
             if avail == 0:
-                time.sleep(0.03)                    # measuring, buffer empty — wait
+                # Still measuring (running != 1) but no data. A brief gap is
+                # normal; a long one means the sweep stalled (device buffer wedged
+                # or a desync) — abort so the poll loop starts a fresh sweep
+                # promptly instead of waiting out the full backstop deadline.
+                if points and now - last_progress > _STALL_TIMEOUT:
+                    _dbg(f"sweep STALLED at {len(points)} pts (no data for "
+                         f"{now - last_progress:.0f}s) — restarting")
+                    return points, False
+                time.sleep(0.03)
             if resyncs > 30:                        # runaway desync — bail
                 _dbg("too many resyncs, aborting drain")
                 break
