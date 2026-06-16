@@ -169,3 +169,32 @@ Rewritten and rig-confirmed via a full `FERRODAC_QMS_DEBUG=1` capture:
 
 Known: a full high-res sweep is inherently ~60 s over the per-point ASCII link;
 lower resolution = faster. Stray `3,4,…` frames during 1000-pt bursts are skipped.
+
+## Mid-sweep stall at slow scan speed (v0.41.1 – v0.41.4)
+
+On the real rig, **slow** sweeps (`MSD 9`/`11`) freeze partway through and only
+recover when the next cycle restarts; **fast** sweeps (`MSD 7`) complete reliably.
+Diagnosis from `FERRODAC_QMS_DEBUG=1` captures:
+
+- **Not framing / not the link.** Zero resyncs, zero stray frames all session; the
+  device keeps answering `MBH` with valid headers *during* the stall (`running=0,
+  avail=0`). The serial link is alive — the instrument has stopped advancing its
+  own measurement.
+- **Not our polling.** v0.41.3 cut `MBH` polls per sweep from ~1928 → ~84 (poll
+  backoff `_POLL_IDLE`); it still stalled. So flooding `MBH` was not the cause.
+- **Tracks the live signal.** Stalls hit variable mass positions (116 / 230 / 600 /
+  1435 pts) and their frequency drifted as the chamber pumped down — i.e. it
+  follows the *signal*, the signature of detector **auto-range hunting**.
+- **Leading cause: per-point auto-range on slow sweeps.** At ~63 ms dwell (`MSD 11`)
+  vs ~3 ms (`MSD 7`) the electrometer has both time and incentive to descend to its
+  most sensitive decade, whose trans-impedance settling (10¹¹–10¹² Ω feedback) runs
+  to tens–hundreds of ms and can wedge mid-point. Fast sweeps never enter those
+  ranges, so they don't hunt.
+
+**Mitigation (v0.41.4): `Detector range` option.** Default `auto` keeps the old
+`AMO 1` + `ARL ,-11` behaviour. `fixed` sends `AMO 0` + `ARA ,<decade>` to pin one
+current decade for the whole sweep so the amp never hunts/re-settles — letting a
+slow sweep run to completion while staying sensitive. `AMO`/`ARA` are read back
+and logged on configure (the `ARA` decade-exponent encoding is interop-derived
+from PyExpLabSys `qmg422`; the read-back confirms what the unit actually applied).
+Open: confirm on the rig that a fixed range removes the slow-speed stall.

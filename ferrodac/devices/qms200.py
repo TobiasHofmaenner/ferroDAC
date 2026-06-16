@@ -137,6 +137,19 @@ PPA_FROM_MST = {0: 64, 1: 32, 2: 16, 3: 8}
 # view, robust to noise/dropped points. "analog" = the full raw sweep.
 READOUT_OPTS = [("peak", "Peaks per mass"), ("analog", "Full analog scan")]
 
+# Detector amplifier range. "auto" (AMO 1 + ARL) lets the electrometer choose
+# its own sensitivity per point, free to descend to the most sensitive decade —
+# but that per-point hunting/re-settling on the slow sensitive ranges can wedge
+# a long-dwell (slow) sweep mid-scan. "fixed" (AMO 0 + ARA ,<decade>) pins one
+# current decade for the whole sweep so the amp never hunts or re-settles. The
+# fixed value is the full-scale-current decade exponent (−9 → 1e-9 A); more
+# negative = more sensitive but slower to settle. AMO/ARA are read back to
+# confirm what the unit actually applied (the ARA encoding is interop-derived).
+RANGE_MODE_OPTS = [("auto", "Auto-range"), ("fixed", "Fixed range")]
+FIXED_RANGE_OPTS = [(-7, "1e-7 A"), (-8, "1e-8 A"), (-9, "1e-9 A"),
+                    (-10, "1e-10 A"), (-11, "1e-11 A")]
+AUTO_RANGE_LOWER = -11      # ARL: most sensitive decade auto-range may use
+
 
 class ProtocolError(Exception):
     pass
@@ -291,6 +304,8 @@ class QMS200Device(BaseDevice):
             Option("range", "Scan range", tuple(SCAN_RANGES), "1-50"),
             Option("speed", "Scan speed", tuple(SPEED_OPTS), 7),
             Option("resolution", "Resolution", tuple(RES_OPTS), 2),
+            Option("range_mode", "Detector range", tuple(RANGE_MODE_OPTS), "auto"),
+            Option("fixed_range", "Fixed range", tuple(FIXED_RANGE_OPTS), -9),
             Option("readout", "Readout", tuple(READOUT_OPTS), "peak"),
             Option("mass_offset", "Mass offset", tuple(OFFSET_OPTS), 0.0),
             Option("floor", "Noise floor", tuple(FLOOR_OPTS), 1e-13),
@@ -405,12 +420,14 @@ class QMS200Device(BaseDevice):
         self._readout = str(self._option_values.get("readout", "peak"))
         self._offset = float(self._option_values.get("mass_offset", 0.0))
         self._floor = float(self._option_values.get("floor", 1e-13))
+        self._range_mode = str(self._option_values.get("range_mode", "auto"))
+        self._fixed_range = int(self._option_values.get("fixed_range", -9))
 
     def _configure_scan(self) -> None:
         """Program the analyzer for a mass scan (idempotent)."""
         link = self._link
         width = max(1, self._last - self._first)
-        for cmd in (
+        cmds = [
             "CMO ,1",            # ASCII control
             "CYM ,0",            # single (not multi) channel mode
             "SMC ,0",            # channel 0
@@ -420,9 +437,14 @@ class QMS200Device(BaseDevice):
             f"MSD ,{self._speed}",
             f"MFM ,{self._first}",
             f"MWI ,{width}",
-            "AMO ,1",            # auto-range with lower limit
-            "ARL ,-11",
-        ):
+        ]
+        if self._range_mode == "fixed":
+            # pin one current decade — the amp never hunts/re-settles mid-sweep
+            cmds += ["AMO ,0", f"ARA ,{self._fixed_range}"]
+        else:
+            # auto-range, free down to the most sensitive decade
+            cmds += ["AMO ,1", f"ARL ,{AUTO_RANGE_LOWER}"]
+        for cmd in cmds:
             link.query(cmd)
         self._read_scan_params()
 
@@ -447,6 +469,17 @@ class QMS200Device(BaseDevice):
         self._expected_n = int(round((self._actual_last - self._actual_first) * ppa)) + 1
         _dbg(f"read-back: first={self._actual_first} last={self._actual_last} "
              f"mst={self._actual_mst} → ~{self._expected_n} pts")
+        # Confirm the detector range the unit actually applied — AMO (0 fixed /
+        # 1 auto) and ARA (the active/fixed decade). Logged so a wrong-encoding
+        # ARA shows up here rather than as a silently-clamped sensitivity.
+        try:
+            amo = self._link.query("AMO").strip()
+            ara = self._link.query("ARA").strip()
+            _dbg(f"detector range read-back: AMO={amo} ARA={ara} "
+                 f"(requested {self._range_mode}"
+                 f"{f'/{self._fixed_range}' if self._range_mode == 'fixed' else ''})")
+        except (ProtocolError, ValueError, IndexError) as exc:
+            _dbg(f"detector range read-back failed ({exc})")
 
     def _read_control_state(self) -> None:
         """Sync the filament / detector / multiplier sinks to the instrument."""
@@ -494,8 +527,10 @@ class QMS200Device(BaseDevice):
         if key in ("range", "resolution", "speed", "mass_offset"):
             self._avg_buf = []                   # grid moved → drop the average
             #                                      (floor/readout don't move it)
-        if key in ("range", "resolution", "speed"):
+        if key in ("range", "resolution", "speed", "range_mode", "fixed_range"):
             self._reconfig_pending = True        # → reprogram + read params back
+        #   range_mode/fixed_range only resend AMO/ARA — they don't move the mass
+        #   grid, so the average buffer above is intentionally left intact.
         # "readout" / "mass_offset" are software-only: applied on the next frame,
         # no reprogram (the read-back axis stays valid).
 
