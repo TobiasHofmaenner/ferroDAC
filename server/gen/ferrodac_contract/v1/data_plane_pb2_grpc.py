@@ -297,3 +297,162 @@ class Viewer:
             timeout,
             metadata,
             _registered_method=True)
+
+
+class TagsStub:
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.PublishTag = channel.unary_unary(
+                '/ferrodac_contract.v1.Tags/PublishTag',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.PublishTagRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.TagAck.FromString,
+                _registered_method=True)
+        self.DeleteTag = channel.unary_unary(
+                '/ferrodac_contract.v1.Tags/DeleteTag',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DeleteTagRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.TagAck.FromString,
+                _registered_method=True)
+        self.WatchTags = channel.unary_stream(
+                '/ferrodac_contract.v1.Tags/WatchTags',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchTagsRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.TagEvent.FromString,
+                _registered_method=True)
+
+
+class TagsServicer:
+    """Missing associated documentation comment in .proto file."""
+
+    def PublishTag(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteTag(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WatchTags(self, request, context):
+        """snapshot, then live
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_TagsServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'PublishTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.PublishTag,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.PublishTagRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.TagAck.SerializeToString,
+            ),
+            'DeleteTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteTag,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DeleteTagRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.TagAck.SerializeToString,
+            ),
+            'WatchTags': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchTags,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchTagsRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.TagEvent.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'ferrodac_contract.v1.Tags', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('ferrodac_contract.v1.Tags', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class Tags:
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def PublishTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Tags/PublishTag',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.PublishTagRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.TagAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Tags/DeleteTag',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.DeleteTagRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.TagAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchTags(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ferrodac_contract.v1.Tags/WatchTags',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchTagsRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.TagEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

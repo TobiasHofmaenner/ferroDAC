@@ -266,3 +266,89 @@ service Viewer {
   rpc WatchCatalog(CatalogRequest) returns (stream CatalogEvent);
   rpc Subscribe(SubscribeRequest) returns (stream ReadingBatch);
 }
+
+// --------------------------------------------------------------------------- //
+//  Tags / events — a first-class datatype, NOT a Reading (DESIGN §7.3)
+// --------------------------------------------------------------------------- //
+// Tags are discrete, semantic, RELIABLE and EDITABLE — the opposite of the
+// expendable Reading stream (a tag in the reading oneof would inherit drop-
+// oldest, have no edit/delete, and pollute latest()). They ride their OWN
+// channel. The Tags service is deliberately ROLE-INDEPENDENT: any client —
+// agent OR pure viewer — may publish/delete/watch, because a viewer must be
+// able to create tags too, so they can't ride the agent-only Session stream.
+// Merge is last-write-wins by (id, version) with tombstones; the hub keeps a
+// durable TagStore (in-memory in M1, persisted with the storage milestone, so
+// late joiners get full history and tags survive a hub restart). This service
+// is ADDITIVE — old clients that never call it are unaffected.
+
+enum TagOrigin {
+  TAG_ORIGIN_UNSPECIFIED = 0;
+  TAG_ORIGIN_USER = 1;           // a person hit ＋Tag
+  TAG_ORIGIN_DEVICE = 2;         // a driver fired emit_tag() on an event
+  TAG_ORIGIN_PROCESSOR = 3;      // a processor (threshold/alarm, gas-detected)
+  TAG_ORIGIN_SYSTEM = 4;
+}
+
+enum TagSeverity {              // closed enum (kind stays an open string)
+  TAG_SEVERITY_UNSPECIFIED = 0;
+  TAG_INFO = 1;
+  TAG_WARN = 2;
+  TAG_ERROR = 3;
+  TAG_CRITICAL = 4;
+}
+
+message Tag {
+  string id = 1;                 // UUID — merge/edit/delete across instances by id
+  double t = 2;                  // event time, unix epoch seconds (point/span start)
+  optional double t_end = 3;     // span end (unset = a point in time)
+  string kind = 4;               // OPEN string: tag|recording|alarm|calibration|…
+  string label = 5;
+  string comment = 6;
+  TagOrigin origin_kind = 7;     // provenance — who emitted it
+  string origin_id = 8;          // which user/device/processor
+  string scope = 9;              // global | device:<uuid> | source:<key>
+  TagSeverity severity = 10;
+  map<string, string> payload = 11;   // open machine-readable extensibility hatch
+  string color = 12;             // derived from kind/severity (carried for render)
+  uint32 version = 13;           // LWW: higher wins on merge by id
+  bool deleted = 14;             // tombstone — propagates a delete across peers
+}
+
+message PublishTagRequest {
+  string token = 1;              // reserved auth seam (allow-all in M1)
+  Tag tag = 2;
+}
+
+message DeleteTagRequest {
+  string token = 1;
+  string id = 2;
+  uint32 version = 3;            // the tombstone's version (must beat the live one)
+  string origin_id = 4;          // who deleted it (audit)
+}
+
+message TagAck {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message WatchTagsRequest {
+  string token = 1;              // reserved auth seam
+  // future: scope/kind/severity filters — for now viewers filter on render.
+}
+
+message TagEvent {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    ADDED = 1;
+    UPDATED = 2;
+    REMOVED = 3;                 // tag.deleted = true (carries the tombstone)
+  }
+  Type type = 1;
+  Tag tag = 2;
+}
+
+service Tags {
+  rpc PublishTag(PublishTagRequest) returns (TagAck);
+  rpc DeleteTag(DeleteTagRequest) returns (TagAck);
+  rpc WatchTags(WatchTagsRequest) returns (stream TagEvent);   // snapshot, then live
+}
