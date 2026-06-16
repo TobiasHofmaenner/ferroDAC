@@ -102,6 +102,12 @@ OFFSET_OPTS = [(-1.0, "−1.0"), (-0.75, "−0.75"), (-0.5, "−0.5"), (-0.25, "
                (0.0, "0"), (0.25, "+0.25"), (0.5, "+0.5"), (0.75, "+0.75"),
                (1.0, "+1.0")]
 
+# Display noise floor: intensities below this — including the negative excursions
+# of the measurement noise — are clamped UP to it, so the log plot shows a clean
+# baseline instead of gaps where the signal dips below zero. "Off" disables it.
+FLOOR_OPTS = [(0.0, "Off"), (1e-14, "1e-14 A"), (1e-13, "1e-13 A"),
+              (1e-12, "1e-12 A"), (1e-11, "1e-11 A")]
+
 # C-SEM high voltage: operated ~900–1500 V; clamp generously and let the unit
 # reject out-of-range. Exact ceiling + SHV value units are hardware-validated.
 SEM_HV_MAX = 2200.0
@@ -279,6 +285,7 @@ class QMS200Device(BaseDevice):
             Option("resolution", "Resolution", tuple(RES_OPTS), 2),
             Option("readout", "Readout", tuple(READOUT_OPTS), "peak"),
             Option("mass_offset", "Mass offset", tuple(OFFSET_OPTS), 0.0),
+            Option("floor", "Noise floor", tuple(FLOOR_OPTS), 1e-13),
         ]
         super().__init__(
             instance_id=f"qms:{probe.port}",
@@ -389,6 +396,7 @@ class QMS200Device(BaseDevice):
         self._mst = int(self._option_values.get("resolution", 1))
         self._readout = str(self._option_values.get("readout", "peak"))
         self._offset = float(self._option_values.get("mass_offset", 0.0))
+        self._floor = float(self._option_values.get("floor", 1e-13))
 
     def _configure_scan(self) -> None:
         """Program the analyzer for a mass scan (idempotent)."""
@@ -475,8 +483,9 @@ class QMS200Device(BaseDevice):
         self._apply_scan_params()
         if key in ("resolution", "speed"):       # density may change → re-estimate
             self._expected_n = None              # from the read-back on reprogram
-        if key != "readout":                     # grid/signal changed → drop the
-            self._avg_buf = []                   # rolling-average history
+        if key in ("range", "resolution", "speed", "mass_offset"):
+            self._avg_buf = []                   # grid moved → drop the average
+            #                                      (floor/readout don't move it)
         if key in ("range", "resolution", "speed"):
             self._reconfig_pending = True        # → reprogram + read params back
         # "readout" / "mass_offset" are software-only: applied on the next frame,
@@ -602,6 +611,8 @@ class QMS200Device(BaseDevice):
                     if sigma is not None:
                         sig[k] = sigma[j]
             x, y, sigma = masses, inten, sig
+        if self._floor > 0:                      # clamp sub-floor / negative noise
+            y = np.where(y < self._floor, self._floor, y)   # NaN (no data) preserved
         return Trace(x, y, x_label="m/z", y_label="Intensity", y_unit="A",
                      x_lo=float(self._first), x_hi=float(self._last), sigma=sigma)
 
