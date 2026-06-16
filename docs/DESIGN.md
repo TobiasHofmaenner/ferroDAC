@@ -405,6 +405,20 @@ events split drives the whole design.
   local clock (same skew caveat as readings); in replay it travels inside the run.
   Extends §7.1 (markers as one primitive on the shared clock).
 
+**Status (2026-06-16): cross-instance sync implemented (5/6).** Built and
+headless-tested end-to-end:
+1. `Marker`/`MarkerModel` evolved into the §7.3 entity + LWW/tombstone store;
+   Tag entity extracted to the Qt-free `core/tag.py`.
+2. Contract: role-independent `Tags` service (`PublishTag`/`DeleteTag`/
+   `WatchTags`) — additive, `CONTRACT_VERSION` unchanged.
+3. Hub: durable in-memory TagStore (LWW, tombstones, reliable/undropped fan-out,
+   snapshot-then-stream).
+4. Net: Qt-free `HubTagSync` (watch + publish, replay-on-reconnect, no echo).
+5. Qt glue: `HubController` syncs the local TagStore both ways, role-independent.
+Remaining: **(6) emitter API** — inject `emit_tag()` so devices/processors raise
+tags (alarms, gas-detected), not just the ＋Tag button. Then alarms/notifications/
+automation/audit-log all fall out as tag-stream consumers (no new plumbing).
+
 ---
 
 ## 8. Project folder = system of record
