@@ -52,6 +52,11 @@ class Hub:
         self._devices: dict[str, pb.DeviceDescriptor] = {}
         self._subs: set[Subscriber] = set()
         self._watchers: set[asyncio.Queue] = set()
+        # Tags (DESIGN §7.3): a durable, reliable store keyed by id, merged
+        # last-write-wins on version, tombstones kept so deletes propagate.
+        # Separate from readings — never drop-oldest. In-memory in M1.
+        self._tags: dict[str, pb.Tag] = {}
+        self._tag_watchers: set[asyncio.Queue] = set()
 
     # -- catalog -------------------------------------------------------------
     def snapshot(self) -> list:
@@ -100,3 +105,52 @@ class Hub:
                           if sub.wants(r.device_uuid, r.source_id)]
                 if wanted:
                     _offer(sub.queue, pb.ReadingBatch(readings=wanted))
+
+    # -- tags (own reliable channel; LWW by id+version, tombstoned) ----------
+    def tag_snapshot(self) -> list:
+        """Every stored tag — live AND tombstones — so a reconnecting peer
+        converges (it may need a delete it missed while away)."""
+        return list(self._tags.values())
+
+    def add_tag_watcher(self, q: "asyncio.Queue") -> None:
+        self._tag_watchers.add(q)
+
+    def remove_tag_watcher(self, q: "asyncio.Queue") -> None:
+        self._tag_watchers.discard(q)
+
+    def publish_tag(self, tag: pb.Tag) -> bool:
+        """Merge a tag, last-write-wins on version. Returns True if it changed
+        our state (and was fanned out), False if stale/duplicate."""
+        cur = self._tags.get(tag.id)
+        if cur is not None and tag.version < cur.version:
+            return False                         # stale — older than what we have
+        if cur is not None and tag.version == cur.version \
+                and not tag.deleted and not cur.deleted:
+            return False                         # idempotent same-version upsert
+        self._tags[tag.id] = tag
+        if tag.deleted:
+            etype = pb.TagEvent.REMOVED
+        elif cur is None:
+            etype = pb.TagEvent.ADDED
+        else:
+            etype = pb.TagEvent.UPDATED
+        self._emit_tag(pb.TagEvent(type=etype, tag=tag))
+        return True
+
+    def delete_tag(self, tag_id: str, version: int, origin_id: str = "") -> bool:
+        """Tombstone a tag. The tombstone's version must beat the live one to
+        win LWW; bump it if the caller's is too low. Carries the live tag's
+        context (t/kind/label) into the REMOVED event for the audit log."""
+        cur = self._tags.get(tag_id)
+        if cur is not None and version <= cur.version:
+            version = cur.version + 1
+        tomb = pb.Tag(id=tag_id, version=version, deleted=True,
+                      origin_id=origin_id)
+        if cur is not None:
+            tomb.t, tomb.kind, tomb.label = cur.t, cur.kind, cur.label
+            tomb.scope, tomb.severity = cur.scope, cur.severity
+        return self.publish_tag(tomb)
+
+    def _emit_tag(self, event: pb.TagEvent) -> None:
+        for q in self._tag_watchers:
+            q.put_nowait(event)                  # unbounded queue — tags are reliable

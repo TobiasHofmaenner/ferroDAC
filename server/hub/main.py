@@ -15,7 +15,7 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
 from .core import HUB_VERSION, Hub
-from .service import IngestServicer, ViewerServicer
+from .service import IngestServicer, TagsServicer, ViewerServicer
 
 log = logging.getLogger("hub")
 
@@ -26,6 +26,7 @@ def build_server(hub: "Hub | None" = None) -> "tuple[grpc.aio.Server, Hub]":
     server = grpc.aio.server()
     rpc.add_IngestServicer_to_server(IngestServicer(hub), server)
     rpc.add_ViewerServicer_to_server(ViewerServicer(hub), server)
+    rpc.add_TagsServicer_to_server(TagsServicer(hub), server)
     return server, hub
 
 

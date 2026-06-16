@@ -101,3 +101,36 @@ class ViewerServicer(rpc.ViewerServicer):
             pass
         finally:
             self.hub.remove_subscriber(sub)
+
+
+class TagsServicer(rpc.TagsServicer):
+    """Tags — role-independent (any client may publish/delete/watch). Tags ride
+    their own reliable channel, never the Reading stream (DESIGN §7.3)."""
+
+    def __init__(self, hub: Hub):
+        self.hub = hub
+
+    async def PublishTag(self, request, context):  # noqa: N802
+        changed = self.hub.publish_tag(request.tag)
+        return pb.TagAck(ok=True, detail="" if changed else "stale/duplicate")
+
+    async def DeleteTag(self, request, context):  # noqa: N802
+        self.hub.delete_tag(request.id, request.version, request.origin_id)
+        return pb.TagAck(ok=True)
+
+    async def WatchTags(self, request, context):  # noqa: N802
+        q: asyncio.Queue = asyncio.Queue()       # unbounded — tags are reliable
+        # register BEFORE snapshotting (same as WatchCatalog): a tag caught in
+        # both the snapshot and the live stream arrives twice, which the client
+        # merges idempotently by id+version.
+        self.hub.add_tag_watcher(q)
+        try:
+            for tag in self.hub.tag_snapshot():
+                etype = pb.TagEvent.REMOVED if tag.deleted else pb.TagEvent.ADDED
+                yield pb.TagEvent(type=etype, tag=tag)
+            while True:
+                yield await q.get()
+        except asyncio.CancelledError:      # client/stream went away — clean end
+            pass
+        finally:
+            self.hub.remove_tag_watcher(q)
