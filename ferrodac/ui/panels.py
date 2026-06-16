@@ -1039,9 +1039,19 @@ class SliderPanel(InputPanel):
         self._val.setText(fmt(self.current_value(), self._unit))
 
     def set_range(self, lo, hi, unit):
+        # A device sink offers its range when a slider is first bound to it — but
+        # only adopt it for a *pristine* (never-configured) slider. A user-set or
+        # restored range must survive device rebinds (e.g. on session restore the
+        # route re-applies once the device comes back online).
+        if not self._is_pristine():
+            return
         self._min, self._max, self._unit = lo, hi, unit
         self._step = (hi - lo) / 1000.0 or self._step
         self._reconfigure()
+
+    def _is_pristine(self) -> bool:
+        return (self._min == 0.0 and self._max == 1.0
+                and abs(self._step - 0.001) < 1e-12 and not self._unit)
 
     def current_value(self):
         if self._slider.maximum() <= 0:

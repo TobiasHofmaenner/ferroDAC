@@ -1517,11 +1517,14 @@ class MainWindow(QMainWindow):
                 "Hub needs grpcio — install it in this Python environment "
                 "(pip install grpcio).", 8000)
             return
+        s = QSettings("ferroDAC", "ferroDAC")
         agent, viewer = self.hub.roles
         dlg = ConnectHubDialog(
-            addr=self.hub.addr or "localhost:50051",
-            as_agent=agent if self.hub.connected else True,
-            as_viewer=viewer if self.hub.connected else True,
+            addr=self.hub.addr or s.value("hub/addr", "localhost:50051"),
+            as_agent=agent if self.hub.connected
+            else s.value("hub/agent", True, type=bool),
+            as_viewer=viewer if self.hub.connected
+            else s.value("hub/viewer", True, type=bool),
             connected=self.hub.connected, parent=self)
         if not dlg.exec():
             return
@@ -1530,6 +1533,9 @@ class MainWindow(QMainWindow):
             return
         addr, as_agent, as_viewer = dlg.values()
         if addr and (as_agent or as_viewer):
+            s.setValue("hub/addr", addr)            # remember for next time
+            s.setValue("hub/agent", as_agent)
+            s.setValue("hub/viewer", as_viewer)
             self.hub.connect(addr, as_agent, as_viewer)
 
     def _add_tag(self):
