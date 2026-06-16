@@ -145,6 +145,34 @@ must address devices in a way that survives moving to another machine/user.
   (2) full-session save/restore to viewer-neutral JSON (+ Qt dock blob); (3) the
   remote branch in Phase 2.
 
+## Idea: Hub device registry → asset & provenance DB (noted 2026-06-16)
+
+Extends the identity registry above. Today each box mints a device UUID at
+onboarding and stores `uuid ↔ fingerprint{driver, hardware_id}` locally; that
+registry was always meant to graduate to the hub. Two moves on top:
+
+- **Hardware-anchored identity.** Where a device exposes a stable hardware id
+  (serial / EEPROM), the hub resolves `hardware_id → canonical uuid`, so the
+  *same physical unit keeps the same uuid across every box* — killing the "same
+  device, different uuid per machine" awkwardness when you move it. Devices with
+  no readable hardware id fall back to today's app-minted uuid (the fingerprint
+  is just weaker — the model already assumes graceful degradation).
+  `DeviceDescriptor.hardware_id` is already on the wire; this makes the **hub the
+  resolution authority**, not each box.
+- **Asset / provenance metadata per device record.** The hub record gains
+  human-curated fields: purchase date, calibration history (last + due), owner /
+  location, notes, and **attached documents (cal-cert PDFs)**. Attachments are
+  blobs → they ride on the deferred media/blob plane (§9).
+
+**Payoff:** auto-generate a **lab-report header** — which instrument was used,
+its serial, and its calibration provenance — straight from the run manifest +
+the hub device record. Provenance for free, and a nudge toward "is this device's
+cal still in date?" warnings (a natural tag emitter, ties to §7.3 Phase 6).
+
+Open hooks for when we build it: the device-record schema (the report join key);
+who may edit asset metadata (ties to the deferred auth seam); hardware-id
+extraction is **per-driver and opt-in** (not all expose one).
+
 ## Decided: Record mechanics + markers/tags (2026-06-15)
 
 MVP client features that double as on-ramps to the server data plane. See
