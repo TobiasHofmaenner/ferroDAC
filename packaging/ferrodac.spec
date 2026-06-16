@@ -29,10 +29,16 @@ GEN = os.path.join(ROOT, "server", "gen")
 if GEN not in sys.path:
     sys.path.insert(0, GEN)
 
-# Device drivers are discovered dynamically (pkgutil.iter_modules over
-# ferrodac.devices), so PyInstaller's static analysis can't see them — pull the
-# whole package in explicitly so every driver/source is bundled.
+# Device drivers are discovered dynamically (the registry imports them at
+# runtime), so PyInstaller's static analysis can't see them — pull the whole
+# package in explicitly so every driver/source is bundled.
 hiddenimports = collect_submodules("ferrodac")
+# collect_submodules("ferrodac") has proven UNRELIABLE on the Windows CI runner:
+# it silently returned a list WITHOUT ferrodac.devices.*, so the drivers (incl.
+# the sim devices) were never bundled and the app saw zero devices. List the
+# builtin drivers explicitly so they're guaranteed in the frozen app regardless.
+hiddenimports += [f"ferrodac.devices.{m}"
+                  for m in ("camera", "fake", "qms200", "tpg256a")]
 # pyqtgraph loads a lot lazily; include its submodules but skip the optional 3D
 # OpenGL package (needs PyOpenGL, which we don't use).
 hiddenimports += collect_submodules(
