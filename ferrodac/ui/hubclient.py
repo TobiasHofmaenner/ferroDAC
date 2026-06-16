@@ -26,6 +26,7 @@ from ..net import convert
 class HubController(QObject):
     # emitted from worker threads → slots run on the GUI thread (queued)
     _catalog = Signal(str, object)        # event_type, pb.DeviceDescriptor
+    _tag = Signal(object)                 # an incoming Marker from the hub
     status = Signal(str)                  # human status line
 
     def __init__(self, dashboard, engine, manager, parent=None):
@@ -35,10 +36,13 @@ class HubController(QObject):
         self.manager = manager
         self._agent = None
         self._viewer = None
+        self._tagsync = None
         self._agent_unsub = None
+        self._tags_wired = False
         self._local: set = set()
         self.addr = ""
         self._catalog.connect(self._on_catalog_gui)
+        self._tag.connect(self._on_tag_gui)
 
     @property
     def available(self) -> bool:
@@ -55,6 +59,7 @@ class HubController(QObject):
     # -- lifecycle -----------------------------------------------------------
     def connect(self, addr: str, as_agent: bool, as_viewer: bool) -> None:
         from ..net.agent import HubAgent
+        from ..net.tags import HubTagSync
         from ..net.viewer import HubViewer
         self.disconnect()
         self.addr = addr
@@ -74,6 +79,15 @@ class HubController(QObject):
                 on_readings=self._on_readings_net,
                 on_state=self._state_cb("viewer"))
             self._viewer.start()
+        # Tags ride their own channel and are role-independent — sync them
+        # whenever connected, regardless of agent/viewer (DESIGN §7.3).
+        self._tagsync = HubTagSync(addr, agent_id=aid,
+                                   on_tag=lambda m: self._tag.emit(m),
+                                   on_state=self._state_cb("tags"))
+        self._tagsync.start()
+        self._wire_tags()
+        for m in self.dashboard.markers.snapshot():   # push our current tags up
+            self._tagsync.publish(m)
         self.status.emit(f"hub: connecting to {addr} …")
 
     def disconnect(self) -> None:
@@ -84,16 +98,54 @@ class HubController(QObject):
             self.manager.active_changed.disconnect(self._on_active_changed)
         except (TypeError, RuntimeError):
             pass
+        self._unwire_tags()
         if self._agent is not None:
             self._agent.stop()
             self._agent = None
         if self._viewer is not None:
             self._viewer.stop()
             self._viewer = None
+        if self._tagsync is not None:
+            self._tagsync.stop()
+            self._tagsync = None
         self.dashboard.clear_remote_devices()
         if self.addr:
             self.status.emit("hub: disconnected")
         self.addr = ""
+
+    # -- tag sync (role-independent) ----------------------------------------
+    def _wire_tags(self) -> None:
+        if self._tags_wired:
+            return
+        m = self.dashboard.markers
+        m.tag_changed.connect(self._publish_tag)    # local create/edit
+        m.tag_removed.connect(self._publish_tag)    # local delete (tombstone)
+        self._tags_wired = True
+
+    def _unwire_tags(self) -> None:
+        if not self._tags_wired:
+            return
+        m = self.dashboard.markers
+        for sig in (m.tag_changed, m.tag_removed):
+            try:
+                sig.disconnect(self._publish_tag)
+            except (TypeError, RuntimeError):
+                pass
+        self._tags_wired = False
+
+    def _publish_tag(self, mid: str) -> None:
+        """A local tag changed — push it up. raw() so a just-deleted tag's
+        tombstone is publishable (get() hides it)."""
+        if self._tagsync is None:
+            return
+        marker = self.dashboard.markers.raw(mid)
+        if marker is not None:
+            self._tagsync.publish(marker)
+
+    def _on_tag_gui(self, marker) -> None:
+        """An incoming tag from the hub (GUI thread). upsert() merges LWW and
+        emits only `changed` — it never re-fires tag_changed, so no echo."""
+        self.dashboard.markers.upsert(marker)
 
     # -- agent side (GUI thread) --------------------------------------------
     def _feed_agent(self, batch) -> None:

@@ -141,6 +141,16 @@ class MarkerModel(QObject):
     def of_kind(self, kind: str) -> list[Marker]:
         return [m for m in self.all() if m.kind == kind]
 
+    def raw(self, mid: str) -> "Marker | None":
+        """The marker by id INCLUDING tombstones (unlike get()). The hub-sync
+        glue needs this to publish a just-deleted tag's tombstone."""
+        return self._markers.get(mid)
+
+    def snapshot(self) -> list[Marker]:
+        """Every marker, tombstones included — what to push to a hub on connect
+        so it converges on both our live tags and our offline deletes."""
+        return list(self._markers.values())
+
     # -- serialization (persists tombstones so offline deletes still sync) ---
     def to_list(self) -> list[dict]:
         return [marker_to_dict(m)
