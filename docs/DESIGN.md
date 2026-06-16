@@ -415,9 +415,16 @@ headless-tested end-to-end:
    snapshot-then-stream).
 4. Net: Qt-free `HubTagSync` (watch + publish, replay-on-reconnect, no echo).
 5. Qt glue: `HubController` syncs the local TagStore both ways, role-independent.
-Remaining: **(6) emitter API** — inject `emit_tag()` so devices/processors raise
-tags (alarms, gas-detected), not just the ＋Tag button. Then alarms/notifications/
-automation/audit-log all fall out as tag-stream consumers (no new plumbing).
+
+Live-validated cross-machine (create / edit / delete over a real hub).
+
+**Deferred — (6) emitter API** (intentionally held until a concrete use case
+drives its shape; the user has one in mind): inject `emit_tag()` so devices/
+processors raise tags themselves (alarms, gas-detected), not just the ＋Tag
+button. Once it exists, alarms / notifications / automation / audit-log all fall
+out as tag-stream consumers with **no new plumbing** — the channel is already
+built. Seam is ready (`TagOrigin.DEVICE`/`PROCESSOR`, `origin_id`, `scope`,
+`severity`, open `payload`).
 
 ---
 

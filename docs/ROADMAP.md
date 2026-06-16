@@ -201,8 +201,30 @@ the protocol; reference only: GPL CINF/PyExpLabSys `pfeiffer_qmg420/422.py`):
   sources (route to charts/record); spectrum recording to the folder (HDF5/block
   store per §11 — the waveform record plane).
 
+## Built: Tags as a first-class datatype + cross-instance sync (§7.3, 2026-06-16)
+
+Tags graduated from local chart markers to **events**: reliable, editable,
+durable, and **synced across instances** through the hub (LWW by id+version,
+tombstones). Built and **live-validated cross-machine** (create/edit/delete over
+a real hub). Phases 1–5 of 6 done — see [DESIGN.md §7.3](DESIGN.md):
+1. `Tag` entity + `TagStore` (LWW/tombstone); entity extracted to Qt-free
+   `core/tag.py`. 2. role-independent `Tags` gRPC service (additive). 3. hub
+   durable tag store. 4. Qt-free `HubTagSync` (watch/publish, replay-on-reconnect,
+   no echo). 5. `HubController` two-way glue.
+
+**Deferred — Phase 6: emitter API (`emit_tag`).** Inject an `emit_tag()` hook so
+**devices and processors** raise tags themselves (a threshold/alarm crossing, an
+RGA gas-detected event), not only the manual ＋Tag button. **Intentionally
+shelved until a concrete real use case drives the API shape** — the user has one
+coming; build it against that, not in the abstract. The wire seam is already in
+place (`TagOrigin.DEVICE`/`PROCESSOR`, `origin_id`, `scope`, `severity`, open
+`payload`), so when it lands, **alarms · notifications · automation · audit-log**
+all follow as pure tag-stream consumers with no new plumbing. Leaning: a generic
+threshold/alarm processor first (reusable spine), the RGA case as one instance.
+
 ## Explicitly deferred (designed, not built yet)
 
-Control · multi-station · waveform/video planes · web viewer · auth · WebDAV ·
-community driver library. All have **slots** in [DESIGN.md](DESIGN.md); none is
+Tag **emitter API** (`emit_tag` for devices/processors — see above) · control ·
+multi-station · waveform/video planes · web viewer · auth · WebDAV · community
+driver library. All have **slots** in [DESIGN.md](DESIGN.md); none is
 implemented before its phase.
