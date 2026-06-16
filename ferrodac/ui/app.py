@@ -54,6 +54,7 @@ from ..core.device import DeviceDescriptor, RateMode, SinkKind
 from ..vision.detector import FAIL_LABELS, PARSE_LABELS, WHITELIST_PRESETS, Detector
 from ..vision.ocr import available_engines, get_engine, ocr_backend, qimage_to_rgb
 from ._common import STATUS_COLORS, clear_layout, color_for, fmt
+from .hubclient import ConnectHubDialog, HubController
 from .panels import PANEL_TYPES
 from .workspace import Dashboard, WorkspaceArea
 
@@ -1407,6 +1408,10 @@ class MainWindow(QMainWindow):
         self.dashboard = Dashboard(self.workspace, engine, manager)
         self.dashboard.add_panel("chart")
 
+        # networking: publish to / consume from a hub (optional, needs grpcio)
+        self.hub = HubController(self.dashboard, engine, manager, self)
+        self.hub.status.connect(lambda msg: self.statusBar().showMessage(msg, 6000))
+
         # data plane: always-on hot history + the recorder
         self.history = HistoryBuffer()
         engine.subscribe(self.history.feed)
@@ -1492,6 +1497,9 @@ class MainWindow(QMainWindow):
             act = add.addAction(f"Add {label}")
             act.triggered.connect(lambda _=False, k=kind: self.dashboard.add_panel(k))
 
+        netmenu = self.menuBar().addMenu("&Hub")
+        self.hub_action = netmenu.addAction("Connect to hub…", self._open_hub)
+
         tb = self.addToolBar("Main")
         tb.setObjectName("MainToolBar")
         tb.setMovable(False)
@@ -1500,6 +1508,29 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self.record_action = tb.addAction("● Record", self._toggle_record)
         tb.addAction("＋ Tag", self._add_tag)
+        tb.addSeparator()
+        tb.addAction(self.hub_action)
+
+    def _open_hub(self):
+        if not self.hub.available:
+            self.statusBar().showMessage(
+                "Hub needs grpcio — install it in this Python environment "
+                "(pip install grpcio).", 8000)
+            return
+        agent, viewer = self.hub.roles
+        dlg = ConnectHubDialog(
+            addr=self.hub.addr or "localhost:50051",
+            as_agent=agent if self.hub.connected else True,
+            as_viewer=viewer if self.hub.connected else True,
+            connected=self.hub.connected, parent=self)
+        if not dlg.exec():
+            return
+        if dlg.disconnect_requested:
+            self.hub.disconnect()
+            return
+        addr, as_agent, as_viewer = dlg.values()
+        if addr and (as_agent or as_viewer):
+            self.hub.connect(addr, as_agent, as_viewer)
 
     def _add_tag(self):
         dlg = _MarkerDialog(parent=self)
@@ -1790,6 +1821,7 @@ class MainWindow(QMainWindow):
             self.recorder.stop(t_start=m.t if m else None, t_stop=t1)
         if self._autosave_on:
             self._do_autosave()
+        self.hub.disconnect()
         self.dashboard.shutdown()
         self.manager.stop()
         self.engine.shutdown()

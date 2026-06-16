@@ -18,8 +18,15 @@ to other clients, transparently — **no storage, no auth, no control yet.**
 - [x] **net layer** in the app (`ferrodac/net/`, Qt-free): `HubAgent` (publish),
       `HubViewer` (consume), `convert` (app ↔ wire) — round-trip tested with the
       real app dataclasses incl. `Trace` (`tests/net_e2e.py`).
-- [ ] Qt wiring: app publishes its `DeviceManager` devices (agent) + injects
-      remote devices into the Dashboard via the §6.1 "bind REMOTE" branch (viewer).
+- [x] **Qt wiring** (`ferrodac/ui/hubclient.py`): `HubController` (agent: publish
+      `DeviceManager` devices + Engine readings; viewer: inject hub devices into
+      the Dashboard via the §6.1 bind-REMOTE branch + feed the Engine) and the
+      `Connect to hub…` dialog (Hub menu). Remote devices grey out as placeholders
+      when their agent leaves and re-bind when it returns — verified end-to-end
+      (`tests/hub_viewer_e2e.py`: real hub + agent + Dashboard, offscreen Qt).
+
+**Milestone 1 done.** Remote devices appear and stream as if local. Next: storage
+(VictoriaMetrics / MinIO / Postgres) + the historic `query()` half, then control.
 
 Scope guard: **read-only, live-only.** Remote sinks are *visible but inert* —
 control transparency is a later milestone. Storage (VictoriaMetrics / MinIO /

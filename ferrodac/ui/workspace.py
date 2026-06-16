@@ -216,6 +216,7 @@ class Dashboard(QObject):
         # analyzer next) that consume a source and publish derived sources.
         self._processors: dict = {}
         self._proc_counters: dict = {}
+        self._remote_names: dict = {}            # uuid -> name (hub-viewer devices)
 
         self.area.on_configure = self._configure_panel
         engine.subscribe(self._on_batch)
@@ -617,6 +618,56 @@ class Dashboard(QObject):
         except ValueError:
             return
         self.engine.publish(Reading(device, source, time.time(), float("nan"), 1))
+
+    # -- remote devices (a hub viewer injects these; §6.1 "bind REMOTE") -----
+    def local_uuids(self) -> set:
+        """UUIDs of locally-bound device ports — so a viewer doesn't re-inject
+        its own devices as 'remote' when it also publishes to the same hub."""
+        out = set()
+        for key, p in self._sources.items():
+            if p.kind == "device":
+                out.add(key.split("/", 1)[0])
+        return out
+
+    def add_remote_device(self, uuid: str, name: str, sources, online: bool = True):
+        """Add/refresh a hub device's sources as local-looking ports. `sources`
+        is a list of (source_id, name, dtype, unit). Returning online re-binds an
+        existing placeholder (its routes/curves persist)."""
+        self._remote_names[uuid] = name
+        for sid, sname, dtype, unit in sources:
+            key = f"{uuid}/{sid}"
+            existing = self._sources.get(key)
+            if existing is not None and existing.kind == "remote":
+                existing.online = online
+                existing.name = sname
+            else:
+                self._sources[key] = SourcePort(
+                    key, sname, dtype, unit, name, "remote", online=online)
+        self.ports_changed.emit()
+
+    def set_remote_offline(self, uuid: str):
+        """A remote device left the catalog → greyed placeholder + a NaN gap,
+        routes kept so it re-binds when it returns (same as a local unplug)."""
+        prefix = f"{uuid}/"
+        for key, p in self._sources.items():
+            if p.kind == "remote" and key.startswith(prefix) and p.online:
+                p.online = False
+                self._emit_offline_gap(key)
+        self.ports_changed.emit()
+
+    def remove_remote_device(self, uuid: str):
+        """Drop a remote device entirely (its ports + routes)."""
+        prefix = f"{uuid}/"
+        for key in [k for k, p in self._sources.items()
+                    if p.kind == "remote" and k.startswith(prefix)]:
+            del self._sources[key]
+            self._routes.pop(key, None)
+        self._remote_names.pop(uuid, None)
+        self.ports_changed.emit()
+
+    def clear_remote_devices(self):
+        for uuid in list(self._remote_names):
+            self.set_remote_offline(uuid)
 
     # -- queries for the docks ----------------------------------------------
     def source_ports(self) -> list:

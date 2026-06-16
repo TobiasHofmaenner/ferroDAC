@@ -1,0 +1,179 @@
+"""Qt glue between the app and a hub.
+
+`HubController` owns the (Qt-free) `HubAgent`/`HubViewer` and bridges their
+worker-thread callbacks to the GUI thread via signals:
+
+  - **agent**: publish the app's active devices + their Engine readings.
+  - **viewer**: inject the hub's devices into the Dashboard (§6.1 "bind REMOTE")
+    and push their readings into the Engine, so they render like local ones.
+
+`ConnectHubDialog` is the little "where's the hub?" form (host:port + roles).
+grpcio is optional — if it's missing the menu offers a clear hint instead.
+"""
+
+from __future__ import annotations
+
+import socket
+
+from qtpy.QtCore import QObject, Signal
+from qtpy.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
+                            QLabel, QLineEdit, QVBoxLayout)
+
+from .. import net
+from ..net import convert
+
+
+class HubController(QObject):
+    # emitted from worker threads → slots run on the GUI thread (queued)
+    _catalog = Signal(str, object)        # event_type, pb.DeviceDescriptor
+    status = Signal(str)                  # human status line
+
+    def __init__(self, dashboard, engine, manager, parent=None):
+        super().__init__(parent)
+        self.dashboard = dashboard
+        self.engine = engine
+        self.manager = manager
+        self._agent = None
+        self._viewer = None
+        self._agent_unsub = None
+        self._local: set = set()
+        self.addr = ""
+        self._catalog.connect(self._on_catalog_gui)
+
+    @property
+    def available(self) -> bool:
+        return net.GRPC_AVAILABLE
+
+    @property
+    def connected(self) -> bool:
+        return self._agent is not None or self._viewer is not None
+
+    @property
+    def roles(self) -> tuple:
+        return (self._agent is not None, self._viewer is not None)
+
+    # -- lifecycle -----------------------------------------------------------
+    def connect(self, addr: str, as_agent: bool, as_viewer: bool) -> None:
+        from ..net.agent import HubAgent
+        from ..net.viewer import HubViewer
+        self.disconnect()
+        self.addr = addr
+        self._update_local()
+        aid = f"ferrodac@{socket.gethostname()}"
+        if as_agent:
+            self._agent = HubAgent(addr, agent_id=aid,
+                                   on_state=self._state_cb("agent"))
+            self._agent.start()
+            self._agent.set_devices(self.manager.active_descriptors())
+            self._agent_unsub = self.engine.subscribe(self._feed_agent)
+            self.manager.active_changed.connect(self._on_active_changed)
+        if as_viewer:
+            self._viewer = HubViewer(
+                addr,
+                on_catalog=lambda et, dev: self._catalog.emit(et, dev),
+                on_readings=self._on_readings_net,
+                on_state=self._state_cb("viewer"))
+            self._viewer.start()
+        self.status.emit(f"hub: connecting to {addr} …")
+
+    def disconnect(self) -> None:
+        if self._agent_unsub is not None:
+            self._agent_unsub()
+            self._agent_unsub = None
+        try:
+            self.manager.active_changed.disconnect(self._on_active_changed)
+        except (TypeError, RuntimeError):
+            pass
+        if self._agent is not None:
+            self._agent.stop()
+            self._agent = None
+        if self._viewer is not None:
+            self._viewer.stop()
+            self._viewer = None
+        self.dashboard.clear_remote_devices()
+        if self.addr:
+            self.status.emit("hub: disconnected")
+        self.addr = ""
+
+    # -- agent side (GUI thread) --------------------------------------------
+    def _feed_agent(self, batch) -> None:
+        if self._agent is not None:
+            self._agent.feed(batch)
+
+    def _on_active_changed(self) -> None:
+        self._update_local()
+        if self._agent is not None:
+            self._agent.set_devices(self.manager.active_descriptors())
+
+    def _update_local(self) -> None:
+        self._local = self.dashboard.local_uuids()
+
+    # -- viewer side ---------------------------------------------------------
+    def _on_readings_net(self, readings) -> None:
+        # worker thread; engine.publish is thread-safe (deque append)
+        local = self._local
+        for r in readings:
+            if r.device not in local:           # skip our own devices echoed back
+                self.engine.publish(r)
+
+    def _on_catalog_gui(self, etype, dev) -> None:
+        if dev.uuid in self.dashboard.local_uuids():
+            return                              # never inject our own as 'remote'
+        if etype in ("ADDED", "UPDATED"):
+            sources = [(s.id, s.name,
+                        convert._DTYPE_FROM_PROTO.get(s.dtype, "float"), s.unit)
+                       for s in dev.sources]
+            self.dashboard.add_remote_device(dev.uuid, dev.name, sources,
+                                              online=dev.online)
+        elif etype == "REMOVED":
+            self.dashboard.set_remote_offline(dev.uuid)
+
+    def _state_cb(self, role):
+        return lambda connected, detail: self.status.emit(f"hub {role}: {detail}")
+
+
+class ConnectHubDialog(QDialog):
+    """host:port + which role(s). Result via `values()`; `disconnect_requested`
+    is True if the user hit Disconnect."""
+
+    def __init__(self, addr="localhost:50051", as_agent=True, as_viewer=True,
+                 connected=False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Connect to hub")
+        self.setMinimumWidth(340)
+        self.disconnect_requested = False
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+        self._addr = QLineEdit(addr)
+        self._addr.setPlaceholderText("host:port  (e.g. 10.0.0.5:50051)")
+        form.addRow("Hub address", self._addr)
+        self._agent = QCheckBox("Publish my devices (agent)")
+        self._agent.setChecked(as_agent)
+        self._viewer = QCheckBox("Show the hub's devices (viewer)")
+        self._viewer.setChecked(as_viewer)
+        lay.addLayout(form)
+        lay.addWidget(self._agent)
+        lay.addWidget(self._viewer)
+        hint = QLabel("The lab machine acts as the agent; anyone else connects "
+                      "as a viewer. You can be both.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#7f8a99; font-size:11px;")
+        lay.addWidget(hint)
+
+        bb = QDialogButtonBox()
+        bb.addButton("Connect", QDialogButtonBox.AcceptRole)
+        if connected:
+            disc = bb.addButton("Disconnect", QDialogButtonBox.DestructiveRole)
+            disc.clicked.connect(self._on_disconnect)
+        bb.addButton(QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _on_disconnect(self):
+        self.disconnect_requested = True
+        self.accept()
+
+    def values(self) -> tuple:
+        return (self._addr.text().strip(),
+                self._agent.isChecked(), self._viewer.isChecked())
