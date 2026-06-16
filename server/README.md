@@ -15,9 +15,11 @@ to other clients, transparently — **no storage, no auth, no control yet.**
 - [x] hub: in-memory catalog + ingest `Session` + `Subscribe`/`Catalog`/`Watch`.
 - [x] `docker-compose.yml` (just the hub for now) + `Dockerfile`.
 - [x] headless end-to-end integration test (agent → hub → viewer) — `tests/e2e.py`.
-- [ ] agent role in the Qt app (publish local devices over `Ingest.Session`).
-- [ ] viewer role in the Qt app (remote devices resolve via the §6.1 "bind
-      REMOTE" branch and render live).
+- [x] **net layer** in the app (`ferrodac/net/`, Qt-free): `HubAgent` (publish),
+      `HubViewer` (consume), `convert` (app ↔ wire) — round-trip tested with the
+      real app dataclasses incl. `Trace` (`tests/net_e2e.py`).
+- [ ] Qt wiring: app publishes its `DeviceManager` devices (agent) + injects
+      remote devices into the Dashboard via the §6.1 "bind REMOTE" branch (viewer).
 
 Scope guard: **read-only, live-only.** Remote sinks are *visible but inert* —
 control transparency is a later milestone. Storage (VictoriaMetrics / MinIO /
@@ -31,9 +33,12 @@ server/
   proto/gen.sh                                  dockerised codegen (no host toolchain)
   gen/ferrodac_contract/v1/*_pb2*.py            generated stubs (committed)
   hub/  core.py service.py main.py              the hub (catalog + fan-out + gRPC)
-  tests/e2e.py                                  agent → hub → viewer e2e
+  tests/e2e.py    tests/net_e2e.py              hub e2e · app net-layer round-trip
   Dockerfile  docker-compose.yml  requirements.txt
 ```
+
+The app-side clients live in the **app** package (`ferrodac/net/`), not here —
+they ship with the app. `net_e2e.py` runs them against an in-process hub.
 
 ## Run it
 
