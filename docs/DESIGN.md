@@ -454,6 +454,12 @@ store on trigger.** This maps exactly onto Record + pre-roll (digitizers have
 hardware pre-trigger). Prior art: GNU Radio, HDF5/areaDetector, sigrok,
 pyqtgraph.
 
+**Decimation is a *view* concern, never an *ingest* one.** What is stored — and
+what is shipped to the hub — is always **full-rate**; the min/max-envelope
+reduction happens at *read* time, sized to the viewer (the local bench display
+for a stream too fast to move whole, or the hub answering a remote query at
+~4000 px). The raw is always the record.
+
 Consequence: **the telemetry and waveform planes are different pipelines; the
 source modality decides which.**
 
@@ -469,7 +475,9 @@ source modality decides which.**
 - **The hub always exists** — locally at minimum (embedded on the bench machine;
   packaging hides it so a solo user never sees it). "Remote" is just a shared
   hub over the network. One uniform data path, no special in-process case.
-- **Ingest** (source → hub): the gRPC contract (§5.3).
+- **Ingest** (source → hub): the gRPC contract (§5.3), **full-resolution — no
+  pre-send decimation** (decimation is read-time and viewer-sized; the store
+  always holds raw).
 - **Subscribe/stream** (hub → clients): gRPC for native clients; **WebSocket**
   for browsers. (WebSocket's bidirectionality also carries the reserved command
   path.)
@@ -478,6 +486,39 @@ source modality decides which.**
   telemetry; a block store (HDF5) for waveforms. **Bounded retention** — the hot
   store is for live + recent scrubbing; anything worth keeping is *recorded* to
   the folder.
+
+### 12.1 Topology & store-and-forward (decided 2026-06-16)
+
+The hub may run **remote** (e.g. a k8s cluster — whose infra gives easy
+TLS/ingress, storage and horizontal scale) **without** putting the network in the
+acquisition path, because the latency-critical work lives on a **local edge
+agent** in the lab, not on the hub.
+
+- **Edge agent = the acquiring node** (today: the Qt app on the bench machine,
+  same subnet/box as the instruments). It owns **acquisition, the always-on
+  buffer, local recording, and any fast/closed-loop control** — all of which stay
+  off the WAN. It **dials *out*** to the hub (egress only ⇒ no inbound exposure of
+  the lab network; TLS + token/mTLS at the hub edge).
+- **Hub = aggregation / serving / sharing** (catalog, durable store, query, remote
+  viewers, cross-station). **Never in the real-time acquisition or control loop.**
+- **What crosses the WAN is cheap and latency-tolerant:** full-resolution
+  telemetry/traces *up* (KB/s–low-MB/s — trivial), queries and live views *down*
+  (decimated at the hub to the viewer's screen), and **manual** commands (50–100 ms
+  RTT is fine for a human). **Fast automated control loops never cross it.**
+- **Store-and-forward is the agent's contract**, doing double duty: a
+  **rate-matcher** (records full-rate locally as the durable truth, forwards to the
+  hub as fast as the link allows — bursts are absorbed by the local buffer and the
+  upload catches up) and an **outage buffer** (a WAN/hub outage pauses *sharing*,
+  never *acquisition*; the agent keeps recording and **back-fills on reconnect**).
+  The local bundle is durable until its upload completes ⇒ **zero loss**. Built
+  from primitives we already have: the crash-safe append-only capture, local
+  recorded bundles, and the FileDevice / historic-as-source replay (which *is* the
+  back-fill).
+- **The one physical wall:** only a *sustained average* rate exceeding the uplink
+  (a continuous firehose) can't live-replicate to a remote hub — the buffer fills
+  faster than it drains. That tier stays **local** (or gets a fatter pipe, or ships
+  async/offline; the hub still eventually holds all of it). Bursty telemetry and
+  finite-duration captures drain fine — not a near-term regime.
 
 ---
 
