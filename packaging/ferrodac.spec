@@ -13,13 +13,21 @@
 # gracefully if `tesseract` is not on PATH.
 
 import os
+import sys
 
-from PyInstaller.utils.hooks import (collect_submodules, collect_data_files,
-                                     collect_dynamic_libs)
+from PyInstaller.utils.hooks import (collect_all, collect_submodules,
+                                     collect_data_files, collect_dynamic_libs)
 
 # The spec lives in packaging/; the app lives one level up. SPECPATH is the
 # directory containing this spec file (injected by PyInstaller).
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
+
+# The generated gRPC contract (ferrodac_contract) lives outside the ferrodac
+# package, under server/gen — put it on the path *before* any collect_submodules
+# so it's importable while PyInstaller analyses ferrodac.net.
+GEN = os.path.join(ROOT, "server", "gen")
+if GEN not in sys.path:
+    sys.path.insert(0, GEN)
 
 # Device drivers are discovered dynamically (pkgutil.iter_modules over
 # ferrodac.devices), so PyInstaller's static analysis can't see them — pull the
@@ -63,6 +71,20 @@ try:
 except Exception as exc:                                   # noqa: BLE001
     print(f"[ferrodac.spec] general OCR engine not bundled: {exc}")
 
+# Hub networking (gRPC). The contract stubs live under server/gen (outside the
+# ferrodac package); bundle them plus grpc + the protobuf runtime. Wrapped so a
+# bundling hiccup can't break the build — the feature degrades via
+# net.GRPC_AVAILABLE if grpc isn't importable at runtime.
+try:
+    hiddenimports += collect_submodules("ferrodac_contract")
+    grpc_datas, grpc_bins, grpc_hidden = collect_all("grpc")
+    datas += grpc_datas
+    binaries += grpc_bins
+    hiddenimports += grpc_hidden
+    hiddenimports += collect_submodules("google.protobuf")
+except Exception as exc:                                   # noqa: BLE001
+    print(f"[ferrodac.spec] hub networking not bundled: {exc}")
+
 # Keep only PySide6: exclude the other Qt bindings so qtpy resolves to PySide6
 # and we don't bundle a second toolkit (opencv-python-headless also avoids
 # shipping its own Qt).
@@ -74,7 +96,7 @@ excludes = [
 
 a = Analysis(
     [os.path.join(ROOT, "main.py")],     # absolute-import launcher (see main.py)
-    pathex=[ROOT],
+    pathex=[ROOT, GEN],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

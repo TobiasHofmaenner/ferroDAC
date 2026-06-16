@@ -5,6 +5,12 @@ pyqtgraph>=0.13
 numpy>=1.24
 # Real device drivers (TPG-256A serial, …):
 pyserial>=3.5
+# Hub networking — publish to / consume from a ferroDAC hub (agent + viewer).
+# Optional at runtime (the app degrades via net.GRPC_AVAILABLE), but bundled so
+# the feature works in the packaged client. The protobuf floor satisfies the
+# generated contract stubs (gencode requires runtime >= 6.33.5).
+grpcio>=1.60
+protobuf>=6.33.5
 # Computer-vision sources (camera OCR).
 opencv-python-headless>=4.8
 # The "General" OCR engine — a DNN (PP-OCR via ONNX Runtime). Much more robust
