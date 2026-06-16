@@ -92,6 +92,14 @@ _GRID_PPA = 64
 # sweep; it only catches a wedged device buffer or a serial desync.
 _STALL_TIMEOUT = 4.0
 
+# How long to wait before re-polling MBH when the buffer is empty. Polling MBH
+# hard during a slow sweep floods the instrument's command processor and makes
+# the measurement wedge (confirmed: a slow MSD=9 sweep stalls after ~1900 polls,
+# while a fast sweep that's polled only a handful of times completes cleanly).
+# Backing off lets the device measure undisturbed and accumulate a batch; a fast
+# sweep keeps its buffer full so this idle wait rarely triggers there.
+_POLL_IDLE = 0.3
+
 # Within-sweep boxcar smoothing: averages the dense raw points over a window
 # (in amu). Kept well under 1 u so noise drops without blurring the peaks.
 SMOOTH_AMU = {"Off": 0.0, "0.1 u": 0.1, "0.2 u": 0.2, "0.5 u": 0.5}
@@ -281,7 +289,7 @@ class QMS200Device(BaseDevice):
         model = ANALYZER.get(probe.analyzer, "Pfeiffer QMG")
         options = [
             Option("range", "Scan range", tuple(SCAN_RANGES), "1-50"),
-            Option("speed", "Scan speed", tuple(SPEED_OPTS), 9),
+            Option("speed", "Scan speed", tuple(SPEED_OPTS), 7),
             Option("resolution", "Resolution", tuple(RES_OPTS), 2),
             Option("readout", "Readout", tuple(READOUT_OPTS), "peak"),
             Option("mass_offset", "Mass offset", tuple(OFFSET_OPTS), 0.0),
@@ -784,7 +792,7 @@ class QMS200Device(BaseDevice):
                     _dbg(f"sweep STALLED at {len(points)} pts (no data for "
                          f"{now - last_progress:.0f}s) — restarting")
                     return points, False
-                time.sleep(0.03)
+                time.sleep(_POLL_IDLE)              # back off — don't flood MBH
             if resyncs > 30:                        # runaway desync — bail
                 _dbg("too many resyncs, aborting drain")
                 break
