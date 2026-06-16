@@ -354,6 +354,57 @@ rebind to it untouched.
   time navigator), which sets the X window and queries that range at display
   resolution.
 
+### 7.3 Tags / events — a first-class datatype (decided 2026-06-16)
+
+Tags are **events**, a category distinct from sources. Sources (scalar/trace)
+are *metrics*: continuous, have a latest value, get plotted, and are
+**expendable** (the live tier drops-oldest). A tag is the opposite — discrete,
+timestamped, semantic, and **reliable + editable + durable**. This metrics-vs-
+events split drives the whole design.
+
+- **Load-bearing rule: tags do NOT ride the Reading/sample stream.** A tag in the
+  reading `oneof` would inherit drop-oldest expendability (you'd drop an *alarm*),
+  have no edit/delete, and pollute `latest()`. Tags get their **own channel**,
+  sharing the hub but with **reliable** delivery.
+
+- **The Tag entity** (evolves `MarkerModel`, not a rewrite): `id` (UUID — so it
+  merges / edits / deletes across instances by id) · `t`, `t_end?` (points *and*
+  spans) · `label`, `comment` · **`origin`** `{user|device|processor|system, id}`
+  (provenance — what makes "devices/processors emit tags" real; enables
+  attribution, filtering, future authz) · **`scope`** `global | device:<uuid> |
+  source:<key>` · **`severity`** (info/warn/error/critical — a small closed enum)
+  · **`kind`** (an *open string*: tag/recording/alarm/calibration/… — new kinds
+  need no contract change) · **`payload`** (an *open key→value map* — the
+  machine-readable extensibility hatch) · `color` (derived from kind/severity).
+  `origin + scope + open kind + open payload` is the whole "don't cut us later"
+  kit.
+
+- **Three emitters, one store, one channel.** Emitters: a **user** (＋Tag), a
+  **device** (driver fires an injected `emit_tag()` on an event), a **processor**
+  (threshold/alarm crossings, gas-detected). Local store: `MarkerModel` graduates
+  to a `TagStore` (charts/event-log subscribe to its change signal; persisted with
+  the session/run + `log.md`). Hub: a **role-independent** tag API —
+  `PublishTag`/`DeleteTag` (any client → hub) + `WatchTags` (any client ← hub,
+  ADDED/UPDATED/REMOVED). Role-independent because a *pure viewer* must also be
+  able to create tags, so they can't ride the agent-only Session stream.
+
+- **Behaviour vs readings (all deliberate):** reliable (never dropped) · editable/
+  deletable by id, **last-write-wins by id + version** (+ tombstones; full CRDT is
+  overkill — that's for the markdown editor) · **no patch-bay routing** (tags are
+  global annotations with a `scope`; *filter on render*, don't wire tag→sink;
+  routable tags stay a future option via `scope`) · **durable** (hub `TagStore` in
+  memory now; persists with the storage milestone, so late-joining viewers get
+  full history and tags survive a hub restart).
+
+- **What it unlocks** (consume-the-tag-stream, no new plumbing): **alarms**
+  (processor emits `severity=warn`), **notifications** (a sink consumes alarm tags
+  → email/push), **automation** (a tag triggers an action — meets the reserved
+  control plane), and an **audit log** (origin + timestamp = who did what when).
+
+- Caveat: a tag carries the emitter's absolute epoch `t`, rendered against the
+  local clock (same skew caveat as readings); in replay it travels inside the run.
+  Extends §7.1 (markers as one primitive on the shared clock).
+
 ---
 
 ## 8. Project folder = system of record
