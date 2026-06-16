@@ -301,6 +301,88 @@ class Ribbon(pg.PlotWidget):
         self.head.setPos(t1)
 
 
+# ---- a compact performance HUD (resources + playback rate) ----------------
+class CpuBars(QtWidgets.QWidget):
+    """One mini bar per logical core."""
+
+    def __init__(self):
+        super().__init__()
+        self._vals = []
+        self.setFixedSize(200, 24)
+
+    def set_vals(self, vals):
+        self._vals = vals
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QtGui.QPainter(self)
+        n = max(1, len(self._vals))
+        w = self.width() / n
+        for i, v in enumerate(self._vals):
+            h = self.height() * min(100.0, v) / 100.0
+            col = "#69db7c" if v < 60 else "#ffa94d" if v < 88 else "#ff6b6b"
+            p.fillRect(QtCore.QRectF(i * w + 0.5, self.height() - h, w - 1, h),
+                       QtGui.QColor(col))
+        p.end()
+
+
+class PerfStrip(QtWidgets.QWidget):
+    """Always-on HUD: per-core CPU, RAM (+free), this app's own usage, and the
+    live playback rate — requested vs *actually achieved* (the 'can I replay
+    this in realtime?' readout that matters once tracks get dense)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(30)
+        self.setStyleSheet(f"background:{PANEL};")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(10, 3, 10, 3)
+        lay.setSpacing(14)
+        self._ps = None
+        try:
+            import psutil
+            self._ps = psutil
+            self._proc = psutil.Process()
+            psutil.cpu_percent(percpu=True)         # prime the deltas
+            self._proc.cpu_percent()
+        except Exception:
+            pass
+        lay.addWidget(self._lbl("CPU"))
+        self.bars = CpuBars()
+        lay.addWidget(self.bars)
+        self.ram = self._lbl("RAM —")
+        lay.addWidget(self.ram)
+        self.app = self._lbl("app —")
+        lay.addWidget(self.app)
+        lay.addStretch(1)
+        self.play = self._lbl("⏸ paused")
+        self.play.setStyleSheet(f"color:{ACCENT};font:600 12px;")
+        lay.addWidget(self.play)
+        self._timer = QtCore.QTimer(self, interval=1000)
+        self._timer.timeout.connect(self.refresh_res)
+        self._timer.start()
+        self.refresh_res()
+
+    def _lbl(self, t):
+        l = QtWidgets.QLabel(t)
+        l.setStyleSheet(f"color:{MUTED};font:11px;")
+        return l
+
+    def refresh_res(self):
+        if self._ps is None:
+            self.ram.setText("RAM — (pip install psutil)")
+            return
+        self.bars.set_vals(self._ps.cpu_percent(percpu=True))
+        vm = self._ps.virtual_memory()
+        self.ram.setText(f"RAM {vm.used/1e9:.1f}/{vm.total/1e9:.0f} GB "
+                         f"({vm.percent:.0f}%) · {vm.available/1e9:.1f} free")
+        self.app.setText(f"app {self._proc.cpu_percent():.0f}% cpu · "
+                         f"{self._proc.memory_info().rss/1e6:.0f} MB")
+
+    def set_play(self, text):
+        self.play.setText(text)
+
+
 # ---- the prototype window -------------------------------------------------
 class Spike(QtWidgets.QMainWindow):
     def __init__(self):
@@ -320,8 +402,12 @@ class Spike(QtWidgets.QMainWindow):
 
         self.live = False
         self.playing = False
-        self.speed = 1.0
-        self._charts: dict[str, pg.PlotWidget] = {}
+        self.speed = 30.0
+        self.load = 1                  # synthetic per-frame work multiplier
+        self.sliding = False           # play: slide a fixed-width window vs grow
+        self._last_tick = None
+        self._ratio = 0.0
+        self._charts: dict = {}
 
         self._build_ui()
         # open parked over "run 2" so all three modalities show at once
@@ -376,6 +462,9 @@ class Spike(QtWidgets.QMainWindow):
         right = QtWidgets.QWidget()
         rv = QtWidgets.QVBoxLayout(right)
         rv.setContentsMargins(6, 6, 6, 6)
+        rv.setSpacing(4)
+        self.perf = PerfStrip()
+        rv.addWidget(self.perf)
         self._charts_box = QtWidgets.QVBoxLayout()
         self._charts_box.setSpacing(4)
         cw = QtWidgets.QWidget()
@@ -405,16 +494,38 @@ class Spike(QtWidgets.QMainWindow):
         self._live_btn = QtWidgets.QToolButton(text="● Now", checkable=True)
         self._live_btn.clicked.connect(lambda: self._set_live(self._live_btn.isChecked()))
         bar.addWidget(self._live_btn)
+        self._slide_btn = QtWidgets.QToolButton(text="⇉ Sliding", checkable=True)
+        self._slide_btn.setToolTip("Play with a fixed-width window (slide) instead "
+                                   "of growing the end toward now")
+        self._slide_btn.clicked.connect(
+            lambda: setattr(self, "sliding", self._slide_btn.isChecked()))
+        bar.addWidget(self._slide_btn)
         bar.addStretch(1)
         self._clock = QtWidgets.QLabel("")
         self._clock.setStyleSheet(f"color:{MUTED};")
         bar.addWidget(self._clock)
+        bar.addWidget(self._muted("speed"))
         self._speed = QtWidgets.QComboBox()
-        self._speed.addItems(["1×", "2×", "4×", "8×"])
+        self._speed.addItems(["1×", "4×", "30×", "120×"])
+        self._speed.setCurrentText("30×")
         self._speed.currentTextChanged.connect(
             lambda t: setattr(self, "speed", float(t.rstrip("×"))))
         bar.addWidget(self._speed)
+        bar.addWidget(self._muted("sim load"))
+        self._loadbox = QtWidgets.QComboBox()
+        self._loadbox.addItems(["×1", "×10", "×50", "×200"])
+        self._loadbox.setToolTip("Inject synthetic per-frame work to mimic many "
+                                 "dense tracks — watch the actual rate drop below "
+                                 "requested and the CPU bars climb")
+        self._loadbox.currentTextChanged.connect(
+            lambda t: setattr(self, "load", int(t.lstrip("×"))))
+        bar.addWidget(self._loadbox)
         return bar
+
+    def _muted(self, t):
+        l = QtWidgets.QLabel(t)
+        l.setStyleSheet(f"color:{MUTED};font:10px;")
+        return l
 
     # -- interactions --
     def _on_source_toggle(self, it):
@@ -480,9 +591,12 @@ class Spike(QtWidgets.QMainWindow):
         self._play_btn.setText("⏸  Pause" if self.playing else "▶  Play")
         if self.playing:
             self._set_live(False)
+            self._last_tick = None
+            self._ratio = 0.0
             self._play_timer.start()
         else:
             self._play_timer.stop()
+            self.perf.set_play("⏸ paused")
 
     def _set_live(self, on):
         self.live = on
@@ -494,12 +608,31 @@ class Spike(QtWidgets.QMainWindow):
             self._jump_window(self.store.now - w, self.store.now)
 
     def _on_play_tick(self):
-        # play = the slice's END advances (the user's keystone insight)
-        self.t1 += self.speed * (self._play_timer.interval() / 1000.0) * 30
+        now = time.perf_counter()
+        wall = (now - self._last_tick) if self._last_tick else 1 / 30.0
+        self._last_tick = now
+        if self.load > 1:                          # mimic many dense tracks
+            np.sort(np.random.rand(self.load * 20000))
+        # render every frame: advance a FIXED sim step → when frames get slow,
+        # playback runs slower than realtime, and we measure exactly that.
+        w = self.t1 - self.t0
+        step = self.speed * (1 / 30.0)
+        self.t1 += step
+        if self.sliding:                           # fixed-width: slide both edges
+            self.t0 = self.t1 - w
         if self.t1 >= self.store.now:
             self.t1 = self.store.now
+            if self.sliding:
+                self.t0 = self.t1 - w
             self._toggle_play()
             self._set_live(True)
+            return
+        # achieved realtime ratio (sim-s per wall-s), capped at requested: a
+        # player paces itself, so "actual" only ever falls *below* "requested".
+        ach = min(self.speed, step / max(1e-4, wall))
+        self._ratio = (0.7 * self._ratio + 0.3 * ach) if self._ratio else ach
+        self.perf.set_play(f"▶ {self.speed:.0f}× req · {self._ratio:5.1f}× actual"
+                          f" · {1 / max(1e-4, wall):4.0f} fps")
         self.ribbon.set_window(self.t0, self.t1)
         self._refresh()
 
@@ -511,6 +644,7 @@ class Spike(QtWidgets.QMainWindow):
             self.t0 = self.t1 - w
             self.ribbon.set_window(self.t0, self.t1)
             self._refresh()
+            self.perf.set_play("● LIVE · 1.0× realtime")
         dt = self.store.now - self.t1
         tag = "● LIVE" if self.live else f"-{dt/60:4.1f} min" if dt > 1 else "now"
         self._clock.setText(f"{time.strftime('%H:%M:%S', time.localtime(self.t1))}"
