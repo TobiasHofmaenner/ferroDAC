@@ -97,7 +97,7 @@ def main() -> int:
     assert KEY in dash._panels[cpid]._curves, "route did not reach the panel"
     print("✓ route: remote source bound to a local chart")
 
-    agent.feed([Reading(device="/dev/sim0", source="p", t=1.0, value=4.2e-6)])
+    agent.feed([Reading(device=UUID, source="p", t=1.0, value=4.2e-6)])
     assert wait_for(lambda: KEY in eng.latest()), "remote reading never reached Engine"
     assert abs(eng.latest()[KEY].value - 4.2e-6) < 1e-12
     print(f"✓ readings: remote reading rendered through the Engine "

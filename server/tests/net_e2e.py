@@ -83,8 +83,8 @@ async def main() -> int:
     x = np.linspace(1, 50, 50)
     y = np.exp(-0.5 * ((x - 28) / 0.5) ** 2)
     agent.feed([
-        Reading(device="/dev/sim0", source="p", t=1.0, value=3.3e-6),
-        Reading(device="/dev/sim0", source="spec", t=1.0,
+        Reading(device=UUID, source="p", t=1.0, value=3.3e-6),
+        Reading(device=UUID, source="spec", t=1.0,
                 value=Trace(x=x, y=y, x_label="m/z", y_unit="mbar",
                             x_lo=1.0, x_hi=50.0)),
     ])

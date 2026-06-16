@@ -99,7 +99,7 @@ def main() -> int:
 
     # produce readings through the Engine exactly as a device would
     for i in range(5):
-        engine.publish(Reading(device="/dev/sim0", source="p",
+        engine.publish(Reading(device=UUID, source="p",
                                t=float(i), value=1e-6 * (i + 1)))
         pump(0.1)
 

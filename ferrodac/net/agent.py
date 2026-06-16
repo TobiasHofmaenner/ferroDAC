@@ -32,7 +32,7 @@ class HubAgent:
         self._stop: "asyncio.Event | None" = None
         self._lock = threading.Lock()
         self._devices: dict = {}               # uuid -> pb.DeviceDescriptor
-        self._inst2uuid: dict = {}             # instance_id -> uuid
+        self._id2uuid: dict = {}               # device-id (instance_id OR data_id) -> uuid
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
@@ -61,17 +61,21 @@ class HubAgent:
         pd = convert.descriptor_to_proto(descriptor)
         with self._lock:
             self._devices[pd.uuid] = pd
-            self._inst2uuid[pd.instance_id] = pd.uuid
+            # Readings are stamped with the device's *data_id* (= uuid once
+            # onboarded, else the instance_id), not necessarily the instance_id —
+            # so register both forms, mapping to the wire uuid.
+            self._id2uuid[pd.instance_id] = pd.uuid
+            self._id2uuid[pd.uuid] = pd.uuid
         self._send(pb.AgentMessage(announce=pd))
 
     def retire(self, key: str) -> None:
         """Retire by instance_id or uuid."""
         with self._lock:
-            uuid = self._inst2uuid.pop(key, key)
+            uuid = self._id2uuid.pop(key, key)
             self._devices.pop(uuid, None)
-            for inst, u in list(self._inst2uuid.items()):
+            for inst, u in list(self._id2uuid.items()):
                 if u == uuid:
-                    self._inst2uuid.pop(inst, None)
+                    self._id2uuid.pop(inst, None)
         self._send(pb.AgentMessage(retire=pb.Retire(device_uuid=uuid)))
 
     def set_devices(self, descriptors) -> None:
@@ -85,9 +89,10 @@ class HubAgent:
             self.announce(d)
 
     def feed(self, readings) -> None:
-        """Publish a batch of app Readings (keyed by instance_id)."""
+        """Publish a batch of app Readings. r.device is the device's data_id
+        (= uuid once onboarded), resolved to the wire uuid via _id2uuid."""
         with self._lock:
-            i2u = dict(self._inst2uuid)
+            i2u = dict(self._id2uuid)
         out = [convert.reading_to_proto(r, i2u[r.device])
                for r in readings if r.device in i2u]
         if out:
