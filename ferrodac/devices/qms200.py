@@ -103,7 +103,14 @@ SCAN_RANGES = [("1-50", "1–50 u"), ("1-100", "1–100 u"), ("1-200", "1–200 
                ("12-50", "12–50 u")]
 SPEED_OPTS = [(7, "0.1 s/u"), (8, "0.2 s/u"), (9, "0.5 s/u"),
               (10, "1 s/u"), (11, "2 s/u")]
-RES_OPTS = [(0, "Coarse (1/u)"), (1, "Normal (8/u)"), (2, "Fine (64/u)")]
+# Resolution code (MST) → measurement points per amu. Confirmed on the real
+# Prisma: MST=1 gives 32 points/amu (1568 pts over 1–50 u), matching the QMG
+# step encoding (0→1/64 u, 1→1/32 u, 2→1/16 u, 3→1/8 u). Higher density = better
+# resolution but a slower scan. The unit may clamp a requested code, so we read
+# the effective value back rather than trust what we sent.
+RES_OPTS = [(0, "Highest (64/u)"), (1, "High (32/u)"),
+            (2, "Normal (16/u)"), (3, "Low (8/u)")]
+PPA_FROM_MST = {0: 64, 1: 32, 2: 16, 3: 8}
 # How the raw analog sweep is reduced to a spectrum. "peak" = one point per
 # integer mass (the peak intensity in that ±0.5 u window) — the clean RGA bar
 # view, robust to noise/dropped points. "analog" = the full raw sweep.
@@ -262,7 +269,7 @@ class QMS200Device(BaseDevice):
         options = [
             Option("range", "Scan range", tuple(SCAN_RANGES), "1-50"),
             Option("speed", "Scan speed", tuple(SPEED_OPTS), 9),
-            Option("resolution", "Resolution", tuple(RES_OPTS), 1),
+            Option("resolution", "Resolution", tuple(RES_OPTS), 2),
             Option("readout", "Readout", tuple(READOUT_OPTS), "peak"),
             Option("mass_offset", "Mass offset", tuple(OFFSET_OPTS), 0.0),
         ]
@@ -316,12 +323,16 @@ class QMS200Device(BaseDevice):
         # blocks waiting for a scan to finish. deque ops are atomic in CPython.
         self._write_q: deque = deque()
         self._reconfig_pending = False
-        # Measured sweep density (points per amu). The mass of point i is
-        # `first + offset + i/_rate` — a fixed rate, not a division by a guessed
-        # total — so masses stay put regardless of truncation or dropped points.
-        # Learned from completed sweeps; range-independent, so only a resolution
-        # or speed change forces a relearn (recalibrate-on-change).
-        self._steps_per_amu = None
+        # The actual scan parameters READ BACK from the instrument (never the
+        # values we *sent* — the unit may clamp them). A completed sweep of N
+        # points is `linspace(actual_first, actual_last, N)`: the count is
+        # authoritative, so masses can't drift. _expected_n (the full point
+        # count) is learned from a completed sweep to place live partial frames;
+        # the first sweep estimates it from the read-back resolution.
+        self._actual_first = 1.0
+        self._actual_last = 50.0
+        self._actual_mst = 1
+        self._expected_n = None
         # Rolling sweep-average (driver-level, noise drops as √N). _avg_n is set
         # from the "Average sweeps" sink; _avg_buf holds recent sweeps resampled
         # onto a fixed mass grid. Only the poll thread touches _avg_buf.
@@ -372,10 +383,6 @@ class QMS200Device(BaseDevice):
         self._readout = str(self._option_values.get("readout", "peak"))
         self._offset = float(self._option_values.get("mass_offset", 0.0))
 
-    def _scan_time(self) -> float:
-        width = max(1, self._last - self._first)
-        return width * SPEED_S_PER_AMU.get(self._speed, 0.5)
-
     def _configure_scan(self) -> None:
         """Program the analyzer for a mass scan (idempotent)."""
         link = self._link
@@ -394,12 +401,36 @@ class QMS200Device(BaseDevice):
             "ARL ,-11",
         ):
             link.query(cmd)
+        self._read_scan_params()
+
+    def _read_scan_params(self) -> None:
+        """Read the *effective* scan parameters back from the instrument and use
+        them (not what we sent) to build the mass axis. The unit clamps codes —
+        e.g. a requested MST 0 comes back as 1. `MFM` reads as a float ('1.00'),
+        `MWI` as a signed int ('+49'). Falls back to the sent values on error."""
+        link = self._link
+        try:
+            self._actual_first = float(link.query("MFM"))
+            self._actual_last = self._actual_first + int(link.query("MWI"))
+            self._actual_mst = int(link.query("MST"))
+        except (ProtocolError, ValueError, IndexError) as exc:
+            self._actual_first = float(self._first)
+            self._actual_last = float(self._last)
+            self._actual_mst = self._mst
+            _dbg(f"param read-back failed ({exc}); using sent settings")
+        # seed the expected full-sweep count from the read-back resolution; a
+        # completed sweep then refines it.
+        ppa = PPA_FROM_MST.get(self._actual_mst, 32)
+        self._expected_n = int(round((self._actual_last - self._actual_first) * ppa)) + 1
+        _dbg(f"read-back: first={self._actual_first} last={self._actual_last} "
+             f"mst={self._actual_mst} → ~{self._expected_n} pts")
 
     def _read_control_state(self) -> None:
         """Sync the filament / detector / multiplier sinks to the instrument."""
         for sink_id, cmd, parse in (
             ("filament", "FIE", lambda r: r.strip() == "1"),
-            ("multiplier", "SEM", lambda r: r.strip() == "1"),
+            # SEM reads back as 'on,actualHV' e.g. '1,1248' — the on/off is field 0.
+            ("multiplier", "SEM", lambda r: r.split(",")[0].strip() == "1"),
             ("detector", "SDT", lambda r: "SEM" if (r.strip() and int(r) > 0)
              else "Faraday"),
             ("sem_voltage", "SHV", lambda r: float(r.split(",")[0].strip())),
@@ -435,14 +466,14 @@ class QMS200Device(BaseDevice):
         # Update local scan params immediately (cheap), and flag the poll thread
         # to reprogram the analyzer between scans — no GUI-thread serial I/O.
         self._apply_scan_params()
-        if key in ("resolution", "speed"):       # density may change → recalibrate
-            self._steps_per_amu = None
+        if key in ("resolution", "speed"):       # density may change → re-estimate
+            self._expected_n = None              # from the read-back on reprogram
         if key != "readout":                     # grid/signal changed → drop the
             self._avg_buf = []                   # rolling-average history
         if key in ("range", "resolution", "speed"):
-            self._reconfig_pending = True        # needs a hardware reprogram
+            self._reconfig_pending = True        # → reprogram + read params back
         # "readout" / "mass_offset" are software-only: applied on the next frame,
-        # no reprogram, no recalibration (rate is unchanged, axis stays valid).
+        # no reprogram (the read-back axis stays valid).
 
     def _send_control(self, sink_id: str, value) -> None:
         """The actual serial send for a control sink (poll thread, IO lock held)."""
@@ -519,19 +550,30 @@ class QMS200Device(BaseDevice):
 
     # -- data plane ----------------------------------------------------------
     def _empty(self):
-        n = max(2, (self._last - self._first) + 1)
-        x = np.linspace(self._first, self._last, n)
+        lo, hi = self._actual_first, self._actual_last
+        n = max(2, int(round(hi - lo)) + 1)
+        x = np.linspace(lo, hi, n)
         return Trace(x, np.full(n, np.nan), x_label="m/z", y_label="Intensity",
-                     x_lo=float(self._first), x_hi=float(self._last))
+                     x_lo=float(lo), x_hi=float(hi))
 
-    def _mass_axis(self, n: int) -> np.ndarray:
-        """The m/z of each of n sequential points: a fixed
-        `first + offset + i/steps_per_amu`, independent of the total count, so
-        masses are immune to truncation and dropped points. The first sweep of a
-        config (rate not yet measured) uses a default density and is clipped to
-        the pinned X range; the completed sweep then sets the real rate."""
-        rate = self._steps_per_amu or _DEFAULT_PPA
-        return self._first + self._offset + np.arange(n) / rate
+    def _ppa(self, n_full: int) -> float:
+        """Points per amu implied by a full sweep of `n_full` points."""
+        span = self._actual_last - self._actual_first
+        return (n_full - 1) / span if span > 0 and n_full > 1 else _DEFAULT_PPA
+
+    def _axis(self, n: int, complete: bool) -> np.ndarray:
+        """The m/z of `n` sequential points, from the READ-BACK first/last mass.
+        A complete sweep spans [first, last] exactly (linspace over its real
+        count — the count is authoritative, so masses can't drift). A partial
+        fills from the left at the full-sweep spacing so points land correctly
+        before the sweep finishes."""
+        first = self._actual_first + self._offset
+        last = self._actual_last + self._offset
+        if complete:
+            return np.linspace(first, last, max(2, n))
+        n_full = max(self._expected_n or n, 2)
+        step = (last - first) / (n_full - 1) if n_full > 1 else 1.0
+        return first + np.arange(n) * step
 
     def _reduce(self, x, y, sigma=None) -> Trace:
         """Apply the readout reduction to a (mass, intensity) signal, carrying an
@@ -556,11 +598,11 @@ class QMS200Device(BaseDevice):
         return Trace(x, y, x_label="m/z", y_label="Intensity", y_unit="A",
                      x_lo=float(self._first), x_hi=float(self._last), sigma=sigma)
 
-    def _smooth(self, y: np.ndarray) -> np.ndarray:
+    def _smooth(self, y: np.ndarray, ppa: float) -> np.ndarray:
         """Within-sweep boxcar: average the dense raw points over a window of
-        `smooth_amu` (converted to points via the sweep density). Reduces
+        `smooth_amu` (converted to points via the sweep density `ppa`). Reduces
         per-point noise; kept under 1 u so the peaks aren't blurred."""
-        w = int(round(self._smooth_amu * (self._steps_per_amu or _DEFAULT_PPA)))
+        w = int(round(self._smooth_amu * ppa))
         if w < 2 or w >= len(y):
             return y
         return np.convolve(y, np.ones(w) / w, mode="same")
@@ -585,23 +627,25 @@ class QMS200Device(BaseDevice):
 
     def _make_trace(self, points) -> Trace:
         """Reduce one raw sweep (smoothed, no averaging) — for live partials."""
-        y = self._smooth(np.asarray(points, dtype=float))
-        trace = self._reduce(self._mass_axis(len(y)), y)
+        n = len(points)
+        y = self._smooth(np.asarray(points, dtype=float),
+                         self._ppa(self._expected_n or n))
+        trace = self._reduce(self._axis(n, complete=False), y)
         return self._normalize(trace, recompute=False)
 
     def _make_avg_trace(self, points) -> Trace:
         """Reduce a completed sweep: within-sweep smoothing, then rolling-average
         the last N sweeps (noise ∝ 1/√N). Sweeps are resampled onto a fixed mass
-        grid so small per-sweep length differences don't matter and a truncated
-        sweep contributes only over the masses it actually reached."""
-        y = self._smooth(np.asarray(points, dtype=float))
+        grid so small per-sweep length differences don't matter."""
+        n = len(points)
+        y = self._smooth(np.asarray(points, dtype=float), self._ppa(n))
         if self._avg_n <= 1:
             self._avg_buf = []
-            trace = self._reduce(self._mass_axis(len(y)), y)
+            trace = self._reduce(self._axis(n, complete=True), y)
         else:
-            x = self._mass_axis(len(y))
-            grid = self._first + np.arange(int((self._last - self._first)
-                                               * _GRID_PPA) + 1) / _GRID_PPA
+            x = self._axis(n, complete=True)
+            lo, hi = self._actual_first + self._offset, self._actual_last + self._offset
+            grid = np.linspace(lo, hi, max(2, int(round((hi - lo) * _GRID_PPA)) + 1))
             gy = np.interp(grid, x, y, left=np.nan, right=np.nan)
             buf = self._avg_buf
             if buf and len(buf[0]) != len(gy):   # grid changed → restart
@@ -630,53 +674,45 @@ class QMS200Device(BaseDevice):
                 except ProtocolError as exc:
                     self._drop_link(str(exc))
                     return self._empty(), 1
-            self._service_writes()                  # apply queued controls
+            self._service_writes()                  # apply queued controls (between sweeps)
             t0 = time.monotonic()
             try:
-                self._link.query("CRU ,2")          # start a scan
-                points = self._drain_scan(source)
+                self._link.query("CRU ,2")          # start a sweep
+                points, complete = self._drain_scan(source)
             except ProtocolError as exc:
                 self._drop_link(str(exc))
                 return self._empty(), 1
         if self._reconfig_pending:                  # a setting changed mid-sweep →
             return self._empty(), 1                 # discard this mixed/partial scan
-        if len(points) < 2:
-            self._last_error = (f"scan returned {len(points)} point(s) — check "
-                                "MBH/MDB framing (FERRODAC_QMS_DEBUG=1 for trace)")
-            _dbg(f"scan drained {len(points)} points in {time.monotonic()-t0:.1f}s")
+        if not complete or len(points) < 2:
+            self._last_error = (f"sweep ended incomplete ({len(points)} point(s)) "
+                                "— FERRODAC_QMS_DEBUG=1 for the MBH/MDB trace")
+            _dbg(f"sweep incomplete: {len(points)} pts in {time.monotonic()-t0:.1f}s")
             return self._empty(), 1
-        # Learn the sweep density (points/amu) from this complete sweep. Taking
-        # the max means a one-off truncated sweep can't lower the rate; the
-        # longest (full) sweep sets it. Range-independent → reused across ranges.
-        width = max(1, self._last - self._first)
-        self._steps_per_amu = max(self._steps_per_amu or 0.0, (len(points) - 1) / width)
-        _dbg(f"scan drained {len(points)} points in {time.monotonic()-t0:.1f}s "
-             f"(range {self._first}-{self._last}, speed {self._speed}, "
-             f"rate {self._steps_per_amu:.1f}/amu, avg {self._avg_n})")
+        # Authoritative full count → density for the next sweep's live partials.
+        self._expected_n = len(points)
+        _dbg(f"sweep complete: {len(points)} pts in {time.monotonic()-t0:.1f}s "
+             f"({self._actual_first:.0f}-{self._actual_last:.0f} u, "
+             f"{self._ppa(len(points)):.0f}/amu, avg {self._avg_n})")
         return self._make_avg_trace(points), 0
 
-    def _drain_scan(self, source=None) -> list:
-        """Read one scan: pull points (MDB) as the buffer (MBH) fills, until the
-        scan stops producing or we time out. Point masses come from the measured
-        sweep density, not the count. While draining, emit throttled *partial*
-        frames so the spectrum fills in live."""
+    def _drain_scan(self, source=None):
+        """Read one sweep **deterministically**: pull points (MDB) as the buffer
+        header (MBH) reports them available, and conclude the sweep is complete
+        only when MBH **field [0] flips to 1** (the instrument's measurement-done
+        flag) and the buffer has drained. Crucially, an empty buffer alone is
+        NOT the end — mid-sweep it momentarily empties, which the old timing
+        heuristic mistook for completion and truncated the sweep. Returns
+        ``(points, complete)`` and emits throttled partial frames while draining.
+        """
         points: list = []
-        idle = 0
-        resyncs = 0
-        dropped = 0
-        emitted = 0
-        last_partial = time.monotonic()
-        drain_start = time.monotonic()
-        # Generous backstop: per-point serial readout lags the sweep, so a full
-        # scan can take well over its nominal time. The drain is abortable via
-        # `_streaming`, so a long ceiling is safe.
-        deadline = drain_start + self._scan_time() * 3.0 + 30.0
+        dropped = emitted = resyncs = 0
+        last_partial = drain_start = time.monotonic()
+        # Backstop only — normal completion is the field-[0] flag, not a timer.
+        # Sized to the expected point count (per-point serial readout dominates).
+        deadline = drain_start + max(60.0, (self._expected_n or 400) * 0.08 + 30.0)
 
         def maybe_emit():
-            # Emit a partial "sweep-so-far" a touch faster than the engine's
-            # ~50 ms (20 Hz) drain so every repaint has a fresh frame. Masses use
-            # the measured rate (or the default on the first sweep), so the live
-            # fill places points correctly; the completed sweep refines the rate.
             nonlocal last_partial, emitted
             now = time.monotonic()
             if (source is not None and self._emit is not None
@@ -687,36 +723,21 @@ class QMS200Device(BaseDevice):
                 emitted += 1
 
         while self._streaming and time.monotonic() < deadline:
-            if self._reconfig_pending:              # option changed → end this
-                break                               # sweep so the new config
-            self._service_writes()                  # applies promptly; controls
-            #                                         apply between chunks too
-            maybe_emit()
+            if self._reconfig_pending:              # option changed → end the sweep
+                break
             try:
                 hdr = self._link.query("MBH").split(",")
+                running = int(hdr[0])               # 1 = measurement complete
                 avail = int(hdr[3]) if len(hdr) > 3 else 0
             except (ProtocolError, ValueError, IndexError):
-                avail = 0
-            if avail <= 0:
-                idle += 1
-                # The analyzer sweeps for ~scan_time; because per-point readout
-                # lags, an empty buffer before then just means we briefly caught
-                # up mid-sweep — NOT the end. Only conclude the sweep is done once
-                # its nominal time has passed and the buffer has then drained.
-                swept = time.monotonic() - drain_start >= self._scan_time()
-                if points and swept and idle >= 8:
-                    break
-                time.sleep(0.05)
-                continue
-            idle = 0
+                running, avail = 0, 0
             for _ in range(avail):
                 if not self._streaming:
                     break
                 try:
                     raw = self._link.query("MDB", flush=False)
                 except ProtocolError as exc:
-                    # No clean reply at all → genuine desync; flush and re-poll.
-                    self._link.resync()
+                    self._link.resync()             # genuine desync → re-poll MBH
                     resyncs += 1
                     _dbg(f"MDB resync #{resyncs}: {exc}")
                     break
@@ -724,14 +745,18 @@ class QMS200Device(BaseDevice):
                     points.append(float(raw))
                 else:
                     # A stray non-value frame jumped the queue (e.g. '3,4,10').
-                    # Skip it WITHOUT flushing: the real buffered values are kept
-                    # and resurface on the next MBH poll, so the sweep stays
-                    # complete and the m/z axis stays aligned.
+                    # Skip it without flushing so the real values stay aligned.
                     dropped += 1
                     _dbg(f"skipped stray MDB frame {raw!r}")
-                maybe_emit()                        # stream during big bursts too
-            if resyncs > 20:                        # runaway desync — give up
+                maybe_emit()
+            if running == 1 and avail == 0:         # ← deterministic completion
+                _dbg(f"complete: {len(points)} pts, {emitted} partial(s), "
+                     f"{dropped} stray(s)")
+                return points, True
+            if avail == 0:
+                time.sleep(0.03)                    # measuring, buffer empty — wait
+            if resyncs > 30:                        # runaway desync — bail
                 _dbg("too many resyncs, aborting drain")
                 break
-        _dbg(f"{emitted} partial frame(s) emitted, {dropped} stray(s) skipped")
-        return points
+            maybe_emit()
+        return points, False                        # aborted / timed out

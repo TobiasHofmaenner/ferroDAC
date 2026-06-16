@@ -148,3 +148,24 @@ a continuously-sweeping instrument.
 - Prisma QMS 200 operating manual (BG 805 204 BE) — instrument data, no protocol.
 - *BG 805 203 BE Communication Protocol* — the authoritative ASCII spec, not
   obtainable; would also confirm whether a binary RS-232 mode exists.
+
+## Status: implemented — 2026-06-16 (v0.41.0)
+
+Rewritten and rig-confirmed via a full `FERRODAC_QMS_DEBUG=1` capture:
+
+- **Completion signal confirmed: `MBH` field [0]** (`0`=measuring, `1`=complete).
+  The old timing heuristic truncated wildly — the *same* config gave 66 / 1568 /
+  8 / 336 points across runs. Now: read points per `MBH`, conclude only when
+  `field[0]==1` and the buffer has drained. (`field [2]` is a constant `7`, not a
+  status; my earlier guess was wrong.)
+- **Resolution confirmed:** `MST=1` → 32 points/amu (1568 pts over 1–50), so
+  `PPA_FROM_MST = {0:64, 1:32, 2:16, 3:8}` (RES_OPTS relabelled; default now 2).
+- **Read-back vindicated:** sent `MST ,0`, device reports `1` (clamped). Axis is
+  `linspace(MFM_readback, MFM+MWI_readback, N)` — rate-learning deleted.
+- **Read-back formats:** `MFM`→`'1.00'` (float), `MWI`→`'+49'` (int).
+- **`SEM` bug fixed:** reads `'1,1248'` (on,HV) — parse field [0].
+- Verified headless with a mock link replaying the captured `MBH`/`MDB` pattern
+  (incl. the empty-buffer-mid-sweep header that used to truncate).
+
+Known: a full high-res sweep is inherently ~60 s over the per-point ASCII link;
+lower resolution = faster. Stray `3,4,…` frames during 1000-pt bursts are skipped.
