@@ -1,0 +1,265 @@
+// ferroDAC data-plane contract — the universal boundary (DESIGN §5.3 / §12).
+//
+// This single .proto is the source of truth for the wire types shared by the
+// Qt app (as a publishing *agent* and as a *viewer*) and the hub. Two services:
+//
+//   Ingest  (agent  -> hub):  the agent dials OUT and opens one bidirectional
+//                             Session stream. Readings/announcements go UP; the
+//                             DOWN channel is reserved for commands (control is
+//                             a later milestone). Egress-only keeps the lab
+//                             behind its firewall — no inbound exposure.
+//   Viewer  (client -> hub):  catalog (so remote devices appear "as if local")
+//                             + a live Subscribe stream. The historic query()
+//                             half of the read interface arrives with storage
+//                             in a later milestone, behind the same seam.
+//
+// Design invariants baked in here:
+//   * FULL RESOLUTION on the wire. Nothing is decimated before sending; the
+//     store always holds raw. Decimation is a read-time, viewer-sized concern.
+//   * Data-plane identity is compositional: (device_uuid, source_id). The UUID
+//     is portable, so a layout/route built against it works on any client.
+//   * Auth is a reserved seam: a `token` rides the handshake/requests now and is
+//     accepted unconditionally (allow-all stub); enforcement is a later flip to
+//     a gRPC-metadata interceptor — no message reshape needed.
+//
+// Versioned per DESIGN §17: bump CONTRACT_VERSION on a breaking change; old
+// agents/clients negotiate via the handshake.
+
+syntax = "proto3";
+
+package ferrodac.v1;
+
+// CONTRACT_VERSION = 1  (carried in Hello/Welcome/HubInfo for negotiation)
+
+// --------------------------------------------------------------------------- //
+//  Enums
+// --------------------------------------------------------------------------- //
+enum DataType {
+  DATA_TYPE_UNSPECIFIED = 0;
+  SCALAR = 1;     // double over time
+  BOOLEAN = 2;
+  TEXT = 3;
+  TRACE = 4;      // a curve/spectrum with an explicit x-axis (e.g. RGA m/z)
+  WAVEFORM = 5;   // a uniformly-sampled block (t0, dt, samples) — high-rate
+  IMAGE = 6;      // reference only (media plane, §9)
+  VIDEO = 7;      // reference only (media plane, §9)
+}
+
+enum SinkKind {
+  SINK_KIND_UNSPECIFIED = 0;
+  SETPOINT = 1;
+  TOGGLE = 2;
+  ENUM = 3;
+  ACTION = 4;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  OK = 1;
+  STALE = 2;      // last value, source not currently producing
+  WARN = 3;
+  ERROR = 4;
+}
+
+// --------------------------------------------------------------------------- //
+//  Catalog: how a device describes itself (drives "add device", UI, authz)
+// --------------------------------------------------------------------------- //
+message SourcePort {
+  string id = 1;          // unique within the device; key = device_uuid/source_id
+  string name = 2;
+  DataType dtype = 3;
+  string unit = 4;
+}
+
+message SinkPort {
+  string id = 1;
+  string name = 2;
+  SinkKind kind = 3;
+  string unit = 4;
+  optional double min = 5;
+  optional double max = 6;
+  repeated string options = 7;   // for ENUM kind
+}
+
+message DeviceDescriptor {
+  string uuid = 1;               // data-plane identity (portable across clients)
+  string instance_id = 2;        // physical address on the acquiring node
+  string name = 3;
+  string driver = 4;
+  string hardware_id = 5;        // fingerprint, e.g. "TPG256A:<usb-serial>"
+  string firmware = 6;
+  string software_version = 7;
+  bool online = 8;               // hub liveness; false = greyed placeholder (§6.1)
+  repeated SourcePort sources = 9;
+  repeated SinkPort sinks = 10;  // visible but INERT in milestone 1 (control reserved)
+}
+
+// --------------------------------------------------------------------------- //
+//  Readings: the streamed datum (same shape up on ingest and down on subscribe)
+// --------------------------------------------------------------------------- //
+message Trace {
+  repeated double x = 1;
+  repeated double y = 2;
+  string x_label = 3;
+  string y_label = 4;
+  string x_unit = 5;
+  string y_unit = 6;
+  optional double x_lo = 7;      // declared axis extent (pins the view)
+  optional double x_hi = 8;
+  repeated double sigma = 9;     // per-point noise, optional (empty = none)
+}
+
+message Waveform {
+  enum Encoding {
+    ENCODING_UNSPECIFIED = 0;
+    FLOAT32 = 1;
+    FLOAT64 = 2;
+    INT16 = 3;
+    INT32 = 4;
+  }
+  double t0 = 1;                 // block start, unix epoch seconds
+  double dt = 2;                 // sample interval, seconds
+  uint64 count = 3;              // number of samples in `samples`
+  Encoding encoding = 4;
+  bytes samples = 5;             // packed little-endian per `encoding`
+  string unit = 6;
+}
+
+message MediaRef {
+  string uri = 1;                // object key / URL — media is its own plane (§9)
+  string mime_type = 2;
+}
+
+message Reading {
+  string device_uuid = 1;        // identity: (device_uuid, source_id)
+  string source_id = 2;
+  double t = 3;                  // timestamp, unix epoch seconds
+  Status status = 4;
+  bool partial = 5;              // a still-filling trace frame (not yet complete)
+  oneof payload {                // modality-tagged value
+    double scalar = 10;
+    bool boolean = 11;
+    string text = 12;
+    Trace trace = 13;
+    Waveform waveform = 14;
+    MediaRef media = 15;
+  }
+}
+
+message ReadingBatch {
+  repeated Reading readings = 1; // batch on the wire — never per-sample RPCs
+}
+
+// --------------------------------------------------------------------------- //
+//  Ingest service — agent -> hub, one bidirectional Session per agent
+// --------------------------------------------------------------------------- //
+message Hello {
+  string token = 1;              // reserved auth seam (allow-all in M1)
+  string agent_id = 2;
+  uint32 contract_version = 3;
+}
+
+message Welcome {
+  string session_id = 1;
+  uint32 contract_version = 2;
+  string hub_version = 3;
+}
+
+message Retire {
+  string device_uuid = 1;        // device went away on the agent
+}
+
+message Heartbeat {
+  double t = 1;                  // agent liveness (unix seconds)
+}
+
+message Ack {
+  string request_id = 1;
+  bool ok = 2;
+  string detail = 3;
+}
+
+// RESERVED for the control milestone — the shape exists so the down channel is
+// ready; the hub never sends this in milestone 1.
+message Command {
+  string request_id = 1;
+  string device_uuid = 2;
+  string sink_id = 3;
+  oneof value {
+    double scalar = 4;
+    bool boolean = 5;
+    string text = 6;
+    bool trigger = 7;            // for ACTION sinks
+  }
+}
+
+// Up the Session stream (agent -> hub).
+message AgentMessage {
+  oneof msg {
+    Hello hello = 1;             // first message
+    DeviceDescriptor announce = 2;   // a device appears / its descriptor updates
+    ReadingBatch readings = 3;
+    Retire retire = 4;
+    Heartbeat heartbeat = 5;
+  }
+}
+
+// Down the Session stream (hub -> agent).
+message HubMessage {
+  oneof msg {
+    Welcome welcome = 1;         // handshake reply
+    Ack ack = 2;
+    Command command = 3;         // RESERVED — unused in milestone 1
+  }
+}
+
+service Ingest {
+  // The agent dials out and holds this stream open for the session lifetime.
+  rpc Session(stream AgentMessage) returns (stream HubMessage);
+}
+
+// --------------------------------------------------------------------------- //
+//  Viewer service — client -> hub: catalog + live subscribe
+// --------------------------------------------------------------------------- //
+message GetInfoRequest {}
+
+message HubInfo {
+  string hub_version = 1;
+  uint32 contract_version = 2;
+}
+
+message CatalogRequest {
+  string token = 1;              // reserved auth seam
+}
+
+message Catalog {
+  repeated DeviceDescriptor devices = 1;
+}
+
+message CatalogEvent {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    ADDED = 1;
+    UPDATED = 2;                 // e.g. online flag flips
+    REMOVED = 3;                 // only `device.uuid` is meaningful
+  }
+  Type type = 1;
+  DeviceDescriptor device = 2;
+}
+
+message SourceRef {
+  string device_uuid = 1;
+  string source_id = 2;
+}
+
+message SubscribeRequest {
+  string token = 1;              // reserved auth seam
+  repeated SourceRef sources = 2;  // empty = subscribe to everything
+}
+
+service Viewer {
+  rpc GetInfo(GetInfoRequest) returns (HubInfo);
+  rpc GetCatalog(CatalogRequest) returns (Catalog);
+  rpc WatchCatalog(CatalogRequest) returns (stream CatalogEvent);
+  rpc Subscribe(SubscribeRequest) returns (stream ReadingBatch);
+}

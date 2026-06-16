@@ -1,0 +1,6 @@
+# ferroDAC hub — runtime dependencies (installed inside the hub container).
+# Milestone 1: just the gRPC data plane. FastAPI/REST + storage clients
+# (victoriametrics via HTTP, minio, asyncpg/psycopg) arrive in later milestones.
+
+grpcio>=1.60
+protobuf>=4.25
