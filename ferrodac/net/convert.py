@@ -14,6 +14,8 @@ from ferrodac_contract.v1 import data_plane_pb2 as pb
 
 from ..core.device import DeviceDescriptor, SinkKind
 from ..core.reading import Reading
+from ..core.tag import (Marker, ORIGIN_USER, ORIGIN_DEVICE, ORIGIN_PROCESSOR,
+                        ORIGIN_SYSTEM)
 from ..core.trace import Trace
 
 _DTYPE_TO_PROTO = {
@@ -131,3 +133,44 @@ def reading_from_proto(m: pb.Reading) -> Reading:
     status = 0 if m.status in (pb.OK, pb.STATUS_UNSPECIFIED) else 1
     return Reading(device=m.device_uuid, source=m.source_id, t=m.t,
                    value=value, status=status, partial=m.partial)
+
+
+# --- tag (own reliable channel, §7.3) --------------------------------------- #
+_ORIGIN_TO_PROTO = {
+    ORIGIN_USER: pb.TAG_ORIGIN_USER, ORIGIN_DEVICE: pb.TAG_ORIGIN_DEVICE,
+    ORIGIN_PROCESSOR: pb.TAG_ORIGIN_PROCESSOR, ORIGIN_SYSTEM: pb.TAG_ORIGIN_SYSTEM,
+}
+_ORIGIN_FROM_PROTO = {v: k for k, v in _ORIGIN_TO_PROTO.items()}
+_SEVERITY_TO_PROTO = {
+    "info": pb.TAG_INFO, "warn": pb.TAG_WARN,
+    "error": pb.TAG_ERROR, "critical": pb.TAG_CRITICAL,
+}
+_SEVERITY_FROM_PROTO = {v: k for k, v in _SEVERITY_TO_PROTO.items()}
+
+
+def tag_to_proto(m: Marker) -> pb.Tag:
+    t = pb.Tag(
+        id=m.id, t=float(m.t), kind=m.kind or "", label=m.label or "",
+        comment=m.comment or "", color=m.color or "",
+        origin_kind=_ORIGIN_TO_PROTO.get(m.origin_kind, pb.TAG_ORIGIN_USER),
+        origin_id=m.origin_id or "", scope=m.scope or "global",
+        severity=_SEVERITY_TO_PROTO.get(m.severity, pb.TAG_INFO),
+        version=int(m.version), deleted=bool(m.deleted))
+    if m.t_end is not None:
+        t.t_end = float(m.t_end)
+    # payload values go on the wire as strings (map<string,string>)
+    for k, v in (m.payload or {}).items():
+        t.payload[str(k)] = v if isinstance(v, str) else str(v)
+    return t
+
+
+def tag_from_proto(t: pb.Tag) -> Marker:
+    return Marker(
+        id=t.id, t=t.t,
+        kind=t.kind or "tag", label=t.label, comment=t.comment,
+        color=t.color or "#ffd54f",
+        t_end=t.t_end if t.HasField("t_end") else None,
+        origin_kind=_ORIGIN_FROM_PROTO.get(t.origin_kind, ORIGIN_USER),
+        origin_id=t.origin_id, scope=t.scope or "global",
+        severity=_SEVERITY_FROM_PROTO.get(t.severity, "info"),
+        payload=dict(t.payload), version=int(t.version), deleted=bool(t.deleted))

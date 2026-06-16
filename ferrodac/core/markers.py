@@ -3,47 +3,29 @@
 A **SessionClock** gives every panel one shared time origin, so a vertical line
 drawn at instant T lands at the same place in *every* chart.
 
-A **Tag** (historically a *Marker*) is a discrete, timestamped, semantic event —
-distinct from a Source's continuous *metrics*. The same primitive serves user
-event tags, record start/stop bookmarks, and (Phase 6) device/processor-emitted
-alarms. Unlike readings, tags are **reliable, editable and durable**: they merge
-across instances **by id, last-write-wins on `version`**, with tombstones so a
-delete propagates. The `TagStore` is the single source of truth; every chart and
-the event log render its `changed` signal.
-
-`Marker`/`MarkerModel` remain the canonical class names (no churn for the many
-UI call sites); `Tag`/`TagStore` are aliases for the §7.3 vocabulary.
+The **Tag** entity itself (and its constants) lives in the Qt-free `core.tag`
+module — re-exported here so existing imports keep working. This module adds the
+Qt model on top: the **TagStore** (`MarkerModel`), a live, id-keyed collection
+that merges last-write-wins by version, tombstones deletes, and signals charts /
+the event log to re-render. Class names stay `Marker`/`MarkerModel` (no churn for
+the many UI call sites); `Tag`/`TagStore` are the §7.3 aliases.
 """
 
 from __future__ import annotations
 
 import time
 import uuid as _uuid
-from dataclasses import dataclass, field
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 from qtpy.QtCore import QObject, Signal
 
-TAG = "tag"
-RECORDING = "recording"
-# legacy point kinds (still parsed from old sessions)
-REC_START = "record-start"
-REC_STOP = "record-stop"
-
-# origin.kind — provenance of a tag (DESIGN §7.3); the "who emitted it" axis
-ORIGIN_USER = "user"
-ORIGIN_DEVICE = "device"
-ORIGIN_PROCESSOR = "processor"
-ORIGIN_SYSTEM = "system"
-
-# severity — a small CLOSED enum (kind stays an open string)
-SEVERITIES = ("info", "warn", "error", "critical")
-
-_KIND_COLOR = {TAG: "#ffd54f", RECORDING: "#ff6b6b",
-               REC_START: "#69db7c", REC_STOP: "#ff6b6b"}
-_KIND_LABEL = {RECORDING: "REC", REC_START: "REC", REC_STOP: "STOP"}
-# severity tints the marker when the kind doesn't pin a colour itself
-_SEVERITY_COLOR = {"warn": "#ffa94d", "error": "#ff6b6b", "critical": "#f03e3e"}
+# Re-export the Qt-free entity + constants so `from ..core.markers import …`
+# (Marker, RECORDING, ORIGIN_*, …) keeps resolving exactly as before.
+from .tag import (  # noqa: F401
+    TAG, RECORDING, REC_START, REC_STOP,
+    ORIGIN_USER, ORIGIN_DEVICE, ORIGIN_PROCESSOR, ORIGIN_SYSTEM,
+    SEVERITIES, Marker, Tag, color_for, marker_from_dict, marker_to_dict,
+    _KIND_LABEL, _SEVERITY_COLOR, _KIND_COLOR)
 
 
 class SessionClock:
@@ -60,35 +42,6 @@ class SessionClock:
 
     def now(self) -> float:
         return time.time()
-
-
-@dataclass
-class Marker:
-    """A tag/event on the shared session clock. See module docstring + §7.3."""
-    id: str                       # UUID hex — globally unique → cross-instance merge
-    t: float                      # absolute epoch seconds (point, or region start)
-    kind: str = TAG               # OPEN string: tag|recording|alarm|calibration|…
-    label: str = ""
-    comment: str = ""
-    color: str = "#ffd54f"
-    t_end: float | None = None    # region end (None = point, or live recording)
-    run_dir: str | None = None    # for recordings: where the captured data lives
-    # -- tag-overhaul fields (DESIGN §7.3) -----------------------------------
-    origin_kind: str = ORIGIN_USER    # user|device|processor|system
-    origin_id: str = ""               # which user/device/processor emitted it
-    scope: str = "global"             # global | device:<uuid> | source:<key>
-    severity: str = "info"            # info|warn|error|critical (closed enum)
-    payload: dict = field(default_factory=dict)   # open machine-readable map
-    version: int = 1                  # LWW: higher wins on merge by id
-    deleted: bool = False             # tombstone — propagates a delete across peers
-
-    @property
-    def is_region(self) -> bool:
-        return self.t_end is not None
-
-    @property
-    def duration(self) -> float:
-        return (self.t_end - self.t) if self.t_end is not None else 0.0
 
 
 class MarkerModel(QObject):
@@ -120,8 +73,7 @@ class MarkerModel(QObject):
         if mid is None:
             mid = _uuid.uuid4().hex
         self._label_counter += 1
-        color = color or _SEVERITY_COLOR.get(severity) \
-            or _KIND_COLOR.get(kind, "#ffd54f")
+        color = color or color_for(kind, severity)
         if not label:
             label = _KIND_LABEL.get(kind, f"T{self._label_counter}")
         m = Marker(mid, float(t), kind, label, comment, color, t_end, run_dir,
@@ -191,37 +143,14 @@ class MarkerModel(QObject):
 
     # -- serialization (persists tombstones so offline deletes still sync) ---
     def to_list(self) -> list[dict]:
-        return [self._to_dict(m)
+        return [marker_to_dict(m)
                 for m in sorted(self._markers.values(), key=lambda m: m.t)]
-
-    @staticmethod
-    def _to_dict(m: Marker) -> dict:
-        return {"id": m.id, "t": m.t, "kind": m.kind, "label": m.label,
-                "comment": m.comment, "color": m.color, "t_end": m.t_end,
-                "run_dir": m.run_dir, "origin_kind": m.origin_kind,
-                "origin_id": m.origin_id, "scope": m.scope,
-                "severity": m.severity, "payload": m.payload,
-                "version": m.version, "deleted": m.deleted}
-
-    @staticmethod
-    def marker_from_dict(d: dict) -> "Marker | None":
-        mid = d.get("id")
-        if mid is None:
-            return None
-        return Marker(
-            mid, float(d["t"]), d.get("kind", TAG), d.get("label", ""),
-            d.get("comment", ""), d.get("color", "#ffd54f"),
-            d.get("t_end"), d.get("run_dir"),
-            d.get("origin_kind", ORIGIN_USER), d.get("origin_id", ""),
-            d.get("scope", "global"), d.get("severity", "info"),
-            dict(d.get("payload") or {}), int(d.get("version", 1)),
-            bool(d.get("deleted", False)))
 
     def from_list(self, data: list[dict]) -> None:
         self._markers.clear()
         self._label_counter = 0
         for d in data or []:
-            m = self.marker_from_dict(d)
+            m = marker_from_dict(d)
             if m is not None:
                 self._markers[m.id] = m
         self.changed.emit()
@@ -232,7 +161,6 @@ class MarkerModel(QObject):
             self.changed.emit()
 
 
-# §7.3 vocabulary aliases — the canonical names stay Marker/MarkerModel so the
-# existing UI call sites are untouched; new (net/hub) code speaks Tag/TagStore.
-Tag = Marker
+# §7.3 vocabulary alias — the canonical model name stays MarkerModel so existing
+# UI call sites are untouched; new (net/hub) code speaks TagStore.
 TagStore = MarkerModel
