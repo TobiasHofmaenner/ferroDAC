@@ -391,6 +391,20 @@ MyExperiment/
 - **Nextcloud:** folder-first via the desktop sync client now (zero special
   integration); optional **WebDAV** later (headless agents, sharing, versioning).
 
+### 8.1 Project store backends (decided 2026-06-16)
+
+The project folder is reached through a **`ProjectStore`** abstraction, not the
+filesystem directly, so *where the folder lives* is pluggable:
+
+- **Local** — a folder on disk. Zero infra, **offline-capable**, single-user. The
+  default; what a solo user gets with no server.
+- **Server** — the project lives server-side (via the hub) and the folder syncs
+  through **Nextcloud** (desktop client now / WebDAV later) for durability +
+  sharing. **Required for real-time collaboration** (§10.1).
+
+In both, the files stay the **human-readable system of record**; the backend
+changes only *where* the folder lives and *who* can reach it, never the format.
+
 ---
 
 ## 9. Multimodal sources & the media plane
@@ -429,6 +443,34 @@ The goal: **automate the boring, ask only for the "why".**
 - **Passive nudges** — gentle, dismissible, never blocking: "no description",
   "setpoint changed at t=120 s but no note", "no setup photo yet".
 - **Time-correlated media** — photos/clips on the run timeline.
+
+### 10.1 Documentation editor (decided 2026-06-16)
+
+The writeup surface (`README.md`, `notes/`, run `log.md`) is edited in a
+**polished embedded *web* editor**, not a native Qt widget — polished editing,
+collaboration, LaTeX and highlighting are the web ecosystem's strength, and a
+`QWebEngineView` lets us build the component **once and reuse the identical one
+in the future web client**.
+
+- **Source + preview** (edit ⇄ render), so the **`.md` file stays the literal
+  source of truth** — no lossy rich-model serialization. Same invariant as the
+  data plane: *the human-readable file is truth; the live layer materialises to
+  it.*
+- **Stack — all mature, off-the-shelf (we implement none of the hard parts):**
+  **CodeMirror 6** (editor + native syntax highlighting; **Shiki** if richer),
+  **KaTeX** (inline LaTeX), **Yjs** (CRDT) + **Hocuspocus** (its sync server) for
+  real-time multiplayer. Optional **LSP/lint** assist in code blocks — scope TBD.
+- **Collaboration is a *server-backend* feature** (it needs the sync hub):
+  Hocuspocus runs in the cluster, persists the live doc, and **materialises the
+  `.md` into the project folder** (which Nextcloud then syncs). **Nextcloud is the
+  file backend/sync, not the collaboration engine.** The local backend gives the
+  full editor, **solo**.
+- **Cost flagged:** **QtWebEngine** (embedded Chromium) is a heavy dependency
+  (~100+ MB to the build; a separate package) plus a small JS build toolchain —
+  the price of the web-embed, worth it vs a worse native editor.
+- **Phasing:** (1) `ProjectStore` + local backend (§8.1); (2) embedded editor,
+  **solo** (edit/render, LaTeX, highlighting), reusable in the web client;
+  (3) Yjs + Hocuspocus **collaboration** as a server-backend phase-2.
 
 ---
 
