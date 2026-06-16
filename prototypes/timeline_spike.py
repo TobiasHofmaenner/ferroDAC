@@ -19,6 +19,7 @@ resolution-aware call the real charts would use. Run:
 
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -49,12 +50,23 @@ class Store(QtCore.QObject):
         super().__init__()
         self.now = NOW0
         self.sources = {
-            "ion": dict(name="Ion gauge", unit="mbar", color="#4dabf7"),
-            "temp": dict(name="Chamber temp", unit="°C", color="#ffa94d"),
-            "rga": dict(name="RGA total", unit="A", color="#69db7c"),
+            "ion": dict(name="Ion gauge", unit="mbar", color="#4dabf7", modality="scalar"),
+            "temp": dict(name="Chamber temp", unit="°C", color="#ffa94d", modality="scalar"),
+            "rga": dict(name="RGA total", unit="A", color="#69db7c", modality="scalar"),
+            "rga_spec": dict(name="RGA spectrum", unit="m/z", color="#da77f2", modality="waterfall"),
+            "cam": dict(name="Camera", unit="", color="#ff8787", modality="video"),
         }
-        self.data: dict[str, list] = {}        # id -> [t(np), v(np)]
+        self.data: dict[str, list] = {}        # id -> [t(np), v(np)]  (scalars)
         self.cover: dict[str, list] = {}       # id -> [(t0,t1), ...] coverage
+        # waterfall (spectrum-over-time): a scan every _scan_dt, peaks at masses
+        self.masses = np.linspace(1, 50, 120)
+        self.spec_t = np.array([])
+        self.spec_z = np.zeros((0, len(self.masses)))
+        self._scan_dt = 30.0
+        # video: a real CC clip mapped onto a span of the timeline (≈ run 2)
+        self.video_path = os.path.join(os.path.dirname(__file__), "assets", "sample.mp4")
+        self.vid_t0 = NOW0 - 2600
+        self.vid_span = 1200.0
         self._build()
         self.tags = [(NOW0 - 5400, "Bakeout off"), (NOW0 - 2700, "Close GV"),
                      (NOW0 - 1500, "Open GV")]
@@ -86,6 +98,36 @@ class Store(QtCore.QObject):
             self._seg("rga", s, s + burst, lambda t: 1e-9 * (1 + 0.5 * np.sin(t / 50))
                       * (1 + 0.1 * rng.standard_normal(len(t))))
             s += burst + rng.uniform(120, 360)        # gap
+        # RGA spectrum (waterfall) — one scan every _scan_dt across all history
+        self.spec_t = np.arange(a, NOW0, self._scan_dt)
+        self.spec_z = np.array([self._spectrum(t, rng) for t in self.spec_t])
+        self.cover["rga_spec"] = [(a, NOW0)]
+        # camera coverage = the span the clip is mapped onto
+        self.cover["cam"] = [(self.vid_t0, self.vid_t0 + self.vid_span)]
+
+    def _spectrum(self, t, rng):
+        """One mass spectrum at time t — peaks at common masses, water decaying
+        as we pump down, CO2 spiking around the 'Open GV' event."""
+        m = self.masses
+        frac = (t - (NOW0 - HIST)) / HIST
+        peaks = {2: 0.30, 18: 1.0 * (1 - 0.6 * frac), 28: 0.50, 32: 0.15,
+                 44: 0.20 + 0.9 * np.exp(-((t - (NOW0 - 1500)) / 300) ** 2)}
+        z = np.full_like(m, 0.02)
+        for mass, amp in peaks.items():
+            z = z + amp * np.exp(-((m - mass) / 0.5) ** 2)
+        return z * (1 + 0.05 * rng.standard_normal(len(m)))
+
+    def query_waterfall(self, t0, t1, max_cols=320):
+        """The scans inside the window, time-binned to ~max_cols. Returns the
+        image (n_time, n_mass) + its real time extent (for the chart's setRect)."""
+        i0, i1 = np.searchsorted(self.spec_t, [t0, t1])
+        ts, z = self.spec_t[i0:i1], self.spec_z[i0:i1]
+        if len(ts) == 0:
+            return np.zeros((1, len(self.masses))), t0, t1
+        if len(ts) > max_cols:
+            idx = np.linspace(0, len(ts) - 1, max_cols).astype(int)
+            ts, z = ts[idx], z[idx]
+        return z, float(ts[0]), float(ts[-1])
 
     def tick_live(self):
         """Advance now; append fresh samples to the continuous sources."""
@@ -99,6 +141,12 @@ class Store(QtCore.QObject):
                 self.data[src][0] = np.concatenate([self.data[src][0], t])
                 self.data[src][1] = np.concatenate([self.data[src][1], fn(t)])
                 self.cover[src][-1] = (self.cover[src][-1][0], self.now)
+        # fresh spectrum scan when one is due
+        if len(self.spec_t) and self.now - self.spec_t[-1] > self._scan_dt:
+            self.spec_t = np.append(self.spec_t, self.now)
+            self.spec_z = np.vstack([self.spec_z,
+                                     self._spectrum(self.now, np.random.default_rng())])
+            self.cover["rga_spec"][0] = (self.cover["rga_spec"][0][0], self.now)
 
     def query(self, src, t0, t1, max_points=2000):
         """Windowed + resolution-aware: min/max envelope buckets so peaks
@@ -128,6 +176,62 @@ class Store(QtCore.QObject):
             ts = np.insert(ts, gaps + 1, np.nan)
             vs = np.insert(vs, gaps + 1, np.nan)
         return ts, vs
+
+
+# ---- a video panel: shows the frame at the playhead ----------------------
+class VideoPanel(QtWidgets.QLabel):
+    """The video as a timeline source: at playhead time t, show the frame at the
+    mapped offset into the clip. Scrub → it scrubs; play → it plays, in lockstep
+    with the data charts. Uses OpenCV seek-and-read (frame-accurate)."""
+
+    def __init__(self, store: Store):
+        super().__init__()
+        self.store = store
+        self.setMinimumHeight(190)
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setStyleSheet(f"background:#000;color:{MUTED};")
+        self.setText("Camera — scrub into its span on the ribbon")
+        self._cap = self._cv2 = None
+        self._last = -1
+        self._frame = None
+        try:
+            import cv2
+            self._cv2 = cv2
+            cap = cv2.VideoCapture(store.video_path)
+            if cap.isOpened():
+                self._cap = cap
+                self._fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                self._dur = cap.get(cv2.CAP_PROP_FRAME_COUNT) / max(1.0, self._fps)
+        except Exception:
+            self._cap = None
+        if self._cap is None:
+            self.setText("Camera — (sample.mp4 not found / no OpenCV)")
+
+    def show_time(self, t):
+        if self._cap is None:
+            return
+        t0, span = self.store.vid_t0, self.store.vid_span
+        if not (t0 <= t <= t0 + span):
+            if self._last != -1:
+                self._last = -1
+                self.setPixmap(QtGui.QPixmap())
+                self.setText("— no camera at this time —")
+            return
+        vt = (t - t0) / span * self._dur            # mapped offset into the clip
+        fi = int(vt * self._fps)
+        if fi == self._last:
+            return
+        self._last = fi
+        self._cap.set(self._cv2.CAP_PROP_POS_MSEC, vt * 1000.0)
+        ok, frame = self._cap.read()
+        if not ok:
+            return
+        self._frame = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
+        h, w, _ = self._frame.shape
+        img = QtGui.QImage(self._frame.data, w, h, 3 * w, QtGui.QImage.Format_RGB888)
+        self.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
+            self.width(), self.height(), QtCore.Qt.KeepAspectRatio,
+            QtCore.Qt.SmoothTransformation))
 
 
 # ---- the history ribbon (coverage tracks + runs + tags + region + head) ---
@@ -220,10 +324,11 @@ class Spike(QtWidgets.QMainWindow):
         self._charts: dict[str, pg.PlotWidget] = {}
 
         self._build_ui()
-        # initial window: the last 20 min
-        self.t0, self.t1 = self.store.now - 1200, self.store.now
+        # open parked over "run 2" so all three modalities show at once
+        self.t0 = self.store.vid_t0 - 120
+        self.t1 = self.store.vid_t0 + 740
         self.ribbon.set_window(self.t0, self.t1)
-        for s in ("ion", "temp"):
+        for s in ("ion", "rga_spec", "cam"):     # one of each modality, on by default
             self._browser_sources.findItems(self.store.sources[s]["name"],
                                             QtCore.Qt.MatchExactly)[0].setCheckState(
                 QtCore.Qt.Checked)
@@ -277,7 +382,7 @@ class Spike(QtWidgets.QMainWindow):
         cw.setLayout(self._charts_box)
         rv.addWidget(cw, 1)
         self.ribbon = Ribbon(self.store)
-        self.ribbon.setFixedHeight(140)
+        self.ribbon.setFixedHeight(168)
         self.ribbon.windowChanged.connect(self._on_window)
         self.ribbon.scrubbed.connect(lambda: self._set_live(False))
         rv.addWidget(self.ribbon)
@@ -316,21 +421,40 @@ class Spike(QtWidgets.QMainWindow):
         src = it.data(QtCore.Qt.UserRole)
         on = it.checkState() == QtCore.Qt.Checked
         if on and src not in self._charts:
-            p = pg.PlotWidget()
-            p.setBackground(PANEL)
-            p.showGrid(x=True, y=True, alpha=0.15)
-            p.setLabel("left", self.store.sources[src]["name"],
-                       units=self.store.sources[src]["unit"])
-            p.setMouseEnabled(y=False)
-            if self._charts:
-                p.setXLink(next(iter(self._charts.values())))
-            p._curve = p.plot(pen=pg.mkPen(self.store.sources[src]["color"], width=2),
-                              connect="finite")
-            self._charts[src] = p
-            self._charts_box.addWidget(p)
+            w = self._make_chart(src)
+            self._charts[src] = w
+            self._charts_box.addWidget(w)
             self._refresh_one(src)
         elif not on and src in self._charts:
             self._charts.pop(src).setParent(None)
+
+    def _make_chart(self, src):
+        """One widget per modality: scalar → line, waterfall → heatmap, video →
+        frame viewer. The pg plots share one X (time) axis; the video doesn't."""
+        meta = self.store.sources[src]
+        mod = meta["modality"]
+        if mod == "video":
+            return VideoPanel(self.store)
+        p = pg.PlotWidget()
+        p.setBackground(PANEL)
+        p.showGrid(x=True, y=True, alpha=0.15)
+        p.setMouseEnabled(y=False)
+        anchor = next((w for w in self._charts.values()
+                       if isinstance(w, pg.PlotWidget)), None)
+        if anchor is not None:
+            p.setXLink(anchor)                       # all time-charts share X
+        if mod == "scalar":
+            p.setLabel("left", meta["name"], units=meta["unit"])
+            p._curve = p.plot(pen=pg.mkPen(meta["color"], width=2), connect="finite")
+        else:                                        # waterfall: X=time, Y=m/z
+            p.setLabel("left", "m/z")
+            img = pg.ImageItem()
+            cmap = pg.ColorMap([0.0, 0.5, 1.0],
+                               [(12, 10, 40), (190, 50, 90), (255, 235, 130)])
+            img.setLookupTable(cmap.getLookupTable())
+            p.addItem(img)
+            p._img = img
+        return p
 
     def _on_run_click(self, it):
         t0, t1 = it.data(QtCore.Qt.UserRole)
@@ -397,13 +521,24 @@ class Spike(QtWidgets.QMainWindow):
             self._refresh_one(src)
 
     def _refresh_one(self, src):
-        p = self._charts.get(src)
-        if p is None:
+        w = self._charts.get(src)
+        if w is None:
             return
-        x, y = self.store.query(src, self.t0, self.t1,
-                                max_points=max(400, p.width() * 2))
-        p._curve.setData(x, y)
-        p.setXRange(self.t0, self.t1, padding=0)
+        mod = self.store.sources[src]["modality"]
+        if mod == "video":
+            w.show_time(self.t1)                     # the frame at the playhead
+        elif mod == "scalar":
+            x, y = self.store.query(src, self.t0, self.t1,
+                                    max_points=max(400, w.width() * 2))
+            w._curve.setData(x, y)
+            w.setXRange(self.t0, self.t1, padding=0)
+        else:                                        # waterfall
+            z, ta, tb = self.store.query_waterfall(self.t0, self.t1)
+            w._img.setImage(z, autoLevels=True)
+            m0, m1 = float(self.store.masses[0]), float(self.store.masses[-1])
+            w._img.setRect(QtCore.QRectF(ta, m0, max(1e-6, tb - ta), m1 - m0))
+            w.setXRange(self.t0, self.t1, padding=0)
+            w.setYRange(m0, m1, padding=0)
 
 
 def main():
