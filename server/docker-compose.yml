@@ -1,0 +1,13 @@
+# Milestone 1: just the hub. Storage (VictoriaMetrics / MinIO / Postgres) and the
+# FastAPI control plane are added as later milestones. Config is via env so the
+# same image lifts cleanly into k8s.
+services:
+  hub:
+    build: .
+    image: ferrodac-hub:dev
+    container_name: ferrodac-hub
+    ports:
+      - "50051:50051"          # gRPC (Ingest + Viewer)
+    environment:
+      HUB_GRPC_ADDR: "0.0.0.0:50051"
+    restart: unless-stopped

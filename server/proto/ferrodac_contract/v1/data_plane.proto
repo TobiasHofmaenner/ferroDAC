@@ -27,7 +27,10 @@
 
 syntax = "proto3";
 
-package ferrodac.v1;
+// Distinct from the app's own `ferrodac` Python package so both the app (as an
+// agent/viewer) and the hub can import the contract without a namespace clash.
+// Generated Python module path: ferrodac_contract.v1.data_plane_pb2.
+package ferrodac_contract.v1;
 
 // CONTRACT_VERSION = 1  (carried in Hello/Welcome/HubInfo for negotiation)
 

@@ -12,12 +12,12 @@ the same images deploy to a k8s cluster later. See `docs/DESIGN.md` §5.3, §12,
 to other clients, transparently — **no storage, no auth, no control yet.**
 
 - [x] `data_plane.proto` — the wire contract (this is the load-bearing artifact).
-- [ ] hub: in-memory catalog + ingest `Session` + `Subscribe`/`Catalog`.
+- [x] hub: in-memory catalog + ingest `Session` + `Subscribe`/`Catalog`/`Watch`.
+- [x] `docker-compose.yml` (just the hub for now) + `Dockerfile`.
+- [x] headless end-to-end integration test (agent → hub → viewer) — `tests/e2e.py`.
 - [ ] agent role in the Qt app (publish local devices over `Ingest.Session`).
 - [ ] viewer role in the Qt app (remote devices resolve via the §6.1 "bind
       REMOTE" branch and render live).
-- [ ] `docker-compose.yml` (just the hub for now).
-- [ ] headless end-to-end integration test (agent → hub → viewer).
 
 Scope guard: **read-only, live-only.** Remote sinks are *visible but inert* —
 control transparency is a later milestone. Storage (VictoriaMetrics / MinIO /
@@ -27,11 +27,20 @@ Postgres) and the historic `query()` half of the read interface come after this.
 
 ```
 server/
-  proto/ferrodac/v1/data_plane.proto   the contract (source of truth)
-  proto/gen.sh                         dockerised codegen (no host toolchain)
-  gen/ferrodac/v1/*_pb2*.py            generated stubs (committed)
-  requirements.txt                     hub runtime deps
-  hub/                                 the hub app (next step)
+  proto/ferrodac_contract/v1/data_plane.proto   the contract (source of truth)
+  proto/gen.sh                                  dockerised codegen (no host toolchain)
+  gen/ferrodac_contract/v1/*_pb2*.py            generated stubs (committed)
+  hub/  core.py service.py main.py              the hub (catalog + fan-out + gRPC)
+  tests/e2e.py                                  agent → hub → viewer e2e
+  Dockerfile  docker-compose.yml  requirements.txt
+```
+
+## Run it
+
+```sh
+cd server
+docker compose up --build            # hub on :50051
+docker compose run --rm hub python tests/e2e.py    # end-to-end test
 ```
 
 ## The contract (`data_plane.proto`)

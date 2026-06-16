@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from ferrodac.v1 import data_plane_pb2 as ferrodac_dot_v1_dot_data__plane__pb2
+from ferrodac_contract.v1 import data_plane_pb2 as ferrodac__contract_dot_v1_dot_data__plane__pb2
 
 GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in ferrodac/v1/data_plane_pb2_grpc.py depends on'
+        + ' but the generated code in ferrodac_contract/v1/data_plane_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -35,9 +35,9 @@ class IngestStub:
             channel: A grpc.Channel.
         """
         self.Session = channel.stream_stream(
-                '/ferrodac.v1.Ingest/Session',
-                request_serializer=ferrodac_dot_v1_dot_data__plane__pb2.AgentMessage.SerializeToString,
-                response_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.HubMessage.FromString,
+                '/ferrodac_contract.v1.Ingest/Session',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.AgentMessage.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.HubMessage.FromString,
                 _registered_method=True)
 
 
@@ -56,14 +56,14 @@ def add_IngestServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Session': grpc.stream_stream_rpc_method_handler(
                     servicer.Session,
-                    request_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.AgentMessage.FromString,
-                    response_serializer=ferrodac_dot_v1_dot_data__plane__pb2.HubMessage.SerializeToString,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.AgentMessage.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.HubMessage.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'ferrodac.v1.Ingest', rpc_method_handlers)
+            'ferrodac_contract.v1.Ingest', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('ferrodac.v1.Ingest', rpc_method_handlers)
+    server.add_registered_method_handlers('ferrodac_contract.v1.Ingest', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -84,9 +84,9 @@ class Ingest:
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/ferrodac.v1.Ingest/Session',
-            ferrodac_dot_v1_dot_data__plane__pb2.AgentMessage.SerializeToString,
-            ferrodac_dot_v1_dot_data__plane__pb2.HubMessage.FromString,
+            '/ferrodac_contract.v1.Ingest/Session',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.AgentMessage.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.HubMessage.FromString,
             options,
             channel_credentials,
             insecure,
@@ -108,24 +108,24 @@ class ViewerStub:
             channel: A grpc.Channel.
         """
         self.GetInfo = channel.unary_unary(
-                '/ferrodac.v1.Viewer/GetInfo',
-                request_serializer=ferrodac_dot_v1_dot_data__plane__pb2.GetInfoRequest.SerializeToString,
-                response_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.HubInfo.FromString,
+                '/ferrodac_contract.v1.Viewer/GetInfo',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.GetInfoRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.HubInfo.FromString,
                 _registered_method=True)
         self.GetCatalog = channel.unary_unary(
-                '/ferrodac.v1.Viewer/GetCatalog',
-                request_serializer=ferrodac_dot_v1_dot_data__plane__pb2.CatalogRequest.SerializeToString,
-                response_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.Catalog.FromString,
+                '/ferrodac_contract.v1.Viewer/GetCatalog',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Catalog.FromString,
                 _registered_method=True)
         self.WatchCatalog = channel.unary_stream(
-                '/ferrodac.v1.Viewer/WatchCatalog',
-                request_serializer=ferrodac_dot_v1_dot_data__plane__pb2.CatalogRequest.SerializeToString,
-                response_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.CatalogEvent.FromString,
+                '/ferrodac_contract.v1.Viewer/WatchCatalog',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogEvent.FromString,
                 _registered_method=True)
         self.Subscribe = channel.unary_stream(
-                '/ferrodac.v1.Viewer/Subscribe',
-                request_serializer=ferrodac_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
-                response_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.ReadingBatch.FromString,
+                '/ferrodac_contract.v1.Viewer/Subscribe',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.FromString,
                 _registered_method=True)
 
 
@@ -161,29 +161,29 @@ def add_ViewerServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'GetInfo': grpc.unary_unary_rpc_method_handler(
                     servicer.GetInfo,
-                    request_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.GetInfoRequest.FromString,
-                    response_serializer=ferrodac_dot_v1_dot_data__plane__pb2.HubInfo.SerializeToString,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.GetInfoRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.HubInfo.SerializeToString,
             ),
             'GetCatalog': grpc.unary_unary_rpc_method_handler(
                     servicer.GetCatalog,
-                    request_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.CatalogRequest.FromString,
-                    response_serializer=ferrodac_dot_v1_dot_data__plane__pb2.Catalog.SerializeToString,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Catalog.SerializeToString,
             ),
             'WatchCatalog': grpc.unary_stream_rpc_method_handler(
                     servicer.WatchCatalog,
-                    request_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.CatalogRequest.FromString,
-                    response_serializer=ferrodac_dot_v1_dot_data__plane__pb2.CatalogEvent.SerializeToString,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogEvent.SerializeToString,
             ),
             'Subscribe': grpc.unary_stream_rpc_method_handler(
                     servicer.Subscribe,
-                    request_deserializer=ferrodac_dot_v1_dot_data__plane__pb2.SubscribeRequest.FromString,
-                    response_serializer=ferrodac_dot_v1_dot_data__plane__pb2.ReadingBatch.SerializeToString,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'ferrodac.v1.Viewer', rpc_method_handlers)
+            'ferrodac_contract.v1.Viewer', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('ferrodac.v1.Viewer', rpc_method_handlers)
+    server.add_registered_method_handlers('ferrodac_contract.v1.Viewer', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -204,9 +204,9 @@ class Viewer:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ferrodac.v1.Viewer/GetInfo',
-            ferrodac_dot_v1_dot_data__plane__pb2.GetInfoRequest.SerializeToString,
-            ferrodac_dot_v1_dot_data__plane__pb2.HubInfo.FromString,
+            '/ferrodac_contract.v1.Viewer/GetInfo',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.GetInfoRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.HubInfo.FromString,
             options,
             channel_credentials,
             insecure,
@@ -231,9 +231,9 @@ class Viewer:
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ferrodac.v1.Viewer/GetCatalog',
-            ferrodac_dot_v1_dot_data__plane__pb2.CatalogRequest.SerializeToString,
-            ferrodac_dot_v1_dot_data__plane__pb2.Catalog.FromString,
+            '/ferrodac_contract.v1.Viewer/GetCatalog',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.Catalog.FromString,
             options,
             channel_credentials,
             insecure,
@@ -258,9 +258,9 @@ class Viewer:
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/ferrodac.v1.Viewer/WatchCatalog',
-            ferrodac_dot_v1_dot_data__plane__pb2.CatalogRequest.SerializeToString,
-            ferrodac_dot_v1_dot_data__plane__pb2.CatalogEvent.FromString,
+            '/ferrodac_contract.v1.Viewer/WatchCatalog',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.CatalogEvent.FromString,
             options,
             channel_credentials,
             insecure,
@@ -285,9 +285,9 @@ class Viewer:
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/ferrodac.v1.Viewer/Subscribe',
-            ferrodac_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
-            ferrodac_dot_v1_dot_data__plane__pb2.ReadingBatch.FromString,
+            '/ferrodac_contract.v1.Viewer/Subscribe',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.FromString,
             options,
             channel_credentials,
             insecure,

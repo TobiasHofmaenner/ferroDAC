@@ -14,8 +14,8 @@ docker run --rm -e HU="$(id -u)" -e HG="$(id -g)" -v "$ROOT":/work -w /work \
     pip install -q grpcio-tools
     mkdir -p gen
     python -m grpc_tools.protoc -I proto --python_out=gen --grpc_python_out=gen \
-      proto/ferrodac/v1/data_plane.proto
-    touch gen/ferrodac/__init__.py gen/ferrodac/v1/__init__.py
+      proto/ferrodac_contract/v1/data_plane.proto
+    touch gen/ferrodac_contract/__init__.py gen/ferrodac_contract/v1/__init__.py
     chown -R "$HU:$HG" gen
   '
-echo "stubs regenerated → server/gen/ferrodac/v1/"
+echo "stubs regenerated → server/gen/ferrodac_contract/v1/"
