@@ -1871,12 +1871,43 @@ def apply_dark_theme(app: QApplication) -> None:
     )
 
 
+def _setup_logging() -> str:
+    """File + console logging so the frozen (windowed) app is diagnosable.
+    Returns the log path. The file is rewritten each run (a fresh diagnostic)."""
+    import logging
+    import os
+
+    from qtpy.QtCore import QStandardPaths
+    docs = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) \
+        or os.path.expanduser("~")
+    handlers = [logging.StreamHandler()]
+    path = ""
+    try:
+        d = os.path.join(docs, "ferroDAC")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "ferrodac.log")
+        handlers.insert(0, logging.FileHandler(path, mode="w", encoding="utf-8"))
+    except Exception:
+        pass
+    logging.basicConfig(
+        level=logging.INFO, force=True, handlers=handlers,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    return path
+
+
 def main(argv=None) -> int:
+    import logging
     import os
     import sys
 
     from qtpy.QtCore import QStandardPaths
+    from .. import __version__
     from ..core.identity import DeviceRegistry
+
+    logpath = _setup_logging()
+    log = logging.getLogger("app")
+    log.info("ferroDAC %s starting (frozen=%s); log → %s",
+             __version__, getattr(sys, "frozen", False), logpath)
 
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("ferroDAC")
@@ -1890,6 +1921,8 @@ def main(argv=None) -> int:
     registry = DeviceRegistry(os.path.join(cfg, "registry.json") if cfg else None)
 
     drivers = load_builtin_drivers()
+    log.info("loaded %d driver(s): %s", len(drivers),
+             ", ".join(getattr(d, "driver", "?") for d in drivers) or "—")
     engine = Engine()
     manager = DeviceManager(drivers, engine=engine, registry=registry)
     win = MainWindow(manager, engine)

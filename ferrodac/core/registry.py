@@ -33,13 +33,17 @@ def load_package(package: ModuleType, fallback=()) -> None:
     and to a single module failing to import, which must never hide the rest
     (e.g. a Windows camera/QtMultimedia hiccup shouldn't also lose the sim + COM
     drivers)."""
-    names = [info.name for info in pkgutil.iter_modules(package.__path__)]
-    if not names:
-        names = list(fallback)
-    for name in names:
+    names = set(fallback)                              # always load the builtins
+    try:
+        names |= {info.name for info in pkgutil.iter_modules(package.__path__)}
+    except Exception as exc:                            # can RAISE in a frozen build
+        log.warning("iter_modules(%s) failed (%s) — using fallback list only",
+                    package.__name__, exc)
+    for name in sorted(names):
         try:
             importlib.import_module(f"{package.__name__}.{name}")
-        except Exception as exc:                       # noqa: BLE001
+            log.info("loaded device module %r", name)
+        except Exception as exc:                        # one bad driver mustn't hide the rest
             log.warning("device module %r failed to import: %s", name, exc)
 
 

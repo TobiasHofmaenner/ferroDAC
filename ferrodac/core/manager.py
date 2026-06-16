@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Sequence
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
@@ -9,6 +10,8 @@ from qtpy.QtCore import QObject, QThread, Signal
 
 from .device import Device, DeviceDescriptor
 from .identity import DeviceRegistry, Fingerprint
+
+log = logging.getLogger("manager")
 
 
 class _DiscoveryWorker(QThread):
@@ -103,6 +106,8 @@ class DeviceManager(QObject):
 
     # -- discovery merge -----------------------------------------------------
     def _merge_found(self, found: list) -> None:
+        log.info("discovery found %d device(s): %s", len(found),
+                 ", ".join(d.instance_id for d in found) or "—")
         seen = {d.instance_id for d in found}
         changed = False
         for d in found:
