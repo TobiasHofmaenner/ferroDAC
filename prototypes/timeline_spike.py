@@ -67,12 +67,15 @@ class Store(QtCore.QObject):
         self.video_path = os.path.join(os.path.dirname(__file__), "assets", "sample.mp4")
         self.vid_t0 = NOW0 - 2600
         self.vid_span = 1200.0
+        self.disk: dict = {}               # id -> {mm, t0, dt, n}  (on-disk sources)
+        self.archive_t0 = None
         self._build()
         self.tags = [(NOW0 - 5400, "Bakeout off"), (NOW0 - 2700, "Close GV"),
                      (NOW0 - 1500, "Open GV")]
         self.runs = [("run 1 — pumpdown", NOW0 - 5200, NOW0 - 4200, "run"),
                      ("run 2 — leak check", NOW0 - 2600, NOW0 - 1400, "run"),
                      ("export — water peak", NOW0 - 1300, NOW0 - 900, "export")]
+        self._load_disk()
 
     def _seg(self, src, t0, t1, fn):
         t = np.arange(t0, t1, DT)
@@ -148,9 +151,57 @@ class Store(QtCore.QObject):
                                      self._spectrum(self.now, np.random.default_rng())])
             self.cover["rga_spec"][0] = (self.cover["rga_spec"][0][0], self.now)
 
+    def _load_disk(self):
+        """Attach an on-disk dataset (gen_data.py) if one is present: memmap each
+        source READ-ONLY (no RAM load) and register it like any other scalar. The
+        manifest's presence means generation finished."""
+        ds = os.path.join(os.path.dirname(__file__), "assets", "dataset")
+        man = os.path.join(ds, "manifest.json")
+        if not os.path.exists(man):
+            return
+        import json
+        with open(man) as fh:
+            m = json.load(fh)
+        gt0, dt, n = m["t0"], m["dt"], int(m["n"])
+        self.archive_t0 = gt0
+        for s in m["sources"]:
+            mm = np.memmap(os.path.join(ds, s["file"]), dtype=np.float32, mode="r")
+            self.disk[s["id"]] = {"t0": gt0, "dt": dt, "n": min(n, len(mm)), "mm": mm}
+            self.sources[s["id"]] = dict(name=s["name"], unit="V",
+                                         color=s.get("color", "#74c0fc"),
+                                         modality="scalar")
+            self.cover[s["id"]] = [(gt0, gt0 + n * dt)]
+
+    def _query_disk(self, src, t0, t1, max_points=2000):
+        """Window a memmapped source: index math → slice (reads only those pages
+        from disk) → min/max envelope. NB: min/max must touch every sample in the
+        window, so a WIDE window on a high-rate source is inherently a big read —
+        the very reason real stores keep precomputed multi-resolution rollups."""
+        d = self.disk[src]
+        gt0, dt, n, mm = d["t0"], d["dt"], d["n"], d["mm"]
+        i0 = max(0, int((t0 - gt0) / dt))
+        i1 = min(n, int((t1 - gt0) / dt))
+        if i1 - i0 < 2:
+            return np.array([]), np.array([])
+        seg = mm[i0:i1]                          # disk read happens on access below
+        k = i1 - i0
+        if k <= max_points:
+            return gt0 + (np.arange(i0, i1) * dt), np.asarray(seg)
+        nb = max(1, max_points // 2)
+        usable = (k // nb) * nb
+        block = np.asarray(seg[:usable]).reshape(nb, -1)   # forces the page reads
+        mins, maxs = block.min(axis=1), block.max(axis=1)
+        cx = gt0 + (i0 + (np.arange(nb) + 0.5) * (usable / nb)) * dt
+        x = np.repeat(cx, 2)
+        y = np.empty(nb * 2, dtype=float)
+        y[0::2], y[1::2] = mins, maxs
+        return x, y
+
     def query(self, src, t0, t1, max_points=2000):
         """Windowed + resolution-aware: min/max envelope buckets so peaks
         survive downsampling. Returns x, y with NaN across coverage gaps."""
+        if src in self.disk:
+            return self._query_disk(src, t0, t1, max_points)
         t, v = self.data[src]
         i0, i1 = np.searchsorted(t, [t0, t1])
         ts, vs = t[i0:i1], v[i0:i1]
@@ -471,7 +522,7 @@ class Spike(QtWidgets.QMainWindow):
         cw.setLayout(self._charts_box)
         rv.addWidget(cw, 1)
         self.ribbon = Ribbon(self.store)
-        self.ribbon.setFixedHeight(168)
+        self.ribbon.setFixedHeight(min(300, 96 + 10 * len(self.store.sources)))
         self.ribbon.windowChanged.connect(self._on_window)
         self.ribbon.scrubbed.connect(lambda: self._set_live(False))
         rv.addWidget(self.ribbon)
