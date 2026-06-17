@@ -12,5 +12,6 @@ server-side. Scalar sources for now; trace/waveform epochs are the next slice.
 """
 
 from .zarrstore import ZarrStore
+from .resolver import RamTier, Resolver
 
-__all__ = ["ZarrStore"]
+__all__ = ["ZarrStore", "Resolver", "RamTier"]

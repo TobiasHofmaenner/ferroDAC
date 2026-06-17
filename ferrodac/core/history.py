@@ -34,3 +34,9 @@ class HistoryBuffer:
 
     def keys(self) -> list:
         return list(self._data)
+
+    def span(self, key: str):
+        """(oldest, newest) timestamp held for `key`, or None — the coverage
+        this tier advertises to the resolver (DESIGN §7.4)."""
+        dq = self._data.get(key)
+        return (dq[0][0], dq[-1][0]) if dq else None
