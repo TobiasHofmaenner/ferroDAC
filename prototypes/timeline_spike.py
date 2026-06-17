@@ -556,6 +556,11 @@ class Spike(QtWidgets.QMainWindow):
                        "— pan/scroll-zoom the ribbon to frame a region, then snap "
                        "the selection to it (no handle-dragging)")
         bar.addWidget(fit)
+        frame = mk("⤡ Frame slice", self._frame_slice)
+        frame.setToolTip("Reverse of Fit view: zoom the finder to frame the current "
+                         "selection (with margin) so the end-handles are easy to "
+                         "grab for fine-tuning. Doesn't change the slice.")
+        bar.addWidget(frame)
         bar.addStretch(1)
         self._clock = QtWidgets.QLabel("")
         self._clock.setStyleSheet(f"color:{MUTED};")
@@ -653,6 +658,17 @@ class Spike(QtWidgets.QMainWindow):
             return
         self._set_live(False)
         self._jump_window(x0, x1)
+
+    def _frame_slice(self):
+        """Reverse of Fit view: zoom the finder to frame the current slice, with
+        a margin so the end-handles sit inset and grabbable. Leaves the slice
+        (and the charts) untouched — this only moves the ribbon's view."""
+        w = self.t1 - self.t0
+        if w <= 0:
+            return
+        pad = w * 0.1
+        self.ribbon.getPlotItem().getViewBox().setXRange(
+            self.t0 - pad, self.t1 + pad, padding=0)
 
     def _toggle_play(self):
         self.playing = not self.playing
