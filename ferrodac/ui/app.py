@@ -1422,12 +1422,15 @@ class MainWindow(QMainWindow):
         # restart and a span can be recorded retroactively. Degrades to the RAM
         # ring if zarr/disk is unavailable.
         self.store_writer = None
+        self.resolver = None
         try:
-            from ..store import StoreWriter, ZarrStore
+            from ..store import RamTier, Resolver, StoreWriter, ZarrStore
             os.makedirs(self._app_dir(), exist_ok=True)
-            self.store_writer = StoreWriter(
-                ZarrStore(os.path.join(self._app_dir(), "store.zarr")))
+            store = ZarrStore(os.path.join(self._app_dir(), "store.zarr"))
+            self.store_writer = StoreWriter(store)
             self.store_writer.attach(engine)
+            # the read path: one query() over the live RAM ring + the durable store
+            self.resolver = Resolver([RamTier(self.history), store])
         except Exception as exc:                       # noqa: BLE001
             import logging
             logging.getLogger("ferrodac").warning("durable store disabled: %s", exc)
@@ -1522,8 +1525,20 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self.record_action = tb.addAction("● Record", self._toggle_record)
         tb.addAction("＋ Tag", self._add_tag)
+        tb.addAction("🕑 Timeline", self._open_timeline)
         tb.addSeparator()
         tb.addAction(self.hub_action)
+
+    def _open_timeline(self):
+        if self.resolver is None:
+            self.statusBar().showMessage("Durable store unavailable — timeline disabled", 6000)
+            return
+        if getattr(self, "_timeline_win", None) is None:
+            from .timeline import TimelineWindow
+            self._timeline_win = TimelineWindow(self.resolver, self.store_writer.store, self)
+        self._timeline_win.show()
+        self._timeline_win.raise_()
+        self._timeline_win.activateWindow()
 
     def _open_hub(self):
         if not self.hub.available:
