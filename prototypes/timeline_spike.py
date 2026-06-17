@@ -551,6 +551,11 @@ class Spike(QtWidgets.QMainWindow):
         self._slide_btn.clicked.connect(
             lambda: setattr(self, "sliding", self._slide_btn.isChecked()))
         bar.addWidget(self._slide_btn)
+        fit = mk("⤢ Fit view", self._fit_to_view)
+        fit.setToolTip("Set the slice to whatever the finder is currently showing "
+                       "— pan/scroll-zoom the ribbon to frame a region, then snap "
+                       "the selection to it (no handle-dragging)")
+        bar.addWidget(fit)
         bar.addStretch(1)
         self._clock = QtWidgets.QLabel("")
         self._clock.setStyleSheet(f"color:{MUTED};")
@@ -636,6 +641,18 @@ class Spike(QtWidgets.QMainWindow):
         self.t0, self.t1 = t0, t1
         self.ribbon.set_window(t0, t1)
         self._refresh()
+
+    def _fit_to_view(self):
+        """Snap the slice to whatever the finder currently shows. You navigate
+        the ribbon (drag = pan, scroll = zoom) to frame a region, then fit — so
+        the drag handles become fine-tuning, not the primary mechanism."""
+        x0, x1 = self.ribbon.getPlotItem().getViewBox().viewRange()[0]
+        lo = self.store.archive_t0 if self.store.archive_t0 else (NOW0 - HIST)
+        x0, x1 = max(x0, lo), min(x1, self.store.now)
+        if x1 - x0 < 1e-6:
+            return
+        self._set_live(False)
+        self._jump_window(x0, x1)
 
     def _toggle_play(self):
         self.playing = not self.playing
