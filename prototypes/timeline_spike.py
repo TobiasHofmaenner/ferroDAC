@@ -69,6 +69,9 @@ class Store(QtCore.QObject):
         self.vid_span = 1200.0
         self.disk: dict = {}               # id -> {mm, t0, dt, n}  (on-disk sources)
         self.archive_t0 = None
+        self._proc_sources = {"ion", "temp"}   # have procedural year-long history
+        self.year0 = NOW0 - 365 * 86400
+        self.sessions: list = []
         self._build()
         self.tags = [(NOW0 - 5400, "Bakeout off"), (NOW0 - 2700, "Close GV"),
                      (NOW0 - 1500, "Open GV")]
@@ -76,6 +79,46 @@ class Store(QtCore.QObject):
                      ("run 2 — leak check", NOW0 - 2600, NOW0 - 1400, "run"),
                      ("export — water peak", NOW0 - 1300, NOW0 - 900, "export")]
         self._load_disk()
+        self._build_history()
+
+    def _build_history(self):
+        """Spread a year of synthetic recordings across the calendar so jumping
+        to 'a day a year back' is meaningful. The two gauges have been logging
+        all year (procedural); discrete sessions scatter over past days."""
+        for s in ("ion", "temp"):
+            self.cover[s] = [(self.year0, NOW0)]
+        rng = np.random.default_rng(3)
+        names = ["pumpdown", "leak check", "bakeout", "calibration", "gas dose",
+                 "TDS run", "SEM scan", "outgassing"]
+        for _ in range(55):
+            day = int(rng.integers(2, 365))            # days ago (today kept for runs)
+            start = NOW0 - day * 86400 + rng.uniform(8, 18) * 3600
+            dur = rng.uniform(0.2, 4.0) * 3600
+            self.sessions.append((str(rng.choice(names)), start, start + dur, "run"))
+
+    def day_densities(self) -> dict:
+        """date -> 0..1 recording intensity, for tinting the calendar cells."""
+        import datetime as _dt
+        acc: dict = {}
+        for (_n, t0, t1, _k) in self.sessions + self.runs:
+            d = _dt.date.fromtimestamp(t0)
+            acc[d] = acc.get(d, 0.0) + (t1 - t0)
+        today = _dt.date.fromtimestamp(self.now)
+        acc[today] = acc.get(today, 0.0) + 7200.0       # live data day
+        m = max(acc.values()) if acc else 1.0
+        return {d: v / m for d, v in acc.items()}
+
+    def _proc_scalar(self, src, t0, t1, n):
+        """Procedural gauge history for any window (instant, infinite-resolution
+        sampled at display density) — so a jump to any past day shows a signal."""
+        x = np.linspace(t0, t1, int(min(n, 2000)))
+        day = 86400.0
+        if src == "ion":
+            y = 10.0 ** (-8.5 + 0.5 * np.sin(x / day * 2 * np.pi)
+                         + 0.25 * np.sin(x / (day * 13) * 2 * np.pi))
+        else:                                            # temp
+            y = 22 + 5 * np.sin(x / day * 2 * np.pi) + 2.5 * np.sin(x / (day * 30) * 2 * np.pi)
+        return x, y
 
     def _seg(self, src, t0, t1, fn):
         t = np.arange(t0, t1, DT)
@@ -202,6 +245,10 @@ class Store(QtCore.QObject):
         survive downsampling. Returns x, y with NaN across coverage gaps."""
         if src in self.disk:
             return self._query_disk(src, t0, t1, max_points)
+        if src in self._proc_sources:                    # year-long procedural history
+            td = self.data[src][0]
+            if len(td) == 0 or t1 < td[0] or t0 > td[-1]:
+                return self._proc_scalar(src, t0, t1, max_points)
         t, v = self.data[src]
         i0, i1 = np.searchsorted(t, [t0, t1])
         ts, vs = t[i0:i1], v[i0:i1]
@@ -314,6 +361,9 @@ class Ribbon(pg.PlotWidget):
         self.head.setZValue(20)
         self.addItem(self.head)
         self.setXRange(NOW0 - HIST, NOW0, padding=0.02)
+        # let the finder pan/zoom across the whole year of history
+        self.getPlotItem().getViewBox().setLimits(
+            xMin=NOW0 - 366 * 86400, xMax=NOW0 + 1200)
 
     def _draw_static(self):
         rows = self._rows
@@ -328,7 +378,10 @@ class Ribbon(pg.PlotWidget):
             lbl.setPos(NOW0 - HIST, y + 0.4)
             lbl.setFlag(lbl.GraphicsItemFlag.ItemIgnoresTransformations, False)
             self.addItem(lbl)
-        # runs/exports row at the bottom
+        # runs/exports row at the bottom — recent named runs + the year's sessions
+        for (name, t0, t1, kind) in self.store.sessions:
+            self.addItem(pg.BarGraphItem(x0=t0, width=max(t1 - t0, 120), y0=-0.85,
+                         height=0.5, brush="#5c7cfa", pen=None))
         for (name, t0, t1, kind) in self.store.runs:
             col = "#845ef7" if kind == "run" else "#f783ac"
             self.addItem(pg.BarGraphItem(x0=t0, width=t1 - t0, y0=-0.85,
@@ -432,6 +485,60 @@ class PerfStrip(QtWidgets.QWidget):
 
     def set_play(self, text):
         self.play.setText(text)
+
+
+# ---- jump-to-date calendar (stock QCalendarWidget + data-day tinting) ------
+class DateJumpDialog(QtWidgets.QDialog):
+    """Pick a day or a From–To range; days with recordings are tinted (GitHub-
+    contribution style). Apply → the caller jumps the timeline."""
+
+    def __init__(self, store: Store, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Jump to date")
+        import datetime as _dt
+        lay = QtWidgets.QVBoxLayout(self)
+        self.cal = QtWidgets.QCalendarWidget()
+        self.cal.setGridVisible(True)
+        y0 = _dt.date.fromtimestamp(store.year0)
+        today = _dt.date.fromtimestamp(store.now)
+        self.cal.setMinimumDate(QtCore.QDate(y0.year, y0.month, y0.day))
+        self.cal.setMaximumDate(QtCore.QDate(today.year, today.month, today.day))
+        for d, inten in store.day_densities().items():       # tint recording-days
+            fmt = QtGui.QTextCharFormat()
+            fmt.setBackground(QtGui.QColor(40, int(70 + 150 * inten), 95))
+            fmt.setForeground(QtGui.QColor("#ffffff"))
+            self.cal.setDateTextFormat(QtCore.QDate(d.year, d.month, d.day), fmt)
+        lay.addWidget(self.cal)
+        row = QtWidgets.QHBoxLayout()
+        self.frm = QtWidgets.QDateEdit(calendarPopup=True)
+        self.to = QtWidgets.QDateEdit(calendarPopup=True)
+        for e in (self.frm, self.to):
+            e.setDisplayFormat("yyyy-MM-dd")
+            e.setDateRange(self.cal.minimumDate(), self.cal.maximumDate())
+        row.addWidget(QtWidgets.QLabel("From"))
+        row.addWidget(self.frm)
+        row.addWidget(QtWidgets.QLabel("To"))
+        row.addWidget(self.to)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.cal.clicked.connect(lambda d: (self.frm.setDate(d), self.to.setDate(d)))
+        sel = self.cal.selectedDate()
+        self.frm.setDate(sel)
+        self.to.setDate(sel)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton("Apply", QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def epoch_range(self):
+        d0, d1 = self.frm.date(), self.to.date()
+        if d1 < d0:
+            d0, d1 = d1, d0
+        t0 = QtCore.QDateTime(d0, QtCore.QTime(0, 0)).toSecsSinceEpoch()
+        t1 = QtCore.QDateTime(d1.addDays(1), QtCore.QTime(0, 0)).toSecsSinceEpoch()
+        return float(t0), float(t1)
 
 
 # ---- the prototype window -------------------------------------------------
@@ -561,6 +668,10 @@ class Spike(QtWidgets.QMainWindow):
                          "selection (with margin) so the end-handles are easy to "
                          "grab for fine-tuning. Doesn't change the slice.")
         bar.addWidget(frame)
+        cal = mk("📅 Date…", self._open_calendar)
+        cal.setToolTip("Jump to a specific day or date range — days with recordings "
+                       "are highlighted")
+        bar.addWidget(cal)
         bar.addStretch(1)
         self._clock = QtWidgets.QLabel("")
         self._clock.setStyleSheet(f"color:{MUTED};")
@@ -669,6 +780,19 @@ class Spike(QtWidgets.QMainWindow):
         pad = w * 0.1
         self.ribbon.getPlotItem().getViewBox().setXRange(
             self.t0 - pad, self.t1 + pad, padding=0)
+
+    def _open_calendar(self):
+        dlg = DateJumpDialog(self.store, self)
+        if not dlg.exec():
+            return
+        t0, t1 = dlg.epoch_range()
+        t0, t1 = max(t0, self.store.year0), min(t1, self.store.now)
+        if t1 - t0 < 1:
+            return
+        self._set_live(False)
+        pad = (t1 - t0) * 0.05
+        self.ribbon.getPlotItem().getViewBox().setXRange(t0 - pad, t1 + pad, padding=0)
+        self._jump_window(t0, t1)
 
     def _toggle_play(self):
         self.playing = not self.playing
