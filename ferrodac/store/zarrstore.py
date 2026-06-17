@@ -46,36 +46,43 @@ class ZarrStore:
         self.root = zarr.open_group(store=str(root), mode=mode)
 
     # -- sources -------------------------------------------------------------
+    @staticmethod
+    def _gname(key) -> str:
+        # Source keys can contain '/' (device/source); Zarr reads '/' as a group
+        # separator, so encode it (and '%') into one flat, reversible group name.
+        return str(key).replace("%", "%25").replace("/", "%2F")
+
     def add_source(self, uuid, name="", unit="", dtype="scalar"):
-        g = self.root.require_group(uuid)
-        if "dtype" not in g.attrs:
+        g = self.root.require_group(self._gname(uuid))
+        if "key" not in g.attrs:                     # init once, original key kept
+            g.attrs["key"] = str(uuid)
             g.attrs["name"], g.attrs["unit"], g.attrs["dtype"] = name, unit, dtype
             g.attrs["epochs"] = []
             g.attrs["config"] = []
         return g
 
     def sources(self) -> list:
-        return list(self.root.group_keys())
+        return [self.root[n].attrs.get("key", n) for n in self.root.group_keys()]
 
     def _source(self, uuid):
-        return self.root[uuid]
+        return self.root[self._gname(uuid)]
 
     # -- config / state stream (sparse; folds to state-at-T) -----------------
     def emit_config(self, uuid, t: float, key: str, value) -> None:
         g = self._source(uuid)
-        ev = list(g.attrs["config"])
+        ev = list(g.attrs.get("config", []))
         ev.append([float(t), str(key), value])
         g.attrs["config"] = ev
 
     def config_at(self, uuid, t: float) -> dict:
         state: dict = {}
-        for et, k, v in self._source(uuid).attrs["config"]:
+        for et, k, v in self._source(uuid).attrs.get("config", []):
             if et <= t:
                 state[k] = v
         return state
 
     def config_events(self, uuid, t0=None, t1=None) -> list:
-        return [(et, k, v) for et, k, v in self._source(uuid).attrs["config"]
+        return [(et, k, v) for et, k, v in self._source(uuid).attrs.get("config", [])
                 if (t0 is None or et >= t0) and (t1 is None or et <= t1)]
 
     # -- write samples (chunk-wise append into the current/declared epoch) ---
@@ -85,7 +92,7 @@ class ZarrStore:
         v = np.asarray(v, dtype="f8").ravel()
         if len(t) == 0:
             return
-        epochs = list(g.attrs["epochs"])
+        epochs = list(g.attrs.get("epochs", []))
         key = epoch or (epochs[-1] if epochs else "e0")
         if key not in epochs:
             epochs.append(key)
@@ -106,7 +113,7 @@ class ZarrStore:
     def finalize_rollups(self, uuid, epoch: str = None) -> None:
         """(Re)build the min/max pyramid for an epoch (call on flush/close)."""
         g = self._source(uuid)
-        keys = [epoch] if epoch else list(g.attrs["epochs"])
+        keys = [epoch] if epoch else list(g.attrs.get("epochs", []))
         for key in keys:
             eg = g[key]
             t = np.asarray(eg["t"][:]); v = np.asarray(eg["v"][:])
@@ -134,7 +141,7 @@ class ZarrStore:
     def coverage(self, uuid) -> list:
         g = self._source(uuid)
         out = []
-        for key in g.attrs["epochs"]:
+        for key in g.attrs.get("epochs", []):
             a = g[key].attrs
             if a.get("n", 0):
                 out.append((float(a["t0"]), float(a["t1"])))
@@ -147,7 +154,7 @@ class ZarrStore:
         points in the window, so a wide query reads a tiny tier rather than raw.
         Returns (x, y) with NaN gaps between epochs."""
         g = self._source(uuid)
-        epochs = [k for k in g.attrs["epochs"]
+        epochs = [k for k in g.attrs.get("epochs", [])
                   if g[k].attrs.get("n", 0)
                   and g[k].attrs["t1"] >= t0 and g[k].attrs["t0"] <= t1]
         if not epochs:
