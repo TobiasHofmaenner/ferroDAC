@@ -428,6 +428,117 @@ built. Seam is ready (`TagOrigin.DEVICE`/`PROCESSOR`, `origin_id`, `scope`,
 
 ---
 
+### 7.4 Storage backend: tiering, format & the config stream (decided 2026-06-17)
+
+The concrete realization of §7.2's "one windowed query interface." Validated by
+a prototype that browsed **150 GB / 37.5 B points with a ~38 MB app footprint**
+(`prototypes/timeline_spike.py`), so the architecture below is measured, not
+hoped.
+
+#### Tiered resolver (one query, nearest-wins, coverage-aware)
+
+All reads go through `query(series, t0, t1, max_points)` + `subscribe(series)`.
+Behind it a **client-side resolver** composes tiers, each implementing the same
+mini-protocol — `coverage(series) → intervals` and `read(series, t0, t1,
+max_points) → envelope|raw`:
+
+| tier (near → far) | holds | when |
+|---|---|---|
+| **Live RAM ring** | recent full-res tail | always |
+| **Local store** | recorded runs on this box (Zarr + rollup pyramid) | always |
+| **Remote hub** | the archive: everything streamed up + rollups + other boxes | if connected |
+
+- **Nearest-wins routing:** serve each sub-range from the nearest tier that
+  covers it; **stitch** a window that straddles tiers (recorded span → live
+  tail). Overlap → use the nearer (fresher + cheaper). v1: if one tier fully
+  covers, use it; else stitch.
+- **Live = the RAM tier.** Playhead at the right edge subscribes to its appends;
+  parked = query the tiers. No separate live/historic code path.
+- **Local-first: the remote tier is additive.** No hub → RAM + local, done.
+  Connect → the remote tier just *extends coverage backward* and to other boxes.
+- **Resolution is per-tier, read-time.** Each tier downsamples its share to its
+  slice of `max_points` from its **rollup pyramid** (min/max multi-resolution
+  tiers — the one genuinely new build; kills the wide-zoom wall, since min/max
+  must otherwise read every sample in the window). Raw is never destroyed.
+- **The server is one opaque tier** behind gRPC; it may run RAM+disk internally.
+  Contract gains **`GetCoverage`** so the resolver knows what the remote holds
+  without fetching.
+
+#### Format: Zarr everywhere, CSV first-class
+
+- **Zarr is the store** for everything — local *and* on S3. Its store-backend
+  abstraction (`LocalStore` vs an S3 store, same array API) means the resolver's
+  **local and remote tiers run identical read code**, and **sync ≈ a chunk-set
+  copy** (see §12.1). Rollups = **Zarr multiscale**, identical on disk and S3.
+- The **RAM ring is the live tier**; Zarr is the **durable** tier, fed
+  **chunk-sized flushes** (never per-sample) — so Zarr's append ergonomics never
+  bite.
+- **CSV is a first-class export *and* import** (slow, fat, rarely used in daily
+  work — and that's fine). Every **pristine, marker-bounded recorded run is also
+  materialized to CSV** alongside its Zarr, so the experimenter's data exists in
+  a form openable with nothing but a text editor in 20 years. Import = §7.2's
+  lower-fidelity reimport branch. Zarr itself is open/self-describing/numpy-native
+  (no vendor lock) — the timeless guarantee holds even before CSV export.
+- Prior art: this is **NeXus/HDF5** territory (measured data + the instrument
+  config that produced it); we do it in Zarr for the local=remote=S3 story.
+
+#### The config/state stream — every device, not just data sources
+
+Data is uninterpretable without the state it was produced under (an RGA channel
+is noise until filament+SEM; a raw voltage means different things by
+configuration). So **every device emits, alongside its data Sources, a
+config/state stream**: a sparse, reliable, timestamped sequence of `(t, key,
+value)` change-events (filament/SEM/scan-range *and* interpretation metadata:
+a channel's quantity/unit/calibration/sensor).
+
+- **Fold** the events to any instant T → the device's full state at T.
+- **Store raw, derive meaning** (extends §7.2): data stays raw forever;
+  **validity gating, unit conversion, calibration, axis** are *recomputed* from
+  `raw + config-state-at-T`. Recalibrate → new event → old data re-derives under
+  the old cal, new under the new. Always correct, never destructive.
+- **Capture-all + gate-on-read.** Never drop the noise at capture (irreversible);
+  "valid data only" (e.g. filament-on) is a **read-time mask** folded from the
+  config stream.
+- **Rides the §7.3 reliable-event substrate** (sparse, timestamped,
+  device-emitted) but is its own stream with distinct semantics: factual (not
+  user-editable) and it **folds to state**. Config values are also **plottable**
+  (filament on/off, SEM HV as step-channels).
+- This is the **concrete activation of the deferred §7.3 Phase-6 emitter**:
+  device config changes *are* device-emitted events.
+
+#### Config-epochs & changing shape (one identity, segmented storage)
+
+"One track" = one **logical identity** (the source UUID; routes/layouts bind to
+it), **not** one fixed-shape array. Shape/meaning changes are handled by
+segmentation, the standard scientific-computing answer (and why Zarr, a
+*container* of many chunk-arrays, not a flat file):
+
+- **Zarr layout:** a **group per source** (the identity); **one sub-array per
+  config-epoch** (a contiguous span of homogeneous shape) — e.g. RGA `1–50` and
+  `40–200` are two sub-arrays of different shape under one group; a group index
+  maps time-range → epoch. The m/z **axis is reconstructed from the config
+  recipe** (first/width/ppa), not stored per scan.
+- **Shape change** (trace length, waveform rate) → **new epoch sub-array**.
+  **Meaning-only change** (volts→°C recal, same shape) → **same array** + a
+  config-epoch marking reinterpretation. Physical segmentation only on *shape*.
+- **CSV materialization** of a run spanning a shape change = **one file per
+  epoch** (each with its own header), listed in the run manifest.
+
+#### Hue UX rule — "is this one clean table or not?"
+
+In the track viewer, an **epoch boundary that breaks export-uniformity** is shown
+as a **change of the track's hue** — the physicist's at-a-glance "you can't get a
+single consistent CSV across here." It fires on **shape change** (→ export
+becomes multiple files) *and* **quantity/unit change** (→ a column's meaning
+shifts). Plain device-config that leaves the column uniform (filament, SEM HV)
+is **a marker/pin, not a hue**. (So hue ⊇ storage segmentation: hue marks the
+exported *table* breaking; segmentation marks the stored *bytes* changing shape.)
+Shown on the track *and* the finder coverage band; it also enables **epoch-aware
+export** (select within one hue → one tidy CSV), and the export action confirms
+"this selection spans N epochs → N files" before writing.
+
+---
+
 ## 8. Project folder = system of record
 
 A **project is a directory** (lives in a Nextcloud-synced folder), self-describing:
