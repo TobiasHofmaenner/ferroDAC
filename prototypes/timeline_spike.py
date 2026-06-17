@@ -623,17 +623,35 @@ class Spike(QtWidgets.QMainWindow):
         rv.setSpacing(4)
         self.perf = PerfStrip()
         rv.addWidget(self.perf)
+
+        # charts live in a scroll area, so many tracks SCROLL instead of shoving
+        # the finder + controls off-screen
         self._charts_box = QtWidgets.QVBoxLayout()
         self._charts_box.setSpacing(4)
+        self._charts_box.setContentsMargins(0, 0, 0, 0)
         cw = QtWidgets.QWidget()
         cw.setLayout(self._charts_box)
-        rv.addWidget(cw, 1)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(cw)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
         self.ribbon = Ribbon(self.store)
-        self.ribbon.setFixedHeight(min(300, 96 + 10 * len(self.store.sources)))
+        self.ribbon.setMinimumHeight(110)
         self.ribbon.windowChanged.connect(self._on_window)
         self.ribbon.scrubbed.connect(lambda: self._set_live(False))
-        rv.addWidget(self.ribbon)
-        rv.addLayout(self._transport())
+
+        # a vertical splitter lets you balance chart space vs the finder ribbon
+        vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        vsplit.addWidget(scroll)
+        vsplit.addWidget(self.ribbon)
+        vsplit.setStretchFactor(0, 1)          # charts take the slack
+        vsplit.setStretchFactor(1, 0)
+        vsplit.setSizes([520, min(320, 96 + 10 * len(self.store.sources))])
+        rv.addWidget(vsplit, 1)
+
+        rv.addLayout(self._transport())        # controls: pinned, always visible
         split.addWidget(right)
         split.setStretchFactor(1, 1)
 
@@ -720,6 +738,7 @@ class Spike(QtWidgets.QMainWindow):
             return VideoPanel(self.store)
         p = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         p.setBackground(PANEL)
+        p.setMinimumHeight(150)                       # keep each track usable when scrolled
         p.showGrid(x=True, y=True, alpha=0.15)
         p.setMouseEnabled(y=False)
         anchor = next((w for w in self._charts.values()
