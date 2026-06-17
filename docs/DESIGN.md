@@ -444,8 +444,8 @@ max_points) → envelope|raw`:
 
 | tier (near → far) | holds | when |
 |---|---|---|
-| **Live RAM ring** | recent full-res tail | always |
-| **Local store** | recorded runs on this box (Zarr + rollup pyramid) | always |
+| **Live RAM ring** | recent full-res tail (fast/hot) | always |
+| **Local store** | **ambient durable Zarr** — *everything*, written continuously (+ rollups) | always |
 | **Remote hub** | the archive: everything streamed up + rollups + other boxes | if connected |
 
 - **Nearest-wins routing:** serve each sub-range from the nearest tier that
@@ -463,6 +463,29 @@ max_points) → envelope|raw`:
 - **The server is one opaque tier** behind gRPC; it may run RAM+disk internally.
   Contract gains **`GetCoverage`** so the resolver knows what the remote holds
   without fetching.
+
+#### Write path: always-on durable ambient, record = pin + CSV (refined 2026-06-17)
+
+The ambient tier is **durable, not RAM-only** — a strengthening of §7.2's
+expendable ambient. A **`StoreWriter`** subscribes to the engine and
+**continuously** flushes *all* scalar data into the local Zarr (chunk-wise),
+independent of Record. This buys three things the RAM ring can't: **scroll-back
+past the ring**, **survival across restart/crash**, and — the big one —
+**retroactive recording** (the data you forgot to Record is already on disk; you
+just mark + export it). The RAM ring stays the hot cache on top.
+
+- **Record decouples from persistence.** Recording is no longer "start writing";
+  it's **pin a span** (mark it, retention-exempt) **+ materialise CSV over the
+  marked area** (the human-readable export, scoped to recorded spans only). The
+  durable raw was already being written.
+- **Grows indefinitely for now** (decided 2026-06-17); a **retention policy**
+  (time/size rollover, pinned spans exempt) lands with the search UI.
+- **Firehose exception** (§7.2 holds): always-durable is for moderate-rate
+  sources; a genuine firehose (e.g. a 326 kHz digitizer) stays RAM-ambient and is
+  persisted only when recorded — otherwise it'd fill disk. Per-source, by rate.
+- The local store is therefore **app-wide-continuous**, not per-run bundles; a
+  recorded run is a *pinned span within it* (still *exportable* as a Zarr+CSV
+  bundle for sharing/sync).
 
 #### Format: Zarr everywhere, CSV first-class
 
