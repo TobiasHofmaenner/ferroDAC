@@ -336,6 +336,7 @@ class VideoPanel(QtWidgets.QLabel):
 class Ribbon(pg.PlotWidget):
     windowChanged = QtCore.Signal(float, float)
     scrubbed = QtCore.Signal()             # user grabbed the region → leave Live
+    recenter = QtCore.Signal(float)        # double-click → center the window here
 
     def __init__(self, store: Store):
         super().__init__(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
@@ -364,6 +365,14 @@ class Ribbon(pg.PlotWidget):
         # let the finder pan/zoom across the whole year of history
         self.getPlotItem().getViewBox().setLimits(
             xMin=NOW0 - 366 * 86400, xMax=NOW0 + 1200)
+        self.scene().sigMouseClicked.connect(self._on_scene_click)
+
+    def _on_scene_click(self, ev):
+        if not ev.double():
+            return
+        t = self.getPlotItem().getViewBox().mapSceneToView(ev.scenePos()).x()
+        self.recenter.emit(float(t))
+        ev.accept()
 
     def _draw_static(self):
         rows = self._rows
@@ -641,6 +650,7 @@ class Spike(QtWidgets.QMainWindow):
         self.ribbon.setMinimumHeight(110)
         self.ribbon.windowChanged.connect(self._on_window)
         self.ribbon.scrubbed.connect(lambda: self._set_live(False))
+        self.ribbon.recenter.connect(self._recenter)
 
         # a vertical splitter lets you balance chart space vs the finder ribbon
         vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -799,6 +809,18 @@ class Spike(QtWidgets.QMainWindow):
         pad = w * 0.1
         self.ribbon.getPlotItem().getViewBox().setXRange(
             self.t0 - pad, self.t1 + pad, padding=0)
+
+    def _recenter(self, t):
+        """Double-click in the finder → center the current slice on that time,
+        keeping its width (shifted to stay within the data ends)."""
+        w = self.t1 - self.t0
+        t0, t1 = t - w / 2, t + w / 2
+        if t1 > self.store.now:
+            t0, t1 = self.store.now - w, self.store.now
+        if t0 < self.store.year0:
+            t0, t1 = self.store.year0, self.store.year0 + w
+        self._set_live(False)
+        self._jump_window(t0, t1)
 
     def _open_calendar(self):
         dlg = DateJumpDialog(self.store, self)
