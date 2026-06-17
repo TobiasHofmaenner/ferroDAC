@@ -36,6 +36,9 @@ class StoreWriter:
         self._last_flush: dict = {}     # key -> monotonic seconds
         self._since_rollup: dict = {}   # key -> samples appended since last rollup
         self._unsub = None
+        # one epoch per app session, so a restart leaves a real coverage gap (the
+        # resolver breaks the line there) instead of bridging stop→resume.
+        self._epoch = "s%d" % int(time.time())
 
     # -- lifecycle -----------------------------------------------------------
     def attach(self, engine) -> None:
@@ -74,7 +77,7 @@ class StoreWriter:
             self.store.add_source(key, name=key)
             self._known.add(key)
         self.store.append(key, np.asarray(tb, dtype="f8"),
-                          np.asarray(vb, dtype="f8"), epoch="e0")
+                          np.asarray(vb, dtype="f8"), epoch=self._epoch)
         n = len(tb)
         tb.clear(); vb.clear()
         self._last_flush[key] = time.monotonic()
@@ -84,7 +87,7 @@ class StoreWriter:
 
     def _rollup(self, key) -> None:
         try:
-            self.store.finalize_rollups(key, "e0")
+            self.store.finalize_rollups(key, self._epoch)
             self._since_rollup[key] = 0
         except Exception:
             pass                                 # query falls back to raw-bucketing
