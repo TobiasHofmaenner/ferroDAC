@@ -291,7 +291,7 @@ class Ribbon(pg.PlotWidget):
     scrubbed = QtCore.Signal()             # user grabbed the region → leave Live
 
     def __init__(self, store: Store):
-        super().__init__()
+        super().__init__(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self.store = store
         self.setBackground(PANEL)
         self.setMenuEnabled(False)
@@ -607,7 +607,7 @@ class Spike(QtWidgets.QMainWindow):
         mod = meta["modality"]
         if mod == "video":
             return VideoPanel(self.store)
-        p = pg.PlotWidget()
+        p = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         p.setBackground(PANEL)
         p.showGrid(x=True, y=True, alpha=0.15)
         p.setMouseEnabled(y=False)
