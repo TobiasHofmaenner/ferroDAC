@@ -1418,6 +1418,20 @@ class MainWindow(QMainWindow):
         self.recorder = Recorder(engine, self.history, on_change=self._on_record_change)
         self._rec_start_mid = None
 
+        # durable store: persist EVERYTHING continuously (§7.4) so data survives a
+        # restart and a span can be recorded retroactively. Degrades to the RAM
+        # ring if zarr/disk is unavailable.
+        self.store_writer = None
+        try:
+            from ..store import StoreWriter, ZarrStore
+            os.makedirs(self._app_dir(), exist_ok=True)
+            self.store_writer = StoreWriter(
+                ZarrStore(os.path.join(self._app_dir(), "store.zarr")))
+            self.store_writer.attach(engine)
+        except Exception as exc:                       # noqa: BLE001
+            import logging
+            logging.getLogger("ferrodac").warning("durable store disabled: %s", exc)
+
         # working-session autosave (tags/layout survive restart & crashes)
         self._autosave_on = False
         self._autosave_timer = QTimer(self)
@@ -1828,6 +1842,8 @@ class MainWindow(QMainWindow):
         if self._autosave_on:
             self._do_autosave()
         self.hub.disconnect()
+        if self.store_writer is not None:
+            self.store_writer.stop()        # flush the buffer + build final rollups
         self.dashboard.shutdown()
         self.manager.stop()
         self.engine.shutdown()
