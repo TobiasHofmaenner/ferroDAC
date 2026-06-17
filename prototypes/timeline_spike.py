@@ -349,6 +349,7 @@ class Ribbon(pg.PlotWidget):
         self.getAxis("left").setWidth(70)
         self.setLabel("bottom", "")
         self._rows = list(store.sources)
+        self._labels = []
         self._draw_static()
         self.region = pg.LinearRegionItem(brush=(77, 171, 247, 40),
                                           hoverBrush=(77, 171, 247, 70))
@@ -366,6 +367,9 @@ class Ribbon(pg.PlotWidget):
         self.getPlotItem().getViewBox().setLimits(
             xMin=NOW0 - 366 * 86400, xMax=NOW0 + 1200)
         self.scene().sigMouseClicked.connect(self._on_scene_click)
+        # track-name labels ride the view's left edge so they never scroll off
+        self.getPlotItem().getViewBox().sigXRangeChanged.connect(self._reflow_labels)
+        self._reflow_labels()
 
     def _on_scene_click(self, ev):
         if not ev.double():
@@ -373,6 +377,12 @@ class Ribbon(pg.PlotWidget):
         t = self.getPlotItem().getViewBox().mapSceneToView(ev.scenePos()).x()
         self.recenter.emit(float(t))
         ev.accept()
+
+    def _reflow_labels(self, *_):
+        x0, x1 = self.getPlotItem().getViewBox().viewRange()[0]
+        inset = (x1 - x0) * 0.006
+        for lbl, y in self._labels:
+            lbl.setPos(x0 + inset, y)
 
     def _draw_static(self):
         rows = self._rows
@@ -384,9 +394,8 @@ class Ribbon(pg.PlotWidget):
                              height=0.5, brush=c, pen=None))
             lbl = pg.TextItem(self.store.sources[src]["name"], color=MUTED,
                               anchor=(0, 0.5))
-            lbl.setPos(NOW0 - HIST, y + 0.4)
-            lbl.setFlag(lbl.GraphicsItemFlag.ItemIgnoresTransformations, False)
             self.addItem(lbl)
+            self._labels.append((lbl, y + 0.4))   # positioned by _reflow_labels
         # runs/exports row at the bottom — recent named runs + the year's sessions
         for (name, t0, t1, kind) in self.store.sessions:
             self.addItem(pg.BarGraphItem(x0=t0, width=max(t1 - t0, 120), y0=-0.85,
@@ -792,8 +801,7 @@ class Spike(QtWidgets.QMainWindow):
         the ribbon (drag = pan, scroll = zoom) to frame a region, then fit — so
         the drag handles become fine-tuning, not the primary mechanism."""
         x0, x1 = self.ribbon.getPlotItem().getViewBox().viewRange()[0]
-        lo = self.store.archive_t0 if self.store.archive_t0 else (NOW0 - HIST)
-        x0, x1 = max(x0, lo), min(x1, self.store.now)
+        x0, x1 = max(x0, self.store.year0), min(x1, self.store.now)
         if x1 - x0 < 1e-6:
             return
         self._set_live(False)
