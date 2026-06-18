@@ -92,23 +92,33 @@ class Ribbon(pg.PlotWidget):
 
 
 class TimelineWindow(QtWidgets.QMainWindow):
-    def __init__(self, resolver, store, parent=None):
+    """The video-editor scrubber. Its playhead **is** the app's head: it drives
+    the shared `TimeContext`, so parking it here re-streams the historic slice
+    into the live dashboard (the ReplayController, subscribed to the same `tc`).
+    Live is just the head at now. Its own charts are a preview of the resolver."""
+
+    def __init__(self, resolver, store, time_context, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ferroDAC — Timeline")
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)   # fresh tc link per open
         self.resize(1100, 720)
         self.resolver = resolver
         self.store = store
-        self.live = False
-        self.playing = False
+        self.tc = time_context
         self.speed = 30.0
         self._charts: dict = {}
+        self._syncing = False                           # guard tc⇄ribbon feedback
 
         self._sources = list(store.sources())
         self._cover = {k: resolver.coverage(k) for k in self._sources}
         now = time.time()
         lo = min((c[0][0] for c in self._cover.values() if c), default=now - 600)
         self.now = now
-        self.t0, self.t1 = max(lo, now - 600), now      # open on the last 10 min
+        # adopt the shared head; open on the last 10 min if it's stale/following
+        self.tc.set_width(600.0)
+        self.tc.follow_now()
+        self.t0, self.t1 = self.tc.window
+        self.t0 = max(self.t0, lo - 1)
 
         self._build_ui()
         for k in self._sources[:3]:                     # show the first few by default
@@ -116,11 +126,12 @@ class TimelineWindow(QtWidgets.QMainWindow):
                 .setCheckState(QtCore.Qt.Checked)
         self._refresh()
 
+        self._tc_unsub = self.tc.subscribe(self._on_tc)
         self._live_timer = QtCore.QTimer(self, interval=500)
-        self._live_timer.timeout.connect(self._tick_live)
+        self._live_timer.timeout.connect(self.tc.tick_live)
         self._live_timer.start()
         self._play_timer = QtCore.QTimer(self, interval=50)
-        self._play_timer.timeout.connect(self._tick_play)
+        self._play_timer.timeout.connect(lambda: self.tc.tick_play(0.05))
 
     # -- layout --
     def _build_ui(self):
@@ -148,8 +159,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.ribbon = Ribbon(self._sources, self._cover, self.t0 - 0, self.now)
         self.ribbon.setMinimumHeight(130)
-        self.ribbon.windowChanged.connect(self._on_window)
-        self.ribbon.scrubbed.connect(lambda: self._set_live(False))
+        self.ribbon.windowChanged.connect(self._on_window)   # drag → park the head
         self.ribbon.recenter.connect(self._recenter)
         vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         vsplit.addWidget(scroll); vsplit.addWidget(self.ribbon)
@@ -195,13 +205,16 @@ class TimelineWindow(QtWidgets.QMainWindow):
             self._charts.pop(key).setParent(None)
 
     def _on_window(self, a, b):
-        self.t0, self.t1 = a, b
-        self._refresh()
+        """User dragged the ribbon region → park the shared head there. This is
+        what routes the selected slice into the live dashboard (the controller,
+        on the same tc, clears the panels and re-streams the slice full-res)."""
+        if self._syncing:
+            return
+        self.tc.width = max(1e-3, b - a)
+        self.tc.park(b)                       # head = window end → fires the replay
 
     def _recenter(self, t):
-        w = self.t1 - self.t0
-        self._set_live(False)
-        self._jump(t - w / 2, t + w / 2)
+        self.tc.park(t + self.tc.width / 2)   # double-click → centre the head on t
 
     def _jump(self, a, b):
         self.t0, self.t1 = a, b
@@ -209,41 +222,55 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._refresh()
 
     def _toggle_play(self):
-        self.playing = not self.playing
-        self._play_btn.setText("⏸ Pause" if self.playing else "▶ Play")
-        if self.playing:
-            self._set_live(False)
-            self._play_timer.start()
-        else:
+        if self.tc.playing:
+            self.tc.playing = False
             self._play_timer.stop()
+        else:
+            if self.tc.following:             # nothing ahead of now → park first
+                self.tc.park(self.tc.head)
+            self.tc.playing = True
+            self._play_timer.start()
+        self._sync_transport()
 
     def _set_live(self, on):
-        self.live = on
-        self._live_btn.setChecked(on)
-        if on and self.playing:
-            self._toggle_play()
         if on:
-            w = self.t1 - self.t0
-            self._jump(time.time() - w, time.time())
+            self.tc.follow_now()              # ● Now → head jumps to the live edge
+        elif self.tc.following:
+            self.tc.park(self.tc.head)        # leaving live → park where we are
+        self._sync_transport()
 
-    def _tick_play(self):
-        self.t1 += self.speed * 0.05
-        if self.t1 >= time.time():
-            self._toggle_play(); self._set_live(True); return
-        self.ribbon.set_window(self.t0, self.t1)
-        self._refresh()
+    def _sync_transport(self):
+        self._play_btn.setText("⏸ Pause" if self.tc.playing else "▶ Play")
+        self._live_btn.blockSignals(True)
+        self._live_btn.setChecked(self.tc.following)
+        self._live_btn.blockSignals(False)
 
-    def _tick_live(self):
+    def _on_tc(self):
+        """The shared head moved (us, a play/live tick, or elsewhere) → reflect it
+        in the ribbon, preview charts, transport and clock readout."""
         self.now = time.time()
-        if self.live:
-            w = self.t1 - self.t0
-            self.t1 = self.now; self.t0 = self.t1 - w
-            self.ribbon.set_window(self.t0, self.t1)
-            self._refresh()
+        self.t0, self.t1 = self.tc.window
+        self._syncing = True                  # ribbon update must not re-park tc
+        self.ribbon.set_window(self.t0, self.t1)
+        self._syncing = False
+        self._refresh()
+        if not self.tc.playing and self._play_timer.isActive():
+            self._play_timer.stop()
+        self._sync_transport()
         dt = self.now - self.t1
-        tag = "● LIVE" if self.live else (f"-{dt/60:.1f} min" if dt > 1 else "now")
+        tag = ("● LIVE" if self.tc.following
+               else (f"-{dt/60:.1f} min" if dt > 1 else "now"))
         self._clock.setText(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.t1))
                             + f"   {tag}")
+
+    def closeEvent(self, ev):
+        self._live_timer.stop(); self._play_timer.stop()
+        try:
+            self._tc_unsub()
+        except Exception:
+            pass
+        self.tc.follow_now()                  # closing the scrubber returns to live
+        super().closeEvent(ev)
 
     def _refresh(self):
         for key in self._charts:

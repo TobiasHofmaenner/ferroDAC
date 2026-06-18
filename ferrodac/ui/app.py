@@ -1549,12 +1549,15 @@ class MainWindow(QMainWindow):
         tb.addAction(self.hub_action)
 
     def _open_timeline(self):
-        if self.resolver is None:
+        if self.resolver is None or self.time_context is None:
             self.statusBar().showMessage("Durable store unavailable — timeline disabled", 6000)
             return
         if getattr(self, "_timeline_win", None) is None:
             from .timeline import TimelineWindow
-            self._timeline_win = TimelineWindow(self.resolver, self.store_writer.store, self)
+            win = TimelineWindow(self.resolver, self.store_writer.store,
+                                 self.time_context, self)
+            win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
+            self._timeline_win = win
         self._timeline_win.show()
         self._timeline_win.raise_()
         self._timeline_win.activateWindow()
