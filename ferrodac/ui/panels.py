@@ -67,6 +67,11 @@ class Panel(QWidget):
         slice from scratch — called by the replay reset when the head jumps
         (park / scrub / return to live). Default: nothing to clear."""
 
+    def set_window(self, t0: float, t1: float) -> None:
+        """Follow the shared time window — a cheap viewport (X-range) change so
+        the panel reflects the head/tail without re-streaming. Time-axis panels
+        override; others (m/z axes, readouts) ignore it. Default: no-op."""
+
     def state(self) -> dict:
         """Per-panel state to persist in a saved session (override as needed)."""
         return {}
@@ -336,6 +341,13 @@ class ChartPanel(Panel):
             xs.clear(); ys.clear()
             self._curves[key].setData([], [])
         self._sync_markers()                  # reposition tags at the new time base
+
+    def set_window(self, t0, t1):
+        """Follow the shared window — just move the X-range over already-plotted
+        data (no re-stream). Relative coords via the session clock."""
+        if self.clock is None or t1 <= t0:
+            return
+        self.plot.setXRange(self.clock.rel(t0), self.clock.rel(t1), padding=0)
 
 
 class _Readout(QFrame):

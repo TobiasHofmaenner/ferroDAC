@@ -425,6 +425,13 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._speed.currentTextChanged.connect(
             lambda t: setattr(self.tc, "speed", float(t.rstrip("×"))))
         bar.addWidget(self._speed)
+        self._slide_btn = QtWidgets.QToolButton(text="⇉ Slide", checkable=True)
+        self._slide_btn.setChecked(not self.tc.grow)
+        self._slide_btn.setToolTip("Fixed-width window that slides (on) vs grow "
+                                   "from a pinned start (off)")
+        self._slide_btn.clicked.connect(
+            lambda: self.tc.set_grow(not self._slide_btn.isChecked()))
+        bar.addWidget(self._slide_btn)
         bar.addStretch(1)
         self._clock = QtWidgets.QLabel("")
         self._clock.setStyleSheet(f"color:{_MUTED};")
@@ -469,7 +476,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.t0, self.t1 = a, b
         self._refresh()                       # immediate preview feedback
         if not front_moved:
-            self.tc.set_width(max(1e-3, b - a))   # tail resize — stay live/playing
+            self.tc.resize_back(a)                # tail resize — stay live/playing
             return
         self._pending_park = (a, b)
         if self.tc.following:
@@ -580,6 +587,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
                 self._speed.blockSignals(True)
                 self._speed.setCurrentIndex(i)
                 self._speed.blockSignals(False)
+        self._slide_btn.blockSignals(True)
+        self._slide_btn.setChecked(not self.tc.grow)
+        self._slide_btn.blockSignals(False)
 
     def _on_tc(self):
         """The shared head moved (us, a play/live tick, or elsewhere) → reflect it

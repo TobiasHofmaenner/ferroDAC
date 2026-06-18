@@ -43,6 +43,13 @@ class PlayerBar(QtWidgets.QWidget):
         self._speed.currentTextChanged.connect(
             lambda t: setattr(self.tc, "speed", float(t.rstrip("×"))))
         lay.addWidget(self._speed)
+        self._slide_btn = QtWidgets.QToolButton(text="⇉ Slide", checkable=True)
+        self._slide_btn.setChecked(not self.tc.grow)
+        self._slide_btn.setToolTip("Fixed-width window that slides (on) vs grow "
+                                   "from a pinned start (off)")
+        self._slide_btn.clicked.connect(
+            lambda: self.tc.set_grow(not self._slide_btn.isChecked()))
+        lay.addWidget(self._slide_btn)
         lay.addStretch(1)
         self._readout = QtWidgets.QLabel("")
         self._readout.setStyleSheet(f"color:{_MUTED};")
@@ -86,6 +93,9 @@ class PlayerBar(QtWidgets.QWidget):
                 self._speed.blockSignals(True)
                 self._speed.setCurrentIndex(i)
                 self._speed.blockSignals(False)
+        self._slide_btn.blockSignals(True)
+        self._slide_btn.setChecked(not self.tc.grow)
+        self._slide_btn.blockSignals(False)
         if self.tc.following:
             self._readout.setText("● LIVE")
         else:

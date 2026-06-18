@@ -30,11 +30,15 @@ class TimeContext:
         self.playing: bool = False
         self.speed: float = 1.0
         self.rate: float = 1.0           # achieved playback rate (set by the driver)
+        self.grow: bool = False          # play/follow: grow from an anchor vs slide
+        self.anchor: float | None = None # pinned back edge while growing
         self._subs: list = []
 
     @property
     def window(self):
-        return (self.head - self.width, self.head)
+        if self.grow and self.anchor is not None:    # anchored back, growing front
+            return (min(self.anchor, self.head), self.head)
+        return (self.head - self.width, self.head)   # fixed-width sliding
 
     def subscribe(self, cb):
         self._subs.append(cb)
@@ -61,6 +65,26 @@ class TimeContext:
 
     def set_width(self, width: float):
         self.width = max(1e-3, float(width))
+        self._notify()
+
+    def set_grow(self, grow: bool):
+        """Toggle play/follow mode: grow from a pinned anchor vs slide a fixed
+        width. Entering grow pins the current back edge; leaving grow keeps the
+        current window size as the new fixed width (so it doesn't jump)."""
+        grow = bool(grow)
+        if grow and not self.grow:
+            self.anchor = self.head - self.width
+        elif self.grow and not grow and self.anchor is not None:
+            self.width = max(1e-3, self.head - self.anchor)
+        self.grow = grow
+        self._notify()
+
+    def resize_back(self, t0: float):
+        """Drag the back edge: move the anchor (grow) or set the width (slide)."""
+        if self.grow:
+            self.anchor = min(float(t0), self.head)
+        else:
+            self.width = max(1e-3, self.head - float(t0))
         self._notify()
 
     def tick_live(self):
