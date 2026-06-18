@@ -17,6 +17,8 @@ from ..core.bus import Bus
 from ..core.reading import Reading
 from ..core.trace import Trace
 
+_EPS = 1e-6          # time tolerance for "extends back" / "advanced" comparisons
+
 
 class TimeContext:
     """The app's single time control: a head that either follows now (live) or is
@@ -210,7 +212,7 @@ class ReplayController:
         self.on_reset = on_reset
         self.on_progress = on_progress               # frac 0..1 during a load; None=done
         self._was_following = time_context.following
-        self._played_to = None
+        self._loaded = None                          # (lo,hi) time span now in the panels
         self._busy = False                           # re-entrancy guard (processEvents)
         self._live_unsub = engine.subscribe(self._on_live)
         self._ctx_unsub = time_context.subscribe(self._on_context)
@@ -224,29 +226,31 @@ class ReplayController:
     def _on_context(self) -> None:
         if self._busy:                               # a load is in flight (processEvents
             return                                   # may re-enter) — ignore until done
+        t0, t1 = self.tc.window
         if self.tc.following:
             if not self._was_following:
-                if self.on_reset:
-                    self.on_reset()                  # returned to live → clear historic
-                t0, t1 = self.tc.window              # re-seed the recent window so the
-                self._load(t0, t1)                   # chart isn't empty (with progress)
+                self._reset_and_load(t0, t1)         # returned to live → re-seed window
+            elif self._loaded is not None and t0 < self._loaded[0] - _EPS:
+                self._reset_and_load(t0, t1)         # tail extended back while live → backfill
             self._was_following = True
-            self._played_to = None
             return
-        t0, t1 = self.tc.window
-        cont = (self.tc.playing and self._played_to is not None
-                and t0 <= self._played_to < t1)      # head must have ADVANCED;
-        #   played_to == t1 means the head didn't move (e.g. a tail resize) → reload
-        if cont:
-            # advancing playhead → stream only the newly-revealed range (small/fast,
-            # no progress UI)
-            self.playback.stream(list(self._sources()), self._played_to, t1)
-        else:
-            if self.on_reset:                        # fresh park / scrub → clear + full replay
-                self.on_reset()
-            self._load(t0, t1)                       # the one heavy op → show progress
-        self._played_to = t1
         self._was_following = False
+        if self._loaded is None:                     # first historic view
+            self._reset_and_load(t0, t1)
+            return
+        lo, hi = self._loaded
+        if t0 < lo - _EPS or t0 > hi + _EPS:         # needs earlier data, or a disjoint jump
+            self._reset_and_load(t0, t1)             # → clear + full re-stream (in order)
+        elif t1 > hi + _EPS:                         # head advanced (play/slide forward)
+            self.playback.stream(list(self._sources()), hi, t1)   # cheap front sliver only
+            self._loaded = (lo, t1)
+        # else: window ⊆ loaded (shorten / nudge) → nothing to load, no reload
+
+    def _reset_and_load(self, t0, t1) -> None:
+        if self.on_reset:
+            self.on_reset()                          # clear stale data (panels re-fit)
+        self._load(t0, t1)
+        self._loaded = (t0, t1)
 
     def _load(self, t0, t1) -> None:
         """Full-res re-stream of [t0,t1] with a progress callback + a re-entrancy
