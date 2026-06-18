@@ -235,7 +235,8 @@ class ReplayController:
             return
         t0, t1 = self.tc.window
         cont = (self.tc.playing and self._played_to is not None
-                and t0 <= self._played_to <= t1)     # smooth play advance only
+                and t0 <= self._played_to < t1)      # head must have ADVANCED;
+        #   played_to == t1 means the head didn't move (e.g. a tail resize) → reload
         if cont:
             # advancing playhead → stream only the newly-revealed range (small/fast,
             # no progress UI)
