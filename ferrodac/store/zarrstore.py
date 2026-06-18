@@ -164,7 +164,9 @@ class ZarrStore:
         for key in g.attrs.get("epochs", []):
             eg = g[key]
             a = eg.attrs
-            if not a.get("n", 0) or a["t1"] < t0 or a["t0"] > t1:
+            if not a.get("n", 0) or a.get("modality") == "trace":   # scalar reader
+                continue
+            if a["t1"] < t0 or a["t0"] > t1:
                 continue
             t = np.asarray(eg["t"][:])
             i0 = int(np.searchsorted(t, t0, side="left"))
@@ -250,6 +252,7 @@ class ZarrStore:
         g = self._source(uuid)
         epochs = [k for k in g.attrs.get("epochs", [])
                   if g[k].attrs.get("n", 0)
+                  and g[k].attrs.get("modality") != "trace"   # scalar reader only
                   and g[k].attrs["t1"] >= t0 and g[k].attrs["t0"] <= t1]
         if not epochs:
             return np.array([]), np.array([])

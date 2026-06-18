@@ -121,7 +121,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.t0 = max(self.t0, lo - 1)
 
         self._build_ui()
-        for k in self._sources[:3]:                     # show the first few by default
+        scalars = [k for k in self._sources                 # the preview is line-only
+                   if store.source_dtype(k) != "trace"]      # for now (traces → main UI)
+        for k in scalars[:3]:                               # show the first few by default
             self._src_list.findItems(_label(k), QtCore.Qt.MatchExactly)[0] \
                 .setCheckState(QtCore.Qt.Checked)
         self._refresh()
