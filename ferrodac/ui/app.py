@@ -1543,6 +1543,8 @@ class MainWindow(QMainWindow):
         view.addAction(self.sources_dock.toggleViewAction())
         view.addAction(self.sinks_dock.toggleViewAction())
         view.addAction(self.events_dock.toggleViewAction())
+        if getattr(self, "player_dock", None) is not None:
+            view.addAction(self.player_dock.toggleViewAction())
         view.addSeparator()
         self.edit_action = view.addAction("Edit layout")
         self.edit_action.setCheckable(True)
@@ -1576,7 +1578,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "_timeline_win", None) is None:
             from .timeline import TimelineWindow
             win = TimelineWindow(self.resolver, self.store_writer.store,
-                                 self.time_context, self)
+                                 self.time_context, self,
+                                 names=self.dashboard.source_names())
             win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
             self._timeline_win = win
         self._timeline_win.show()

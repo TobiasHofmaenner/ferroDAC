@@ -239,6 +239,11 @@ class Dashboard(QObject):
         replay controller re-streams these when the head is parked."""
         return list(self._sources)
 
+    def source_names(self) -> dict:
+        """key -> human display name, so the Timeline shows the same channel
+        names as the dashboard (not the raw source IDs)."""
+        return {k: p.name for k, p in self._sources.items() if p.name}
+
     def panels(self) -> list:
         """The live panels (display + input), for the replay reset hook."""
         return list(self._panels.values())

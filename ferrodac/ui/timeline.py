@@ -34,6 +34,26 @@ def _wf_cmap():
                        [(12, 10, 40), (190, 50, 90), (255, 235, 130)])
 
 
+def _envelope_midline(x, y):
+    """The resolver returns a min/max envelope as duplicate-x pairs; drawn as a
+    connected line that's a messy zigzag for noisy data. For the navigation
+    preview, collapse each pair to its mid value → one clean line. Singletons
+    (already-raw) and NaN gap-markers pass through unchanged."""
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    n = len(x)
+    if n < 2:
+        return x, y
+    out_x, out_y = [], []
+    i = 0
+    while i < n:
+        if i + 1 < n and not np.isnan(x[i]) and x[i] == x[i + 1]:
+            out_x.append(x[i]); out_y.append(0.5 * (y[i] + y[i + 1])); i += 2
+        else:
+            out_x.append(x[i]); out_y.append(y[i]); i += 1
+    return np.asarray(out_x), np.asarray(out_y)
+
+
 class CpuBars(QtWidgets.QWidget):
     """One mini bar per logical core (green/amber/red by load)."""
 
@@ -170,11 +190,10 @@ class DateJumpDialog(QtWidgets.QDialog):
 class Ribbon(pg.PlotWidget):
     """Per-source coverage tracks + a draggable window region + playhead."""
 
-    windowChanged = QtCore.Signal(float, float)
-    scrubbed = QtCore.Signal()
+    windowChanged = QtCore.Signal(float, float, bool)   # a, b, front_edge_moved
     recenter = QtCore.Signal(float)
 
-    def __init__(self, sources, cover, t0, t1):
+    def __init__(self, sources, cover, t0, t1, names=None):
         super().__init__(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self.setBackground(_PANEL)
         self.setMenuEnabled(False)
@@ -182,12 +201,15 @@ class Ribbon(pg.PlotWidget):
         self.hideButtons()
         self.getAxis("left").setStyle(showValues=False)
         self.getAxis("left").setWidth(60)
+        self._names = names or {}
         self._labels = []
         self._bars = []
+        self._region_ref = (t0, t1)          # last-set region (for edge detection)
         self._rows = list(sources)
         for i, key in enumerate(self._rows):
             y = len(self._rows) - 1 - i
-            lab = pg.TextItem(_label(key), color=color_for(key), anchor=(0, 0.5))
+            lab = pg.TextItem(self._names.get(key) or _label(key),
+                              color=color_for(key), anchor=(0, 0.5))
             self.addItem(lab)
             self._labels.append((lab, y + 0.4))
         self._draw_bars(cover)
@@ -256,14 +278,17 @@ class Ribbon(pg.PlotWidget):
     def _on_region(self):
         a, b = self.region.getRegion()
         self.head.setPos(b)
-        self.scrubbed.emit()
-        self.windowChanged.emit(a, b)
+        pa, pb = self._region_ref            # which edge did the user drag?
+        front_moved = abs(b - pb) >= abs(a - pa)
+        self._region_ref = (a, b)
+        self.windowChanged.emit(a, b, front_moved)
 
     def set_window(self, a, b):
         self.region.blockSignals(True)
         self.region.setRegion((a, b))
         self.region.blockSignals(False)
         self.head.setPos(b)
+        self._region_ref = (a, b)
 
     def _click(self, ev):
         if ev.double():
@@ -283,8 +308,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
     into the live dashboard (the ReplayController, subscribed to the same `tc`).
     Live is just the head at now. Its own charts are a preview of the resolver."""
 
-    def __init__(self, resolver, store, time_context, parent=None):
+    def __init__(self, resolver, store, time_context, parent=None, names=None):
         super().__init__(parent)
+        self._names = names or {}            # key -> human display name
         self.setWindowTitle("ferroDAC — Timeline")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)   # fresh tc link per open
         self.resize(1100, 720)
@@ -310,17 +336,17 @@ class TimelineWindow(QtWidgets.QMainWindow):
         now = time.time()
         lo = min((c[0][0] for c in self._cover.values() if c), default=now - 600)
         self.now = now
-        # adopt the CURRENT shared head/window — opening the scrubber doesn't
-        # change what the app is showing (live or parked); just ensure a width.
-        if self.tc.width <= 0:
-            self.tc.set_width(600.0)
+        # open LIVE on a session overview: follow now, a sane live tail (capped to
+        # the session if it's short), and zoom the ribbon out to span the whole
+        # session (earliest data → now) so you get a history overview at a glance.
+        self.tc.set_width(max(60.0, min(600.0, now - lo)))
+        self.tc.follow_now()
         self.t0, self.t1 = self.tc.window
-        self.t0 = max(self.t0, lo - 1)
+        self._view0 = lo - 0.04 * max(60.0, now - lo)   # session start, with margin
 
         self._build_ui()
-        for k in self._sources[:3]:                         # show the first few by default
-            self._src_list.findItems(_label(k), QtCore.Qt.MatchExactly)[0] \
-                .setCheckState(QtCore.Qt.Checked)
+        for i in range(min(3, self._src_list.count())):     # show the first few by default
+            self._src_list.item(i).setCheckState(QtCore.Qt.Checked)
         self._refresh()
 
         self._cov_ticks = 0
@@ -335,6 +361,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._park_timer = QtCore.QTimer(self, interval=70, singleShot=True)
         self._park_timer.timeout.connect(self._commit_park)
 
+    def _name(self, key):
+        return self._names.get(key) or _label(key)
+
     # -- layout --
     def _build_ui(self):
         split = QtWidgets.QSplitter()
@@ -342,7 +371,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         left = QtWidgets.QListWidget()
         left.setFixedWidth(180)
         for k in self._sources:
-            it = QtWidgets.QListWidgetItem(_label(k))
+            it = QtWidgets.QListWidgetItem(self._name(k))
             it.setData(QtCore.Qt.UserRole, k)
             it.setForeground(QtGui.QColor(color_for(k)))     # per-source colour
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
@@ -360,7 +389,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True); scroll.setWidget(cw)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.ribbon = Ribbon(self._sources, self._cover, self.t0 - 0, self.now)
+        self.ribbon = Ribbon(self._sources, self._cover, self._view0, self.now,
+                             names=self._names)
         self.ribbon.setMinimumHeight(130)
         self.ribbon.windowChanged.connect(self._on_window)   # drag → park the head
         self.ribbon.recenter.connect(self._recenter)
@@ -420,7 +450,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
                 p.addItem(img)
                 p._img = img
             else:
-                p.setLabel("left", _label(key))
+                p.setLabel("left", self._name(key))
                 p._curve = p.plot(pen=pg.mkPen(color_for(key), width=2),
                                   connect="finite")            # per-source colour
             self._charts[key] = p
@@ -429,16 +459,18 @@ class TimelineWindow(QtWidgets.QMainWindow):
         elif not on and key in self._charts:
             self._charts.pop(key).setParent(None)
 
-    def _on_window(self, a, b):
-        """User dragged the ribbon region → park the shared head there. The own
-        preview updates immediately (cheap, decimated); the dashboard re-stream
-        (full-res, the heavy bit) is debounced so a drag doesn't hammer the UI
-        thread. The first event parks at once so we stop following (no live yank
-        mid-drag); intermediate events only re-stream once the drag settles."""
+    def _on_window(self, a, b, front_moved):
+        """User dragged the ribbon region. Dragging the BACK (left) edge only
+        resizes the historic tail — we stay live/playing and keep ingesting.
+        Dragging the FRONT (head) edge into the past parks (debounced; the own
+        preview updates immediately, the heavy dashboard re-stream coalesces)."""
         if self._syncing:
             return
         self.t0, self.t1 = a, b
         self._refresh()                       # immediate preview feedback
+        if not front_moved:
+            self.tc.set_width(max(1e-3, b - a))   # tail resize — stay live/playing
+            return
         self._pending_park = (a, b)
         if self.tc.following:
             self._commit_park()               # leave live now
@@ -596,6 +628,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
             return
         x, y = self.resolver.query(key, self.t0, self.t1,
                                    max_points=max(400, p.width() * 2))
+        x, y = _envelope_midline(x, y)            # clean line, not a zigzag band
         p._curve.setData(x, y)
         p.setXRange(self.t0, self.t1, padding=0)
 
