@@ -26,6 +26,7 @@ from qtpy.QtCore import QEvent, QObject, Qt, Signal
 from qtpy.QtWidgets import QDockWidget, QMainWindow, QToolButton, QWidget
 
 from ..core.device import SinkKind
+from ..core.graph import DataflowGraph, Node, PROCESSOR, SINK, SOURCE
 from ..core.markers import MarkerModel, SessionClock
 from ..core.reading import Reading
 from ..core.trace import Trace
@@ -387,6 +388,31 @@ class Dashboard(QObject):
         return {key: {"name": sp.name}
                 for key, sp in self._sources.items()
                 if sp.dtype == "trace" and self._routes.get(key)}
+
+    def build_graph(self) -> DataflowGraph:
+        """A core, Qt-free snapshot of the current dataflow (DESIGN §4.1) — the
+        model introspection / replay / distribution consult, decoupled from the
+        UI's internal port dicts. (The Dashboard stays the *editor*; this is the
+        extracted *model* — step toward the graph owning routing outright.)"""
+        g = DataflowGraph()
+        for key, sp in self._sources.items():
+            g.add_node(Node(key, SOURCE, sp.name, dtype=sp.dtype, unit=sp.unit,
+                            origin=sp.origin,
+                            meta={"port_kind": sp.kind, "online": sp.online}))
+        for pid, sk in self._sinks.items():
+            g.add_node(Node(pid, SINK, sk.name, dtype=sk.dtype, unit=sk.unit,
+                            origin=sk.origin, accepts=frozenset(sk.accepts),
+                            single_bind=sk.single_bind,
+                            meta={"port_kind": sk.kind, "online": sk.online}))
+        for pid, proc in self._processors.items():
+            ik = getattr(proc, "input_key", "")
+            g.add_node(Node(pid, PROCESSOR, getattr(proc, "name", pid),
+                            ptype=getattr(proc, "kind", ""), input_key=ik))
+            g.connect(ik, pid)                       # source → processor (input bind)
+        for src, targets in self._routes.items():    # source → sink routes
+            for dst in targets:
+                g.connect(src, dst)
+        return g
 
     def detectors_for(self, sink_key: str) -> list:
         with self._det_lock:
