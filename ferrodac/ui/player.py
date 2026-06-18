@@ -30,7 +30,8 @@ class PlayerBar(QtWidgets.QWidget):
         mk = lambda t, fn, tip="": (b := QtWidgets.QToolButton(text=t),
                                     b.setToolTip(tip), b.clicked.connect(fn), b)[0]
         lay.addWidget(mk("⏮", self._back, "Step back"))
-        self._play_btn = mk("▶", self._toggle_play, "Play / pause")
+        self._play_btn = mk("▶ Play", self._toggle_play, "Play / pause")
+        self._play_btn.setCheckable(True)              # lit while moving (live or replay)
         lay.addWidget(self._play_btn)
         lay.addWidget(mk("⏭", self._fwd, "Step forward"))
         self._now_btn = QtWidgets.QToolButton(text="⦿ Live", checkable=True)
@@ -74,7 +75,9 @@ class PlayerBar(QtWidgets.QWidget):
 
     # -- view (reflect the shared head) --------------------------------------
     def _sync(self):
-        self._play_btn.setText("⏸" if self.tc.moving else "▶")   # live counts as playing
+        moving = self.tc.moving                          # live counts as playing
+        self._play_btn.setText("⏸ Pause" if moving else "▶ Play")
+        self._play_btn.setChecked(moving)                # lit while moving
         self._now_btn.blockSignals(True)
         self._now_btn.setChecked(self.tc.following)
         self._now_btn.blockSignals(False)

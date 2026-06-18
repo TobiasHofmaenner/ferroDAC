@@ -419,6 +419,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         bar = QtWidgets.QHBoxLayout()
         mk = lambda t, fn: (b := QtWidgets.QToolButton(text=t), b.clicked.connect(fn), b)[0]
         self._play_btn = mk("▶ Play", self._toggle_play)
+        self._play_btn.setCheckable(True)              # lit while moving (live or replay)
         bar.addWidget(self._play_btn)
         self._live_btn = QtWidgets.QToolButton(text="⦿ Live", checkable=True)
         self._live_btn.setToolTip("Jump to the live edge and follow it")
@@ -583,7 +584,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._sync_transport()
 
     def _sync_transport(self):
-        self._play_btn.setText("⏸ Pause" if self.tc.moving else "▶ Play")  # live=playing
+        moving = self.tc.moving                            # live counts as playing
+        self._play_btn.setText("⏸ Pause" if moving else "▶ Play")
+        self._play_btn.setChecked(moving)                  # lit while moving
         self._live_btn.blockSignals(True)
         self._live_btn.setChecked(self.tc.following)
         self._live_btn.blockSignals(False)

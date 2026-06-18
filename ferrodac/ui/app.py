@@ -2007,6 +2007,8 @@ def apply_dark_theme(app: QApplication) -> None:
         QPushButton, QToolButton { background:#222b3a; border:1px solid #2c374a;
             border-radius:7px; padding:5px 10px; }
         QPushButton:hover:enabled, QToolButton:hover:enabled { background:#2b3850; }
+        QPushButton:checked, QToolButton:checked { background:#4dabf7;
+            color:#0b0b10; border-color:#4dabf7; }
         QToolButton::menu-indicator { image: none; }
         QStatusBar { color:#8b95a4; }
         QDockWidget::title { background:#171c26; padding:5px 8px; font-weight:700; }
