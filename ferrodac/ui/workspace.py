@@ -193,10 +193,16 @@ class WorkspaceArea(QMainWindow):
 class Dashboard(QObject):
     ports_changed = Signal()     # ports or routes changed (docks refresh)
 
-    def __init__(self, area: WorkspaceArea, engine, manager, parent=None):
+    def __init__(self, area: WorkspaceArea, engine, manager, parent=None,
+                 data_bus=None):
         super().__init__(parent)
         self.area = area
         self.engine = engine
+        # Display + analysis read from the replay playback bus (so they can
+        # re-experience history); control writes stay on the live engine. While
+        # following-now the bus is a pass-through of the engine, so this is
+        # behaviour-identical to subscribing to the engine directly (DESIGN §7.4).
+        self.data_bus = data_bus if data_bus is not None else engine
         self.manager = manager
         self._panels: dict = {}                 # panel_id -> Panel
         self.clock = SessionClock()             # one shared time origin
@@ -221,10 +227,21 @@ class Dashboard(QObject):
         self._remote_names: dict = {}            # uuid -> name (hub-viewer devices)
 
         self.area.on_configure = self._configure_panel
-        engine.subscribe(self._on_batch)
+        self.data_bus.subscribe(self._on_data_batch)   # analysis: replayable
+        engine.subscribe(self._on_control_batch)       # control: always live
         self.ports_changed.connect(self._sync_graph)   # keep the core graph current
         manager.active_changed.connect(self._rebuild_device_ports)
         self._rebuild_device_ports()
+
+    # -- introspection (replay / distribution read these) --------------------
+    def source_keys(self) -> list:
+        """All known source keys (device + virtual), online or placeholder — the
+        replay controller re-streams these when the head is parked."""
+        return list(self._sources)
+
+    def panels(self) -> list:
+        """The live panels (display + input), for the replay reset hook."""
+        return list(self._panels.values())
 
     # -- panels --------------------------------------------------------------
     def add_panel(self, kind: str, pid: str = None, title: str = None) -> str:
@@ -248,7 +265,7 @@ class Dashboard(QObject):
             )
             panel.emitted.connect(lambda val, key=key: self._on_virtual_emit(key, val))
         else:
-            panel._unsub = self.engine.subscribe(panel.feed)
+            panel._unsub = self.data_bus.subscribe(panel.feed)
             self._sinks[pid] = SinkPort(
                 pid, panel.title, "numeric", "", "display", "display",
                 accepts=getattr(cls, "accepts", frozenset({"float", "bool"})),
@@ -771,11 +788,19 @@ class Dashboard(QObject):
                 self._write_to_device(sink, src.panel.current_value())
 
     # -- data flow -----------------------------------------------------------
-    def _on_batch(self, batch):
-        """Engine sink: run trace processors + write routed sources to sinks."""
+    def _on_data_batch(self, batch):
+        """Data-bus sink (replayable): run trace processors on complete scans.
+        Sees live readings (pass-through) or, when parked, the re-streamed
+        historic slice — so the analysis pipeline re-experiences old data."""
         for r in batch:
             if isinstance(r.value, Trace) and not r.partial:
-                self._run_processors(r)         # complete scans only
+                self._run_processors(r)
+
+    def _on_control_batch(self, batch):
+        """Engine sink (always live): write routed source values to device
+        control sinks. Control must never be driven by replayed history, so this
+        stays on the live engine, not the playback bus."""
+        for r in batch:
             for sink_key in self._routes.get(r.key, ()):
                 sp = self._sinks.get(sink_key)
                 if sp is not None and sp.kind == "device":
@@ -806,8 +831,8 @@ class Dashboard(QObject):
                 if sp is not None and sp.kind == "device":
                     self.manager.write(sp.device_id, sp.sink_id, None, silent=True)
             return
-        # slider/toggle: publish as a reading so displays show it; _on_batch then
-        # writes it to any routed device sinks.
+        # slider/toggle: publish as a reading so displays show it; the control
+        # sink (_on_control_batch) then writes it to any routed device sinks.
         self.engine.publish(
             Reading("ui", source_key.split("/", 1)[1], time.time(), float(value))
         )

@@ -1405,14 +1405,9 @@ class MainWindow(QMainWindow):
 
         self.workspace = WorkspaceArea()
         self.setCentralWidget(self.workspace)
-        self.dashboard = Dashboard(self.workspace, engine, manager)
-        self.dashboard.add_panel("chart")
 
-        # networking: publish to / consume from a hub (optional, needs grpcio)
-        self.hub = HubController(self.dashboard, engine, manager, self)
-        self.hub.status.connect(lambda msg: self.statusBar().showMessage(msg, 6000))
-
-        # data plane: always-on hot history + the recorder
+        # data plane: always-on hot history + the recorder. Built BEFORE the
+        # dashboard so the dashboard can render through the replay playback bus.
         self.history = HistoryBuffer()
         engine.subscribe(self.history.feed)
         self.recorder = Recorder(engine, self.history, on_change=self._on_record_change)
@@ -1423,17 +1418,40 @@ class MainWindow(QMainWindow):
         # ring if zarr/disk is unavailable.
         self.store_writer = None
         self.resolver = None
+        self.time_context = None
+        self.replay = None
         try:
-            from ..store import RamTier, Resolver, StoreWriter, ZarrStore
+            from ..store import (RamTier, ReplayController, Resolver,
+                                 StoreWriter, TimeContext, ZarrStore)
             os.makedirs(self._app_dir(), exist_ok=True)
             store = ZarrStore(os.path.join(self._app_dir(), "store.zarr"))
             self.store_writer = StoreWriter(store)
             self.store_writer.attach(engine)
             # the read path: one query() over the live RAM ring + the durable store
             self.resolver = Resolver([RamTier(self.history), store])
+            # replay spine (DESIGN §7.4): one head + a playback Bus the whole
+            # dashboard renders through. Following-now → the live engine passes
+            # straight through (≡ today); parked → re-stream history (W2). W1
+            # wires the pass-through and verifies it's behaviour-identical.
+            self.time_context = TimeContext()
+            self.replay = ReplayController(
+                engine, store, self.time_context,
+                sources=lambda: self.dashboard.source_keys(),
+                on_reset=self._replay_reset,
+            )
         except Exception as exc:                       # noqa: BLE001
             import logging
             logging.getLogger("ferrodac").warning("durable store disabled: %s", exc)
+
+        # the dashboard renders through the replay playback bus when available,
+        # else straight off the engine (data plane disabled) — identical live.
+        data_bus = self.replay.bus if self.replay is not None else engine
+        self.dashboard = Dashboard(self.workspace, engine, manager, data_bus=data_bus)
+        self.dashboard.add_panel("chart")
+
+        # networking: publish to / consume from a hub (optional, needs grpcio)
+        self.hub = HubController(self.dashboard, engine, manager, self)
+        self.hub.status.connect(lambda msg: self.statusBar().showMessage(msg, 6000))
 
         # working-session autosave (tags/layout survive restart & crashes)
         self._autosave_on = False
@@ -1846,6 +1864,18 @@ class MainWindow(QMainWindow):
     def _remember(path: str) -> None:
         QSettings("ferroDAC", "ferroDAC").setValue("lastSession", path)
 
+    def _replay_reset(self) -> None:
+        """Called by the ReplayController when the view jumps (park/scrub/return
+        to live) so display panels drop stale data before re-experiencing the
+        slice. No-op while following (W1); panels gain a clear hook in W2."""
+        for panel in self.dashboard.panels():
+            clear = getattr(panel, "clear_history", None) or getattr(panel, "reset", None)
+            if callable(clear):
+                try:
+                    clear()
+                except Exception:
+                    pass
+
     def closeEvent(self, event):  # noqa: N802
         if self.recorder.active:        # finalize rather than leave it dangling
             ms = self.dashboard.markers
@@ -1857,6 +1887,8 @@ class MainWindow(QMainWindow):
         if self._autosave_on:
             self._do_autosave()
         self.hub.disconnect()
+        if self.replay is not None:
+            self.replay.stop()              # unsubscribe the playback bus
         if self.store_writer is not None:
             self.store_writer.stop()        # flush the buffer + build final rollups
         self.dashboard.shutdown()
