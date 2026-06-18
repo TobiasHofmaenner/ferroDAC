@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time as _time
 
+from ..core.bus import Bus
 from ..core.reading import Reading
 
 
@@ -113,3 +114,55 @@ class PlaybackSource:
             self.bus.publish(r)
         self.bus.drain()                             # fan the chunk to subscribers
         return len(batch)
+
+
+class ReplayController:
+    """The L3 spine: one **playback Bus** the whole app subscribes to, fed either
+    by the live engine (following now) or by re-streaming the historic slice
+    (parked). "Live is just the head at now." Driven by a shared `TimeContext`;
+    calls `on_reset` when the view jumps (so consumers clear stale data).
+
+    Source selection is a callable (the routed sources, from the dataflow graph).
+    Qt-free; the engine it subscribes to may be the Qt Engine — only `subscribe`
+    is used. Replay runs synchronously on park for now (off-thread is a later
+    optimisation, signalled by the realtime-rate readout)."""
+
+    def __init__(self, engine, store, time_context, sources=None, on_reset=None):
+        self.store = store
+        self.tc = time_context
+        self.bus = Bus()                             # what the dashboard subscribes to
+        self.playback = PlaybackSource(store, self.bus)
+        self._sources = sources or store.sources     # callable → [source keys]
+        self.on_reset = on_reset
+        self._was_following = time_context.following
+        self._played_to = None
+        self._live_unsub = engine.subscribe(self._on_live)
+        self._ctx_unsub = time_context.subscribe(self._on_context)
+
+    def _on_live(self, batch) -> None:
+        if self.tc.following:                        # live → straight to the playback bus
+            for r in batch:
+                self.bus.publish(r)
+            self.bus.drain()
+
+    def _on_context(self) -> None:
+        if self.tc.following:
+            if not self._was_following and self.on_reset:
+                self.on_reset()                      # returned to live → clear historic
+            self._was_following = True
+            self._played_to = None
+            return
+        t0, t1 = self.tc.window
+        if self.tc.playing and self._played_to is not None and self._played_to >= t0:
+            # advancing playhead → stream only the newly-revealed range
+            self.playback.stream(list(self._sources()), self._played_to, t1)
+        else:
+            if self.on_reset:                        # fresh park / scrub → clear + full replay
+                self.on_reset()
+            self.playback.stream(list(self._sources()), t0, t1)
+        self._played_to = t1
+        self._was_following = False
+
+    def stop(self) -> None:
+        self._live_unsub()
+        self._ctx_unsub()

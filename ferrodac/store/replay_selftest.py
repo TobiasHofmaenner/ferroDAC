@@ -61,6 +61,36 @@ def main() -> int:
     print(f"✓ PlaybackSource: streamed all {n} samples, time-ordered, "
           f"in {drains[0]} chunks, keys preserved")
 
+    # ReplayController: one playback bus, fed by live or historic per the head
+    from ..core.reading import Reading
+    from . import ReplayController
+
+    class _Eng:
+        def __init__(s): s.subs = []
+        def subscribe(s, cb): s.subs.append(cb); return lambda: s.subs.remove(cb)
+        def pub(s, b): [cb(b) for cb in list(s.subs)]
+
+    eng = _Eng()
+    tc = TimeContext(width=300.0, now_fn=lambda: base + 300)
+    resets = [0]
+    out: list = []
+    ctl = ReplayController(eng, st, tc, sources=lambda: ["dev/a"],
+                           on_reset=lambda: (out.clear(), resets.__setitem__(0, resets[0] + 1)))
+    ctl.bus.subscribe(lambda b: out.extend(b))
+
+    eng.pub([Reading("dev", "a", base + 300, 1.0)])
+    assert any(r.value == 1.0 for r in out)                   # following → live on bus
+    out.clear()
+    tc.park(base + 100)                                       # historic window
+    assert resets[0] >= 1 and len(out) > 0                    # reset + historic replay
+    eng.pub([Reading("dev", "a", base + 300, 99.0)])
+    assert not any(r.value == 99.0 for r in out)              # parked blocks live
+    out.clear(); r0 = resets[0]
+    tc.follow_now(); eng.pub([Reading("dev", "a", base + 300, 2.0)])
+    assert resets[0] > r0 and any(r.value == 2.0 for r in out)  # back to live
+    print("✓ ReplayController: follow→live, park→reset+historic, parked blocks "
+          "live, follow→resumes")
+
     print("\nREPLAY SELFTEST PASS")
     return 0
 
