@@ -1420,6 +1420,7 @@ class MainWindow(QMainWindow):
         self.resolver = None
         self.time_context = None
         self.replay = None
+        self._live_t0 = None             # remembers the live clock origin across replay
         try:
             from ..store import (RamTier, ReplayController, Resolver,
                                  StoreWriter, TimeContext, ZarrStore)
@@ -1865,16 +1866,22 @@ class MainWindow(QMainWindow):
         QSettings("ferroDAC", "ferroDAC").setValue("lastSession", path)
 
     def _replay_reset(self) -> None:
-        """Called by the ReplayController when the view jumps (park/scrub/return
-        to live) so display panels drop stale data before re-experiencing the
-        slice. No-op while following (W1); panels gain a clear hook in W2."""
+        """Called by the ReplayController when the head jumps (park / scrub /
+        return to live): rebase the shared clock so the rendered window reads
+        cleanly, then drop accumulated display data so the panels re-experience
+        the new slice from scratch. Parked → origin = window start (slice shows
+        from 0); following → restore the live session origin."""
+        tc = self.time_context
+        clk = self.dashboard.clock
+        if self._live_t0 is None:
+            self._live_t0 = clk.t0
+        if tc is not None:
+            clk.t0 = self._live_t0 if tc.following else tc.window[0]
         for panel in self.dashboard.panels():
-            clear = getattr(panel, "clear_history", None) or getattr(panel, "reset", None)
-            if callable(clear):
-                try:
-                    clear()
-                except Exception:
-                    pass
+            try:
+                panel.clear_history()
+            except Exception:
+                pass
 
     def closeEvent(self, event):  # noqa: N802
         if self.recorder.active:        # finalize rather than leave it dangling

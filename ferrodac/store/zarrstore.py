@@ -64,6 +64,14 @@ class ZarrStore:
     def sources(self) -> list:
         return [self.root[n].attrs.get("key", n) for n in self.root.group_keys()]
 
+    def source_dtype(self, uuid) -> str:
+        """The stored datatype tag of a source ("scalar" | "trace" | …) — lets
+        the replay path pick read_raw vs read_raw_trace. "scalar" if unknown."""
+        try:
+            return self._source(uuid).attrs.get("dtype", "scalar")
+        except KeyError:
+            return "scalar"
+
     def _source(self, uuid):
         return self.root[self._gname(uuid)]
 

@@ -62,6 +62,11 @@ class Panel(QWidget):
     def remove_source(self, key: str) -> None: ...
     def feed(self, batch: list) -> None: ...
 
+    def clear_history(self) -> None:
+        """Drop accumulated display data so the panel can re-experience a new
+        slice from scratch — called by the replay reset when the head jumps
+        (park / scrub / return to live). Default: nothing to clear."""
+
     def state(self) -> dict:
         """Per-panel state to persist in a saved session (override as needed)."""
         return {}
@@ -326,6 +331,12 @@ class ChartPanel(Panel):
             ys.append(r.value if ok else float("nan"))
             self._curves[r.key].setData(xs, ys, connect="finite")
 
+    def clear_history(self):
+        for key, (xs, ys) in self._buf.items():
+            xs.clear(); ys.clear()
+            self._curves[key].setData([], [])
+        self._sync_markers()                  # reposition tags at the new time base
+
 
 class _Readout(QFrame):
     def __init__(self, source, color: str, parent=None):
@@ -483,6 +494,13 @@ class SpectrumPanel(Panel):
                 self.plot.removeItem(curve)
         self._last_complete.pop(key, None)
 
+    def clear_history(self):
+        for store in (self._curves, self._prev_curves):
+            for c in store.values():
+                c.setData([], [])
+        self._last_complete.clear()
+        self._xr = None
+
     def feed(self, batch):
         # latest[key] = [trace_to_show, complete_trace_or_None]
         latest: dict = {}
@@ -614,6 +632,10 @@ class WaterfallPanel(Panel):
             self._src_key = None
             self._buf = None
             self.img.clear()
+
+    def clear_history(self):
+        self._buf = None                  # rebuilt blank on the next replayed scan
+        self.img.clear()
 
     def feed(self, batch):
         tr = None
@@ -760,6 +782,14 @@ class SpectrumWaterfallPanel(Panel):
         self._src_key = None
         self.img.clear()
         self._buf = None
+
+    def clear_history(self):
+        self._buf = None
+        self.img.clear()
+        if self._prev_curve is not None:
+            self._prev_curve.setData([], [])
+        for c in self._curves.values():
+            c.setData([], [])
 
     def feed(self, batch):
         show = complete = None

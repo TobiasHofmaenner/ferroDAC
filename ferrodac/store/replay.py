@@ -15,6 +15,7 @@ import time as _time
 
 from ..core.bus import Bus
 from ..core.reading import Reading
+from ..core.trace import Trace
 
 
 class TimeContext:
@@ -90,10 +91,17 @@ class PlaybackSource:
         emitted. (Window-bounded; vectorised batches are a later optimisation.)"""
         rows: list = []
         for sid in sources:
-            t, v = self.store.read_raw(sid, t0, t1)
+            dev, _, src = sid.rpartition("/")        # key 'device/source' → Reading
+            if self._is_trace(sid):                  # 2-D scans → Trace readings
+                for times, Y, x in self.store.read_raw_trace(sid, t0, t1):
+                    rows.extend(
+                        (float(times[i]),
+                         Reading(dev, src, float(times[i]), Trace(x=x, y=Y[i])))
+                        for i in range(len(times)))
+                continue
+            t, v = self.store.read_raw(sid, t0, t1)  # full-res scalars
             if not len(t):
                 continue
-            dev, _, src = sid.rpartition("/")        # key 'device/source' → Reading
             rows.extend((float(t[i]), Reading(dev, src, float(t[i]), float(v[i])))
                         for i in range(len(t)))
         if not rows:
@@ -108,6 +116,10 @@ class PlaybackSource:
         if batch:
             n += self._emit(batch)
         return n
+
+    def _is_trace(self, sid) -> bool:
+        sd = getattr(self.store, "source_dtype", None)
+        return sd(sid) == "trace" if sd else False
 
     def _emit(self, batch) -> int:
         for r in batch:
@@ -147,8 +159,11 @@ class ReplayController:
 
     def _on_context(self) -> None:
         if self.tc.following:
-            if not self._was_following and self.on_reset:
-                self.on_reset()                      # returned to live → clear historic
+            if not self._was_following:
+                if self.on_reset:
+                    self.on_reset()                  # returned to live → clear historic
+                t0, t1 = self.tc.window              # re-seed the recent window so the
+                self.playback.stream(list(self._sources()), t0, t1)  # chart isn't empty
             self._was_following = True
             self._played_to = None
             return

@@ -61,6 +61,22 @@ def main() -> int:
     print(f"✓ PlaybackSource: streamed all {n} samples, time-ordered, "
           f"in {drains[0]} chunks, keys preserved")
 
+    # PlaybackSource replays TRACE sources too (2-D scans → Trace readings),
+    # full-res, so the spectrum re-experiences history just like scalars.
+    from ..core.trace import Trace
+    axis = np.linspace(1, 50, 64)
+    st.add_source("rga/spec", dtype="trace")
+    for i in range(20):
+        st.append_trace("rga/spec", base + i, axis,
+                        np.exp(-((axis - 18) ** 2)), epoch="e0")
+    tbus = Bus(); tgot: list = []
+    tbus.subscribe(lambda b: tgot.extend(b))
+    nt = PlaybackSource(st, tbus, chunk=8).stream(["rga/spec"], base, base + 19)
+    assert nt == len(tgot) == 20, (nt, len(tgot))
+    assert all(isinstance(r.value, Trace) for r in tgot), "trace not reconstructed"
+    assert tgot[0].value.y.shape == (64,) and tgot[0].key == "rga/spec"
+    print(f"✓ PlaybackSource: replayed {nt} TRACE scans full-res as Trace readings")
+
     # ReplayController: one playback bus, fed by live or historic per the head
     from ..core.reading import Reading
     from . import ReplayController
@@ -86,10 +102,13 @@ def main() -> int:
     eng.pub([Reading("dev", "a", base + 300, 99.0)])
     assert not any(r.value == 99.0 for r in out)              # parked blocks live
     out.clear(); r0 = resets[0]
-    tc.follow_now(); eng.pub([Reading("dev", "a", base + 300, 2.0)])
-    assert resets[0] > r0 and any(r.value == 2.0 for r in out)  # back to live
-    print("✓ ReplayController: follow→live, park→reset+historic, parked blocks "
-          "live, follow→resumes")
+    tc.follow_now()
+    assert resets[0] > r0 and len(out) > 0      # return-to-live re-seeds the window
+    seeded = len(out)
+    eng.pub([Reading("dev", "a", base + 300, 2.0)])
+    assert any(r.value == 2.0 for r in out)     # …then live resumes on top
+    print(f"✓ ReplayController: follow→live, park→reset+historic, parked blocks "
+          f"live, follow→re-seeds ({seeded} pts) + resumes")
 
     print("\nREPLAY SELFTEST PASS")
     return 0
