@@ -585,7 +585,10 @@ class TimelineWindow(QtWidgets.QMainWindow):
             p._img.clear()
             p.setXRange(self.t0, self.t1, padding=0)
             return
-        times, Y, x = max(blocks, key=lambda b: len(b[0]))    # densest epoch in view
+        # the MOST RECENT epoch in view — live scans land in the current epoch,
+        # which may have fewer scans than an older (denser) one; picking by count
+        # would freeze the preview on stale history.
+        times, Y, x = max(blocks, key=lambda b: b[0][-1])
         z = np.log10(np.clip(Y, 1e-12, None))                 # (n_time, n_mass)
         p._img.setImage(z, autoLevels=True)
         x0, x1 = float(x[0]), float(x[-1])
