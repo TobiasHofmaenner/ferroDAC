@@ -114,6 +114,81 @@ Two orthogonal "planes" run across this:
 And two **data regimes** (see §11): **telemetry** (scalar, ≤~kHz) and
 **waveform** (blocks, kHz–GHz) — different pipelines, chosen by modality.
 
+### 4.1 Core foundation: layers, the dataflow graph & extensibility (decided 2026-06-18)
+
+The app grew organically; the base concepts are now settled, so we decouple them
+behind defined interfaces. **Survey finding:** the *vocabulary* is already Qt-free
+and clean (`Reading`, `Source`, `Sink`, `Device`/`DeviceDescriptor`, `Tag`,
+`Trace`, and the `Processor.process()` base in `analysis/`); what's coupled is the
+*orchestration* — the `Engine` bus is a `QObject`/`QTimer`, and **the dataflow
+graph + processor lifecycle live in the UI** (`ui/workspace.py`). The nodes are
+clean; the graph and bus that connect them are stuck in Qt. The decoupling:
+
+**Four layers, Qt only at the top.**
+
+```
+L1  Vocabulary (Qt-free)        Reading · Source · Sink · Device · Tag · Trace
+L2  Data plane (Qt-free)        Bus · DataTier(coverage/query/read_raw) ·
+                                DataflowGraph · Processor(relocatable) · TimeContext
+L3  Orchestration (Qt-free)     Executor: runs the graph live|replay, local|distributed
+L4  UI (Qt) = VIEWS over L2/L3  panels=sink views · patch-bay=graph editor ·
+                                timeline=TimeContext control
+    Net (gRPC)                  hub agent/viewer · (future) compute dispatch
+```
+
+Key interfaces:
+- **`Source`** emits readings · **`Sink`** consumes · **`DataTier`** =
+  `coverage`/`query`(downsampled, display) /`read_raw`(full-res, analysis) — the
+  resolver/store already implement this.
+- **`Bus`** — readings → subscribers, behind a **Qt-free interface**; the GUI
+  supplies the event-loop-driven impl (so headless replay/compute need no Qt).
+- **`DataflowGraph`** (NEW, lifted out of the UI into core) — nodes
+  (devices/sources/processors/sinks) + edges (routes); queryable: `nodes()`,
+  `edges()`, `inputs_of()`, `downstream_of()`. The single substrate for the
+  patch-bay, **dataflow introspection** (draw the graph), replay, and distribution.
+- **`Processor`** — formalised into a **relocatable compute node** (see below).
+- **`TimeContext`** (NEW) — the head (following-now | parked) that drives L3.
+
+Decoupling refactor order (each shippable; app stays runnable):
+1. **Lift `DataflowGraph` into core** (Qt-free); Dashboard becomes a view/editor.
+2. **Qt-free `Bus` interface** (the `QTimer` Engine becomes one impl).
+3. **Processor lifecycle onto the graph** (register on the graph, not the UI) +
+   the spec/parallel-semantic/placement fields (local-only for now).
+4. Then build replay (`TimeContext` + `Executor` + `PlaybackSource`) on this base.
+
+**Distributed compute (reserve the seam; build later).** Turn hub-connected nodes
+into a compute cluster: a heavy, parallelisable analysis is split into slices and
+run on **other clients** and/or **autoscaled hub pods (HPA on k8s)**. The
+architecture fits because gRPC is already the data-plane transport *and* the
+**reserved bidi-`Session` down-channel** dispatches work to egress-only lab boxes
+with no inbound exposure. The requirement it imposes on L2: a **`Processor` is a
+relocatable compute unit** —
+- **serializable spec** `(type, params)` (the code lives on each node; only config
+  travels);
+- **clean data contract** `raw-in → derived-out` (no machine/Qt coupling);
+- **declared parallelisation semantic** `map | windowed(lookback) | reduce` (so the
+  scheduler partitions *correctly* — wrong partitioning corrupts physics, same
+  class of error as downsampling analysis input);
+- **placement** `local | peer | hub` on the graph node (everything `local` today).
+
+Composes with replay (stream a raw slice to wherever the processor lives). Clients
+**advertise capabilities** (RAM, CPU, GPU, OpenCL/CUDA) on the agent `Hello`, so the
+scheduler can place by capability. Auth uses the reserved token seam.
+
+**Extensibility — two tiers, core stays Qt-free.**
+1. **Core capability (required, Qt-free):** a **driver** (`Device` subclass) or a
+   **processor** (`Processor` subclass) self-registers on import. Discovery extends
+   from builtin-only to **entry-point discovery** (`ferrodac.drivers` /
+   `ferrodac.processors`), so a pip-installed third-party plugin is found
+   automatically. Descriptor `Options`/`Sinks` drive an **auto-generated generic
+   UI** — zero UI code needed for a working config surface.
+2. **Optional UI companion (Qt):** a plugin *may also* ship a custom Qt widget
+   (`make_config_widget(device)` / a custom `Panel`), discovered *alongside* the
+   core capability and used if present, else the generic UI. **The core never
+   imports the UI tier** — headless deployments (hub, replay, compute nodes) load
+   only L1–L3. This is how a vendor ships a rich tuning/calibration panel with
+   their driver without coupling core to Qt.
+
 ---
 
 ## 5. HAL / driver layer
