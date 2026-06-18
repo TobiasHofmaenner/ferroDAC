@@ -1519,11 +1519,6 @@ class MainWindow(QMainWindow):
             self._tc_play_timer = QTimer(self)
             self._tc_play_timer.timeout.connect(self._tc_play_tick)
             self._tc_play_timer.start(50)
-            # the whole dashboard follows the head/tail: point every panel's
-            # viewport at the shared window on any clock change (cheap X-range
-            # move — no re-stream). L3.
-            self.time_context.subscribe(self._on_tc_view)
-            self._on_tc_view()
 
         self._build_menus()
 
@@ -1896,13 +1891,6 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _remember(path: str) -> None:
         QSettings("ferroDAC", "ferroDAC").setValue("lastSession", path)
-
-    def _on_tc_view(self) -> None:
-        """Shared head/tail changed → move every panel's viewport to the window
-        (cheap; no re-stream). Runs after the ReplayController so any clock
-        rebase on a park has already been applied."""
-        if self.time_context is not None:
-            self.dashboard.set_view_window(*self.time_context.window)
 
     def _tc_live_tick(self) -> None:
         """Advance the head to now while following (live)."""

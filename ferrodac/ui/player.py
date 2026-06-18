@@ -65,12 +65,7 @@ class PlayerBar(QtWidgets.QWidget):
         self.tc.park(self.tc.head + self.tc.width / 2)    # park clamps to now
 
     def _toggle_play(self):
-        if self.tc.playing:
-            self.tc.playing = False
-        else:
-            if self.tc.following:                         # nothing ahead → park first
-                self.tc.park(self.tc.head)
-            self.tc.playing = True
+        self.tc.pause() if self.tc.moving else self.tc.play()
         self._sync()
 
     def _set_live(self, on):
@@ -82,7 +77,7 @@ class PlayerBar(QtWidgets.QWidget):
 
     # -- view (reflect the shared head) --------------------------------------
     def _sync(self):
-        self._play_btn.setText("⏸" if self.tc.playing else "▶")
+        self._play_btn.setText("⏸" if self.tc.moving else "▶")   # live counts as playing
         self._now_btn.blockSignals(True)
         self._now_btn.setChecked(self.tc.following)
         self._now_btn.blockSignals(False)

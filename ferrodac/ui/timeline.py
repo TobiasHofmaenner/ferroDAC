@@ -559,13 +559,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._refresh()
 
     def _toggle_play(self):
-        # the app's play timer does the ticking; here we only flip tc.playing
-        if self.tc.playing:
-            self.tc.playing = False
-        else:
-            if self.tc.following:             # nothing ahead of now → park first
-                self.tc.park(self.tc.head)
-            self.tc.playing = True
+        # the app's timers do the ticking; here we only flip the motion state
+        self.tc.pause() if self.tc.moving else self.tc.play()
         self._sync_transport()
 
     def _set_live(self, on):
@@ -576,7 +571,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._sync_transport()
 
     def _sync_transport(self):
-        self._play_btn.setText("⏸ Pause" if self.tc.playing else "▶ Play")
+        self._play_btn.setText("⏸ Pause" if self.tc.moving else "▶ Play")  # live=playing
         self._live_btn.blockSignals(True)
         self._live_btn.setChecked(self.tc.following)
         self._live_btn.blockSignals(False)

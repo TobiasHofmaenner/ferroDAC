@@ -59,9 +59,31 @@ class TimeContext:
         self._notify()
 
     def park(self, head: float):
-        # the head can never be in the future — clamp to now
-        self.following, self.head = False, min(float(head), self._now())
+        # a head jump (scrub/step/calendar) is discontinuous: stop live-follow AND
+        # playback so the controller does a clean reload at the new spot (no stale
+        # incremental). The head can never be in the future — clamp to now.
+        self.following = self.playing = False
+        self.head = min(float(head), self._now())
         self._notify()
+
+    @property
+    def moving(self) -> bool:
+        """The head is advancing — live (following at 1x) or replaying (playing).
+        The transport's play/pause reflects this; ● Now implies it."""
+        return self.following or self.playing
+
+    def pause(self):
+        """Freeze the head where it is (stop both live-follow and replay)."""
+        self.following = self.playing = False
+        self._notify()
+
+    def play(self):
+        """Resume motion: live if we're at the live edge, else replay forward."""
+        if self.head >= self._now() - 1.0:
+            self.follow_now()
+        else:
+            self.playing = True
+            self._notify()
 
     def set_width(self, width: float):
         self.width = max(1e-3, float(width))
@@ -196,7 +218,9 @@ class ReplayController:
             self._played_to = None
             return
         t0, t1 = self.tc.window
-        if self.tc.playing and self._played_to is not None and self._played_to >= t0:
+        cont = (self.tc.playing and self._played_to is not None
+                and t0 <= self._played_to <= t1)     # smooth play advance only
+        if cont:
             # advancing playhead → stream only the newly-revealed range
             self.playback.stream(list(self._sources()), self._played_to, t1)
         else:

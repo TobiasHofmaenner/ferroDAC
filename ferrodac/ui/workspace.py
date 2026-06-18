@@ -244,15 +244,6 @@ class Dashboard(QObject):
         names as the dashboard (not the raw source IDs)."""
         return {k: p.name for k, p in self._sources.items() if p.name}
 
-    def set_view_window(self, t0: float, t1: float) -> None:
-        """Point every panel's viewport at the shared time window (cheap X-range
-        move) so the whole dashboard follows the head/tail — L3."""
-        for panel in self._panels.values():
-            try:
-                panel.set_window(t0, t1)
-            except Exception:
-                pass
-
     def panels(self) -> list:
         """The live panels (display + input), for the replay reset hook."""
         return list(self._panels.values())
