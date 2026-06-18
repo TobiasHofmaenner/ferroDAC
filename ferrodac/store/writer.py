@@ -19,6 +19,8 @@ import time
 
 import numpy as np
 
+from ..core.trace import Trace
+
 _CHUNK = 4096            # samples buffered per source before a flush
 _INTERVAL = 5.0         # …or this many seconds, whichever first
 _ROLLUP_EVERY = 50_000  # rebuild a source's rollup pyramid every N new samples
@@ -35,6 +37,8 @@ class StoreWriter:
         self._known: set = set()        # sources declared in the store
         self._last_flush: dict = {}     # key -> monotonic seconds
         self._since_rollup: dict = {}   # key -> samples appended since last rollup
+        self._trace_x: dict = {}        # key -> last axis seen (for epoch rolling)
+        self._trace_gen: dict = {}      # key -> axis generation (epoch suffix)
         self._unsub = None
         # one epoch per app session, so a restart leaves a real coverage gap (the
         # resolver breaks the line there) instead of bridging stop→resume.
@@ -58,15 +62,33 @@ class StoreWriter:
         now = time.monotonic()
         for r in batch:
             if getattr(r, "partial", False):
-                continue
+                continue                         # preview frame — only complete scans
             v = r.value
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                continue                         # scalar floats only (traces later)
-            key = r.key
-            tb, vb = self._buf.setdefault(key, ([], []))
+            if isinstance(v, Trace):
+                self._feed_trace(r.key, r.t, v)
+                continue
+            if isinstance(v, bool):
+                v = 1.0 if v else 0.0            # persist bool as 0/1 scalar
+            elif not isinstance(v, (int, float)):
+                continue
+            tb, vb = self._buf.setdefault(r.key, ([], []))
             tb.append(float(r.t)); vb.append(float(v))
-            if len(tb) >= self._chunk or now - self._last_flush.get(key, 0.0) > self._interval:
-                self._flush(key)
+            if len(tb) >= self._chunk or now - self._last_flush.get(r.key, 0.0) > self._interval:
+                self._flush(r.key)
+
+    def _feed_trace(self, key, t, trace) -> None:
+        x = np.asarray(trace.x, dtype="f8")
+        if len(x) == 0:
+            return
+        last = self._trace_x.get(key)
+        if last is None or last.shape != x.shape or not np.array_equal(last, x):
+            self._trace_gen[key] = self._trace_gen.get(key, -1) + 1   # axis change
+            self._trace_x[key] = x
+        if key not in self._known:
+            self.store.add_source(key, name=key, dtype="trace")
+            self._known.add(key)
+        self.store.append_trace(key, t, x, trace.y,
+                                epoch=f"{self._epoch}__t{self._trace_gen[key]}")
 
     # -- internals -----------------------------------------------------------
     def _flush(self, key) -> None:

@@ -159,7 +159,8 @@ class ZarrStore:
             if not a.get("n", 0) or a["t1"] < t0 or a["t0"] > t1:
                 continue
             t = np.asarray(eg["t"][:])
-            i0, i1 = np.searchsorted(t, [t0, t1])
+            i0 = int(np.searchsorted(t, t0, side="left"))
+            i1 = int(np.searchsorted(t, t1, side="right"))
             if i1 > i0:
                 ts.append(t[i0:i1])
                 vs.append(np.asarray(eg["v"][i0:i1]))
@@ -171,6 +172,66 @@ class ZarrStore:
             order = np.argsort(t, kind="stable")
             t, v = t[order], v[order]
         return t, v
+
+    # -- traces (2-D: a spectrum/scan per timestamp) -------------------------
+    def append_trace(self, uuid, t, x, y, epoch: str) -> None:
+        """Append one scan (axis `x`, intensities `y`) at time `t`. The axis is
+        fixed within an epoch; the writer rolls to a new epoch on an axis change
+        (config-epoch, DESIGN §7.4)."""
+        g = self._source(uuid)
+        x = np.asarray(x, dtype="f8").ravel()
+        y = np.asarray(y, dtype="f8").ravel()
+        if len(y) == 0:
+            return
+        m = len(y)
+        epochs = list(g.attrs.get("epochs", []))
+        if epoch not in epochs:
+            epochs.append(epoch)
+            g.attrs["epochs"] = epochs
+        eg = g.require_group(epoch)
+        if "y" not in eg:                            # first scan: arrays + axis
+            eg.create_array("t", shape=(0,), chunks=(4096,), dtype="f8")
+            eg.create_array("y", shape=(0, m), chunks=(256, m), dtype="f8")
+            self._put(eg, "x", x)
+            eg.attrs["modality"] = "trace"
+            eg.attrs["m"] = int(m)
+        ta, ya = eg["t"], eg["y"]
+        if ya.shape[1] != m:                         # shape mismatch — should not happen
+            return
+        n0 = ta.shape[0]
+        ta.resize((n0 + 1,)); ta[n0] = float(t)
+        ya.resize((n0 + 1, m)); ya[n0] = y
+        eg.attrs["t0"] = float(ta[0]); eg.attrs["t1"] = float(t); eg.attrs["n"] = n0 + 1
+
+    def read_raw_trace(self, uuid, t0, t1) -> list:
+        """FULL-RES trace scans in [t0,t1] as per-epoch blocks (the axis differs
+        per epoch): list of (times[k], Y[k, m], x[m]). For analysis/replay."""
+        g = self._source(uuid)
+        out = []
+        for key in g.attrs.get("epochs", []):
+            eg = g[key]; a = eg.attrs
+            if not a.get("n", 0) or a.get("modality") != "trace":
+                continue
+            if a["t1"] < t0 or a["t0"] > t1:
+                continue
+            t = np.asarray(eg["t"][:])
+            i0 = int(np.searchsorted(t, t0, side="left"))
+            i1 = int(np.searchsorted(t, t1, side="right"))
+            if i1 > i0:
+                out.append((t[i0:i1], np.asarray(eg["y"][i0:i1]),
+                            np.asarray(eg["x"][:])))
+        return out
+
+    def query_trace(self, uuid, t0, t1, max_scans=400) -> list:
+        """For the waterfall *display*: scans in the window, time-decimated to
+        ~max_scans representative spectra (display only — never for math)."""
+        out = []
+        for (t, Y, x) in self.read_raw_trace(uuid, t0, t1):
+            if len(t) > max_scans:
+                idx = np.linspace(0, len(t) - 1, max_scans).astype(int)
+                t, Y = t[idx], Y[idx]
+            out.append((t, Y, x))
+        return out
 
     def query(self, uuid, t0, t1, max_points=2000):
         """Windowed, resolution-aware min/max envelope, stitched across epochs.
@@ -208,7 +269,8 @@ class ZarrStore:
         lvl = 0 if factor <= 1 else min(levels, math.ceil(math.log(factor) / math.log(_F)))
         if lvl <= 0:                                  # raw (window is small enough)
             t = np.asarray(eg["t"][:])
-            i0, i1 = np.searchsorted(t, [a, b])
+            i0 = int(np.searchsorted(t, a, side="left"))
+            i1 = int(np.searchsorted(t, b, side="right"))
             tx, vy = t[i0:i1], np.asarray(eg["v"][i0:i1])
             if len(tx) > budget * 2:                  # raw denser than asked → bucket
                 txd, mn, mx = _downsample(tx, vy, vy, max(2, len(tx) // budget))
