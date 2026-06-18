@@ -102,13 +102,19 @@ def main() -> int:
     eng.pub([Reading("dev", "a", base + 300, 99.0)])
     assert not any(r.value == 99.0 for r in out)              # parked blocks live
     out.clear(); r0 = resets[0]
-    tc.follow_now()
-    assert resets[0] > r0 and len(out) > 0      # return-to-live re-seeds the window
-    seeded = len(out)
+    tc.follow_now()                             # return to live: NO reload (panels hold
+    assert resets[0] == r0                      # the data) — just catch up + resume
     eng.pub([Reading("dev", "a", base + 300, 2.0)])
-    assert any(r.value == 2.0 for r in out)     # …then live resumes on top
-    print(f"✓ ReplayController: follow→live, park→reset+historic, parked blocks "
-          f"live, follow→re-seeds ({seeded} pts) + resumes")
+    assert tc.following and any(r.value == 2.0 for r in out)   # live resumes on top
+    print("✓ ReplayController: follow→live, park→reset+historic, parked blocks "
+          "live, follow→resumes WITHOUT reload")
+
+    # transport (pause/play) must NOT reload — only navigation does
+    r1 = resets[0]
+    tc.pause();  eng.pub([Reading("dev", "a", base + 300, 3.0)])
+    tc.play()
+    assert resets[0] == r1, "pause/play must not reload"
+    print("✓ ReplayController: pause/play are free (no reload); only nav reloads")
 
     print("\nREPLAY SELFTEST PASS")
     return 0

@@ -34,6 +34,9 @@ class TimeContext:
         self.rate: float = 1.0           # achieved playback rate (set by the driver)
         self.grow: bool = False          # play/follow: grow from an anchor vs slide
         self.anchor: float | None = None # pinned back edge while growing
+        self.nav: int = 0                # bumps on navigation (scrub/tail-drag) only —
+        #                                  NOT on pause/play/go-live, so transport never
+        #                                  triggers a reload
         self._subs: list = []
 
     @property
@@ -61,11 +64,12 @@ class TimeContext:
         self._notify()
 
     def park(self, head: float):
-        # a head jump (scrub/step/calendar) is discontinuous: stop live-follow AND
-        # playback so the controller does a clean reload at the new spot (no stale
-        # incremental). The head can never be in the future — clamp to now.
+        # a head jump (scrub/step/calendar) is discontinuous navigation: stop
+        # live-follow AND playback so the controller reloads cleanly at the new
+        # spot. The head can never be in the future — clamp to now.
         self.following = self.playing = False
         self.head = min(float(head), self._now())
+        self.nav += 1
         self._notify()
 
     @property
@@ -104,11 +108,13 @@ class TimeContext:
         self._notify()
 
     def resize_back(self, t0: float):
-        """Drag the back edge: move the anchor (grow) or set the width (slide)."""
+        """Drag the back edge: move the anchor (grow) or set the width (slide).
+        This is navigation (may extend back into unloaded data)."""
         if self.grow:
             self.anchor = min(float(t0), self.head)
         else:
             self.width = max(1e-3, self.head - float(t0))
+        self.nav += 1
         self._notify()
 
     def tick_live(self):
@@ -213,6 +219,7 @@ class ReplayController:
         self.on_progress = on_progress               # frac 0..1 during a load; None=done
         self._was_following = time_context.following
         self._loaded = None                          # (lo,hi) time span now in the panels
+        self._last_nav = time_context.nav            # to detect navigation vs transport
         self._busy = False                           # re-entrancy guard (processEvents)
         self._live_unsub = engine.subscribe(self._on_live)
         self._ctx_unsub = time_context.subscribe(self._on_context)
@@ -222,16 +229,29 @@ class ReplayController:
             for r in batch:
                 self.bus.publish(r)
             self.bus.drain()
+            if batch:                                # track what the live panels now hold
+                lo = min(r.t for r in batch)
+                hi = max(r.t for r in batch)
+                self._loaded = ((lo, hi) if self._loaded is None
+                                else (min(self._loaded[0], lo), max(self._loaded[1], hi)))
 
     def _on_context(self) -> None:
         if self._busy:                               # a load is in flight (processEvents
             return                                   # may re-enter) — ignore until done
         t0, t1 = self.tc.window
+        nav = self.tc.nav                            # navigation (scrub/tail-drag) vs
+        navigated = nav != self._last_nav            # transport (pause/play/go-live)
+        self._last_nav = nav
         if self.tc.following:
+            # going/being live never LOADS history — at most catch the front up to now;
+            # the live pass-through then keeps appending. (Pausing then playing here is
+            # free: the panels already hold the data.)
             if not self._was_following:
-                self._reset_and_load(t0, t1)         # returned to live → re-seed window
-            elif self._loaded is not None and t0 < self._loaded[0] - _EPS:
-                self._reset_and_load(t0, t1)         # tail extended back while live → backfill
+                if self._loaded is None:
+                    self._reset_and_load(t0, t1)
+                elif t1 > self._loaded[1] + _EPS:
+                    self.playback.stream(list(self._sources()), self._loaded[1], t1)
+                    self._loaded = (self._loaded[0], t1)
             self._was_following = True
             return
         self._was_following = False
@@ -239,12 +259,17 @@ class ReplayController:
             self._reset_and_load(t0, t1)
             return
         lo, hi = self._loaded
-        if t0 < lo - _EPS or t0 > hi + _EPS:         # needs earlier data, or a disjoint jump
-            self._reset_and_load(t0, t1)             # → clear + full re-stream (in order)
-        elif t1 > hi + _EPS:                         # head advanced (play/slide forward)
-            self.playback.stream(list(self._sources()), hi, t1)   # cheap front sliver only
+        if navigated:                                # scrub head / drag tail
+            if t0 < lo - _EPS or t0 > hi + _EPS:     # needs earlier data, or disjoint jump
+                self._reset_and_load(t0, t1)         # → clear + full in-order re-stream
+            elif t1 > hi + _EPS:                     # head moved forward into unloaded
+                self.playback.stream(list(self._sources()), hi, t1)
+                self._loaded = (lo, t1)
+            # else: window ⊆ loaded (shorten / nudge) → no load
+        elif self.tc.playing and t1 > hi + _EPS:     # play/slide forward (transport)
+            self.playback.stream(list(self._sources()), hi, t1)   # cheap front sliver
             self._loaded = (lo, t1)
-        # else: window ⊆ loaded (shorten / nudge) → nothing to load, no reload
+        # else: pause / transport with nothing new → no load, no reload
 
     def _reset_and_load(self, t0, t1) -> None:
         if self.on_reset:
