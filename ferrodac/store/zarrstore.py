@@ -147,6 +147,31 @@ class ZarrStore:
                 out.append((float(a["t0"]), float(a["t1"])))
         return out
 
+    def read_raw(self, uuid, t0, t1):
+        """FULL-RESOLUTION raw samples in [t0,t1] across epochs — **no rollup,
+        no downsampling** (the analysis path: downsampling would low-pass-filter
+        the physics). Returns (t, v) in time order. The window bounds memory."""
+        g = self._source(uuid)
+        ts, vs = [], []
+        for key in g.attrs.get("epochs", []):
+            eg = g[key]
+            a = eg.attrs
+            if not a.get("n", 0) or a["t1"] < t0 or a["t0"] > t1:
+                continue
+            t = np.asarray(eg["t"][:])
+            i0, i1 = np.searchsorted(t, [t0, t1])
+            if i1 > i0:
+                ts.append(t[i0:i1])
+                vs.append(np.asarray(eg["v"][i0:i1]))
+        if not ts:
+            return np.array([]), np.array([])
+        t = np.concatenate(ts)
+        v = np.concatenate(vs)
+        if len(ts) > 1:                              # epochs are ordered, but be safe
+            order = np.argsort(t, kind="stable")
+            t, v = t[order], v[order]
+        return t, v
+
     def query(self, uuid, t0, t1, max_points=2000):
         """Windowed, resolution-aware min/max envelope, stitched across epochs.
 

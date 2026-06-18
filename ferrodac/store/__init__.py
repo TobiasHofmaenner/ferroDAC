@@ -14,5 +14,7 @@ server-side. Scalar sources for now; trace/waveform epochs are the next slice.
 from .zarrstore import ZarrStore
 from .resolver import RamTier, Resolver
 from .writer import StoreWriter
+from .replay import PlaybackSource, TimeContext
 
-__all__ = ["ZarrStore", "Resolver", "RamTier", "StoreWriter"]
+__all__ = ["ZarrStore", "Resolver", "RamTier", "StoreWriter",
+           "PlaybackSource", "TimeContext"]
