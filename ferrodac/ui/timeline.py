@@ -420,8 +420,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
         mk = lambda t, fn: (b := QtWidgets.QToolButton(text=t), b.clicked.connect(fn), b)[0]
         self._play_btn = mk("▶ Play", self._toggle_play)
         bar.addWidget(self._play_btn)
-        self._live_btn = QtWidgets.QToolButton(text="● Now", checkable=True)
-        self._live_btn.clicked.connect(lambda: self._set_live(self._live_btn.isChecked()))
+        self._live_btn = QtWidgets.QToolButton(text="⦿ Live", checkable=True)
+        self._live_btn.setToolTip("Jump to the live edge and follow it")
+        self._live_btn.clicked.connect(self._go_live)   # always goes live (never parks)
         bar.addWidget(self._live_btn)
         bar.addWidget(mk("📅 Date", self._open_calendar))
         bar.addWidget(mk("⤢ Fit", self._fit_to_view))
@@ -577,11 +578,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.tc.pause() if self.tc.moving else self.tc.play()
         self._sync_transport()
 
-    def _set_live(self, on):
-        if on:
-            self.tc.follow_now()              # ● Now → head jumps to the live edge
-        elif self.tc.following:
-            self.tc.park(self.tc.head)        # leaving live → park where we are
+    def _go_live(self):
+        self.tc.follow_now()                  # ⦿ Live is an action: jump to + follow now
         self._sync_transport()
 
     def _sync_transport(self):

@@ -33,9 +33,9 @@ class PlayerBar(QtWidgets.QWidget):
         self._play_btn = mk("▶", self._toggle_play, "Play / pause")
         lay.addWidget(self._play_btn)
         lay.addWidget(mk("⏭", self._fwd, "Step forward"))
-        self._now_btn = QtWidgets.QToolButton(text="● Now", checkable=True)
-        self._now_btn.setToolTip("Jump to live")
-        self._now_btn.clicked.connect(lambda: self._set_live(self._now_btn.isChecked()))
+        self._now_btn = QtWidgets.QToolButton(text="⦿ Live", checkable=True)
+        self._now_btn.setToolTip("Jump to the live edge and follow it")
+        self._now_btn.clicked.connect(self._go_live)   # always goes live (never parks)
         lay.addWidget(self._now_btn)
         self._speed = QtWidgets.QComboBox()
         self._speed.addItems(["1×", "4×", "30×", "120×"])
@@ -68,11 +68,8 @@ class PlayerBar(QtWidgets.QWidget):
         self.tc.pause() if self.tc.moving else self.tc.play()
         self._sync()
 
-    def _set_live(self, on):
-        if on:
-            self.tc.follow_now()
-        elif self.tc.following:
-            self.tc.park(self.tc.head)
+    def _go_live(self):
+        self.tc.follow_now()          # ⦿ Live is an action: always jump to + follow now
         self._sync()
 
     # -- view (reflect the shared head) --------------------------------------
@@ -93,12 +90,15 @@ class PlayerBar(QtWidgets.QWidget):
         self._slide_btn.blockSignals(False)
         if self.tc.following:
             self._readout.setText("● LIVE")
+            self._readout.setStyleSheet("color:#69db7c; font-weight:600;")
         else:
             dt = time.time() - self.tc.head
-            tag = f"-{dt / 60:.1f} min" if dt > 1 else "now"
-            extra = f" · ▶ {self.tc.rate:.0f}×" if self.tc.playing else ""
-            self._readout.setText(
-                time.strftime("%H:%M:%S", time.localtime(self.tc.head)) + f"  {tag}{extra}")
+            ago = f"−{dt / 60:.1f} min" if dt > 60 else f"−{dt:.0f} s"
+            if self.tc.playing:
+                self._readout.setText(f"▶ replay {self.tc.speed:.0f}×  ·  {ago}")
+            else:
+                self._readout.setText(f"⏸ paused  ·  {ago}")
+            self._readout.setStyleSheet(f"color:{_MUTED};")
 
     def closeEvent(self, ev):
         try:
