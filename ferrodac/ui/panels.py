@@ -637,14 +637,8 @@ class WaterfallPanel(Panel):
         self._buf = None                  # rebuilt blank on the next replayed scan
         self.img.clear()
 
-    def feed(self, batch):
-        tr = None
-        for r in batch:
-            if r.key == self._src_key and isinstance(r.value, Trace) \
-                    and not r.partial:           # one row per complete scan
-                tr = r.value
-        if tr is None:
-            return
+    def _push(self, tr):
+        """Roll one complete scan into the history buffer."""
         y = np.log10(np.clip(tr.y, 1e-12, None)).astype(np.float32)
         if self._buf is None or self._buf.shape[1] != len(y):
             self._buf = np.full((self._rows, len(y)), float(y.min()), np.float32)
@@ -652,6 +646,17 @@ class WaterfallPanel(Panel):
             self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
         self._buf = np.roll(self._buf, -1, axis=0)
         self._buf[-1] = y
+
+    def feed(self, batch):
+        # EVERY complete scan in the batch (a replay batch carries many) — not
+        # just the last, else a parked slice shows only one row.
+        scans = [r.value for r in batch
+                 if r.key == self._src_key and isinstance(r.value, Trace)
+                 and not r.partial]
+        if not scans:
+            return
+        for tr in scans:
+            self._push(tr)
         # levels span baseline → peak so the narrow peaks stay visible
         lo = float(np.percentile(self._buf, 50))
         hi = float(self._buf.max())
@@ -792,12 +797,13 @@ class SpectrumWaterfallPanel(Panel):
             c.setData([], [])
 
     def feed(self, batch):
-        show = complete = None
+        show = None
+        completes = []
         for r in batch:
             if r.key == self._src_key and isinstance(r.value, Trace):
                 show = r.value
                 if not r.partial:
-                    complete = r.value
+                    completes.append(r.value)     # EVERY complete scan (replay-safe)
         if show is None or self._src_key not in self._curves:
             return
         # spectrum — current run (bright), log-safe
@@ -810,18 +816,20 @@ class SpectrumWaterfallPanel(Panel):
         if hi > lo and self._xr != (lo, hi):
             self.p_spec.setXRange(lo, hi, padding=0)    # waterfall follows via XLink
             self._xr = (lo, hi)
-        if complete is None:
+        if not completes:
             return
-        # completed scan → dim ghost + a new waterfall row
-        cy = np.where(complete.y > 0, complete.y, np.nan)
+        # completed scans → dim ghost (last) + one waterfall row per scan
+        last = completes[-1]
+        cy = np.where(last.y > 0, last.y, np.nan)
         if self._prev_curve is not None:
-            self._prev_curve.setData(complete.x, cy, connect="finite")
-        wy = np.log10(np.clip(complete.y, 1e-12, None)).astype(np.float32)
-        if self._buf is None or self._buf.shape[1] != len(wy):
-            self._buf = np.full((self._rows, len(wy)), float(wy.min()), np.float32)
-            self._x0, self._x1 = lo, hi
-        self._buf = np.roll(self._buf, -1, axis=0)
-        self._buf[-1] = wy
+            self._prev_curve.setData(last.x, cy, connect="finite")
+        for cscan in completes:
+            wy = np.log10(np.clip(cscan.y, 1e-12, None)).astype(np.float32)
+            if self._buf is None or self._buf.shape[1] != len(wy):
+                self._buf = np.full((self._rows, len(wy)), float(wy.min()), np.float32)
+                self._x0, self._x1 = lo, hi
+            self._buf = np.roll(self._buf, -1, axis=0)
+            self._buf[-1] = wy
         loL = float(np.percentile(self._buf, 50))
         hiL = float(self._buf.max())
         if hiL <= loL:
