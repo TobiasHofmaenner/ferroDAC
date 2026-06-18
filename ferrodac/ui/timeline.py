@@ -16,7 +16,11 @@ import numpy as np
 import pyqtgraph as pg
 from qtpy import QtCore, QtGui, QtWidgets
 
+from ._common import color_for
+
+_BG = "#161620"
 _PANEL = "#1e1e2a"
+_FG = "#c7d0db"
 _MUTED = "#7f8a99"
 _ACCENT = "#4dabf7"
 
@@ -183,7 +187,7 @@ class Ribbon(pg.PlotWidget):
         self._rows = list(sources)
         for i, key in enumerate(self._rows):
             y = len(self._rows) - 1 - i
-            lab = pg.TextItem(_label(key), color=_MUTED, anchor=(0, 0.5))
+            lab = pg.TextItem(_label(key), color=color_for(key), anchor=(0, 0.5))
             self.addItem(lab)
             self._labels.append((lab, y + 0.4))
         self._draw_bars(cover)
@@ -220,9 +224,10 @@ class Ribbon(pg.PlotWidget):
         n = len(self._rows)
         for i, key in enumerate(self._rows):
             y = n - 1 - i
+            brush = color_for(key)                            # track in its source colour
             for (a, b) in cover.get(key, []):
                 item = pg.BarGraphItem(x0=a, width=max(b - a, 1.0), y0=y + 0.15,
-                                       height=0.5, brush="#4dabf7", pen=None)
+                                       height=0.5, brush=brush, pen=None)
                 self.addItem(item)
                 self._bars.append(item)
 
@@ -283,6 +288,16 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("ferroDAC — Timeline")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)   # fresh tc link per open
         self.resize(1100, 720)
+        self.setStyleSheet(
+            f"QMainWindow,QWidget{{background:{_BG};color:{_FG};}}"
+            f"QListWidget{{background:{_PANEL};border:none;outline:0;}}"
+            f"QListWidget::item{{padding:5px 8px;}}"
+            f"QListWidget::item:selected{{background:{_ACCENT};color:#0b0b10;}}"
+            f"QToolButton,QPushButton{{background:{_PANEL};border:1px solid #2c2c3a;"
+            f"border-radius:6px;padding:5px 10px;}}"
+            f"QToolButton:checked{{background:{_ACCENT};color:#0b0b10;}}"
+            f"QComboBox{{background:{_PANEL};border:1px solid #2c2c3a;"
+            f"border-radius:6px;padding:3px 8px;}}")
         self.resolver = resolver
         self.store = store
         self.tc = time_context
@@ -329,6 +344,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         for k in self._sources:
             it = QtWidgets.QListWidgetItem(_label(k))
             it.setData(QtCore.Qt.UserRole, k)
+            it.setForeground(QtGui.QColor(color_for(k)))     # per-source colour
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
             it.setCheckState(QtCore.Qt.Unchecked)
             left.addItem(it)
@@ -405,7 +421,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
                 p._img = img
             else:
                 p.setLabel("left", _label(key))
-                p._curve = p.plot(pen=pg.mkPen(_ACCENT, width=2), connect="finite")
+                p._curve = p.plot(pen=pg.mkPen(color_for(key), width=2),
+                                  connect="finite")            # per-source colour
             self._charts[key] = p
             self._charts_box.addWidget(p)
             self._refresh_one(key)
