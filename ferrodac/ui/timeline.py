@@ -111,6 +111,58 @@ class PerfStrip(QtWidgets.QWidget):
         self.play.setText(text)
 
 
+class DateJumpDialog(QtWidgets.QDialog):
+    """Pick a day or a From–To range; days with recordings are tinted (GitHub-
+    contribution style). Apply → the caller jumps the head there."""
+
+    def __init__(self, earliest, latest, densities, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Jump to date")
+        import datetime as _dt
+        lay = QtWidgets.QVBoxLayout(self)
+        self.cal = QtWidgets.QCalendarWidget()
+        self.cal.setGridVisible(True)
+        y0 = _dt.date.fromtimestamp(earliest)
+        today = _dt.date.fromtimestamp(latest)
+        self.cal.setMinimumDate(QtCore.QDate(y0.year, y0.month, y0.day))
+        self.cal.setMaximumDate(QtCore.QDate(today.year, today.month, today.day))
+        for d, inten in densities.items():                   # tint recording-days
+            fmt = QtGui.QTextCharFormat()
+            fmt.setBackground(QtGui.QColor(40, int(70 + 150 * inten), 95))
+            fmt.setForeground(QtGui.QColor("#ffffff"))
+            self.cal.setDateTextFormat(QtCore.QDate(d.year, d.month, d.day), fmt)
+        lay.addWidget(self.cal)
+        row = QtWidgets.QHBoxLayout()
+        self.frm = QtWidgets.QDateEdit(calendarPopup=True)
+        self.to = QtWidgets.QDateEdit(calendarPopup=True)
+        for e in (self.frm, self.to):
+            e.setDisplayFormat("yyyy-MM-dd")
+            e.setDateRange(self.cal.minimumDate(), self.cal.maximumDate())
+        row.addWidget(QtWidgets.QLabel("From"))
+        row.addWidget(self.frm)
+        row.addWidget(QtWidgets.QLabel("To"))
+        row.addWidget(self.to)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.cal.clicked.connect(lambda d: (self.frm.setDate(d), self.to.setDate(d)))
+        sel = self.cal.selectedDate()
+        self.frm.setDate(sel); self.to.setDate(sel)
+        bb = QtWidgets.QDialogButtonBox()
+        bb.addButton("Apply", QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def epoch_range(self):
+        d0, d1 = self.frm.date(), self.to.date()
+        if d1 < d0:
+            d0, d1 = d1, d0
+        t0 = QtCore.QDateTime(d0, QtCore.QTime(0, 0)).toSecsSinceEpoch()
+        t1 = QtCore.QDateTime(d1.addDays(1), QtCore.QTime(0, 0)).toSecsSinceEpoch()
+        return float(t0), float(t1)
+
+
 class Ribbon(pg.PlotWidget):
     """Per-source coverage tracks + a draggable window region + playhead."""
 
@@ -294,6 +346,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._live_btn = QtWidgets.QToolButton(text="● Now", checkable=True)
         self._live_btn.clicked.connect(lambda: self._set_live(self._live_btn.isChecked()))
         bar.addWidget(self._live_btn)
+        bar.addWidget(mk("📅 Date", self._open_calendar))
         sp = QtWidgets.QLabel("  speed"); sp.setStyleSheet(f"color:{_MUTED};")
         bar.addWidget(sp)
         self._speed = QtWidgets.QComboBox()
@@ -354,6 +407,32 @@ class TimelineWindow(QtWidgets.QMainWindow):
 
     def _recenter(self, t):
         self.tc.park(t + self.tc.width / 2)   # double-click → centre the head on t
+
+    def _day_densities(self):
+        """{date: 0..1} fraction of each day covered by any source — for the
+        calendar tinting (GitHub-contribution style)."""
+        import datetime as dt
+        secs: dict = {}
+        for k in self._sources:
+            for (a, b) in self.resolver.coverage(k):
+                t = a
+                while t < b:
+                    day = dt.date.fromtimestamp(t)
+                    day_end = dt.datetime.combine(
+                        day + dt.timedelta(days=1), dt.time()).timestamp()
+                    secs[day] = secs.get(day, 0.0) + (min(b, day_end) - t)
+                    t = day_end
+        return {d: min(1.0, s / 86400.0) for d, s in secs.items()}
+
+    def _open_calendar(self):
+        covs = [self.resolver.coverage(k) for k in self._sources]
+        starts = [c[0][0] for c in covs if c]
+        earliest = min(starts) if starts else time.time() - 86400
+        dlg = DateJumpDialog(earliest, time.time(), self._day_densities(), self)
+        if dlg.exec():
+            t0, t1 = dlg.epoch_range()
+            self.tc.width = max(1.0, t1 - t0)
+            self.tc.park(t1)                  # jump the head to the selected range
 
     def _jump(self, a, b):
         self.t0, self.t1 = a, b
