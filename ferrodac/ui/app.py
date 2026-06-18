@@ -35,6 +35,7 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -1439,6 +1440,7 @@ class MainWindow(QMainWindow):
                 engine, store, self.time_context,
                 sources=lambda: self.dashboard.source_keys(),
                 on_reset=self._replay_reset,
+                on_progress=self._replay_progress,
             )
         except Exception as exc:                       # noqa: BLE001
             import logging
@@ -1519,6 +1521,14 @@ class MainWindow(QMainWindow):
             self._tc_play_timer = QTimer(self)
             self._tc_play_timer.timeout.connect(self._tc_play_tick)
             self._tc_play_timer.start(50)
+            # a slim progress bar in the status bar for the (possibly slow) full-
+            # res slice load on a scrub/park — so a big load reads as "loading",
+            # not "frozen".
+            self._load_bar = QProgressBar()
+            self._load_bar.setMaximumWidth(220)
+            self._load_bar.setFormat("loading %p%")
+            self._load_bar.setVisible(False)
+            self.statusBar().addPermanentWidget(self._load_bar)
 
         self._build_menus()
 
@@ -1891,6 +1901,21 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _remember(path: str) -> None:
         QSettings("ferroDAC", "ferroDAC").setValue("lastSession", path)
+
+    def _replay_progress(self, frac) -> None:
+        """ReplayController load progress: frac 0..1 → show the status-bar bar;
+        None → hide. Pump the event loop so it actually paints during the
+        synchronous load (the real fix for huge slices is an off-thread read)."""
+        bar = getattr(self, "_load_bar", None)
+        if bar is None:
+            return
+        if frac is None:
+            bar.setVisible(False)
+            return
+        if not bar.isVisible():
+            bar.setVisible(True)
+        bar.setValue(max(0, min(100, int(frac * 100))))
+        QApplication.processEvents()
 
     def _tc_live_tick(self) -> None:
         """Advance the head to now while following (live)."""

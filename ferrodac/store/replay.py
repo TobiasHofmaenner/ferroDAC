@@ -135,12 +135,16 @@ class PlaybackSource:
         self.bus = bus
         self.chunk = chunk
 
-    def stream(self, sources, t0, t1) -> int:
+    def stream(self, sources, t0, t1, on_progress=None) -> int:
         """Read full-res raw for `sources` over [t0,t1], merge by time, and emit
         through the bus in time-ordered chunks. Returns the number of readings
-        emitted. (Window-bounded; vectorised batches are a later optimisation.)"""
+        emitted. `on_progress(frac)` (0..1) reports the load: the read phase is
+        the first half, the emit phase the second. (Window-bounded; the read is
+        synchronous for now — a worker thread is the later optimisation for big
+        slices.)"""
+        srcs = list(sources)
         rows: list = []
-        for sid in sources:
+        for i, sid in enumerate(srcs):
             dev, _, src = sid.rpartition("/")        # key 'device/source' → Reading
             if self._is_trace(sid):                  # 2-D scans → Trace readings
                 for times, Y, x in self.store.read_raw_trace(sid, t0, t1):
@@ -148,23 +152,30 @@ class PlaybackSource:
                         (float(times[i]),
                          Reading(dev, src, float(times[i]), Trace(x=x, y=Y[i])))
                         for i in range(len(times)))
-                continue
-            t, v = self.store.read_raw(sid, t0, t1)  # full-res scalars
-            if not len(t):
-                continue
-            rows.extend((float(t[i]), Reading(dev, src, float(t[i]), float(v[i])))
-                        for i in range(len(t)))
+            else:
+                t, v = self.store.read_raw(sid, t0, t1)  # full-res scalars
+                if len(t):
+                    rows.extend((float(t[i]), Reading(dev, src, float(t[i]), float(v[i])))
+                                for i in range(len(t)))
+            if on_progress:
+                on_progress(0.5 * (i + 1) / max(1, len(srcs)))   # read = first half
         if not rows:
+            if on_progress:
+                on_progress(1.0)
             return 0
         rows.sort(key=lambda r: r[0])                # global time order
-        n, batch = 0, []
+        total, n, batch = len(rows), 0, []
         for _, rd in rows:
             batch.append(rd)
             if len(batch) >= self.chunk:
                 n += self._emit(batch)
                 batch = []
+                if on_progress:
+                    on_progress(0.5 + 0.5 * n / total)           # emit = second half
         if batch:
             n += self._emit(batch)
+        if on_progress:
+            on_progress(1.0)
         return n
 
     def _is_trace(self, sid) -> bool:
@@ -189,15 +200,18 @@ class ReplayController:
     is used. Replay runs synchronously on park for now (off-thread is a later
     optimisation, signalled by the realtime-rate readout)."""
 
-    def __init__(self, engine, store, time_context, sources=None, on_reset=None):
+    def __init__(self, engine, store, time_context, sources=None, on_reset=None,
+                 on_progress=None):
         self.store = store
         self.tc = time_context
         self.bus = Bus()                             # what the dashboard subscribes to
         self.playback = PlaybackSource(store, self.bus)
         self._sources = sources or store.sources     # callable → [source keys]
         self.on_reset = on_reset
+        self.on_progress = on_progress               # frac 0..1 during a load; None=done
         self._was_following = time_context.following
         self._played_to = None
+        self._busy = False                           # re-entrancy guard (processEvents)
         self._live_unsub = engine.subscribe(self._on_live)
         self._ctx_unsub = time_context.subscribe(self._on_context)
 
@@ -208,12 +222,14 @@ class ReplayController:
             self.bus.drain()
 
     def _on_context(self) -> None:
+        if self._busy:                               # a load is in flight (processEvents
+            return                                   # may re-enter) — ignore until done
         if self.tc.following:
             if not self._was_following:
                 if self.on_reset:
                     self.on_reset()                  # returned to live → clear historic
                 t0, t1 = self.tc.window              # re-seed the recent window so the
-                self.playback.stream(list(self._sources()), t0, t1)  # chart isn't empty
+                self._load(t0, t1)                   # chart isn't empty (with progress)
             self._was_following = True
             self._played_to = None
             return
@@ -221,14 +237,27 @@ class ReplayController:
         cont = (self.tc.playing and self._played_to is not None
                 and t0 <= self._played_to <= t1)     # smooth play advance only
         if cont:
-            # advancing playhead → stream only the newly-revealed range
+            # advancing playhead → stream only the newly-revealed range (small/fast,
+            # no progress UI)
             self.playback.stream(list(self._sources()), self._played_to, t1)
         else:
             if self.on_reset:                        # fresh park / scrub → clear + full replay
                 self.on_reset()
-            self.playback.stream(list(self._sources()), t0, t1)
+            self._load(t0, t1)                       # the one heavy op → show progress
         self._played_to = t1
         self._was_following = False
+
+    def _load(self, t0, t1) -> None:
+        """Full-res re-stream of [t0,t1] with a progress callback + a re-entrancy
+        guard (the UI's progress handler may pump the event loop)."""
+        self._busy = True
+        try:
+            self.playback.stream(list(self._sources()), t0, t1,
+                                 on_progress=self.on_progress)
+        finally:
+            self._busy = False
+            if self.on_progress:
+                self.on_progress(None)               # done → hide the indicator
 
     def stop(self) -> None:
         self._live_unsub()

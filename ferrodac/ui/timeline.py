@@ -190,7 +190,8 @@ class DateJumpDialog(QtWidgets.QDialog):
 class Ribbon(pg.PlotWidget):
     """Per-source coverage tracks + a draggable window region + playhead."""
 
-    windowChanged = QtCore.Signal(float, float, bool)   # a, b, front_edge_moved
+    windowPreview = QtCore.Signal(float, float)         # live, during a drag (cheap)
+    windowChanged = QtCore.Signal(float, float, bool)   # committed on release (heavy)
     recenter = QtCore.Signal(float)
 
     def __init__(self, sources, cover, t0, t1, names=None):
@@ -219,6 +220,7 @@ class Ribbon(pg.PlotWidget):
         self.region.setZValue(10)
         self.addItem(self.region)
         self.region.sigRegionChanged.connect(self._on_region)
+        self.region.sigRegionChangeFinished.connect(self._on_region_done)
         self.head = pg.InfiniteLine(angle=90, movable=False,
                                     pen=pg.mkPen("#ff6b6b", width=2))
         self.head.setZValue(20)
@@ -276,9 +278,15 @@ class Ribbon(pg.PlotWidget):
             vb.setXRange(head - w * 0.9, head + w * 0.1, padding=0)
 
     def _on_region(self):
+        # continuous (dragging): cheap live preview only — never the heavy commit
         a, b = self.region.getRegion()
         self.head.setPos(b)
-        pa, pb = self._region_ref            # which edge did the user drag?
+        self.windowPreview.emit(a, b)
+
+    def _on_region_done(self):
+        # released: commit (which side moved decides park-head vs resize-tail)
+        a, b = self.region.getRegion()
+        pa, pb = self._region_ref
         front_moved = abs(b - pb) >= abs(a - pa)
         self._region_ref = (a, b)
         self.windowChanged.emit(a, b, front_moved)
@@ -350,16 +358,17 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._refresh()
 
         self._cov_ticks = 0
-        self._pending_park = None
+        self._dragging = False
+        self._preview_win = None
         self._tc_unsub = self.tc.subscribe(self._on_tc)
         # view-refresh timer only (the app owns the clock heartbeat that ticks tc)
         self._live_timer = QtCore.QTimer(self, interval=500)
         self._live_timer.timeout.connect(self._live_tick)
         self._live_timer.start()
-        # debounce scrub → park so a drag doesn't fire a full-res re-stream per
-        # mouse event (that synchronous stream is what stutters the UI thread)
-        self._park_timer = QtCore.QTimer(self, interval=70, singleShot=True)
-        self._park_timer.timeout.connect(self._commit_park)
+        # debounce the live PREVIEW during a drag (cheap downsampled query); the
+        # heavy main re-stream only fires on release (windowChanged).
+        self._preview_timer = QtCore.QTimer(self, interval=40, singleShot=True)
+        self._preview_timer.timeout.connect(self._do_preview)
 
     def _name(self, key):
         return self._names.get(key) or _label(key)
@@ -392,7 +401,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.ribbon = Ribbon(self._sources, self._cover, self._view0, self.now,
                              names=self._names)
         self.ribbon.setMinimumHeight(130)
-        self.ribbon.windowChanged.connect(self._on_window)   # drag → park the head
+        self.ribbon.windowPreview.connect(self._on_preview)  # dragging → live preview
+        self.ribbon.windowChanged.connect(self._on_window)   # release → commit (heavy)
         self.ribbon.recenter.connect(self._recenter)
         vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         vsplit.addWidget(scroll); vsplit.addWidget(self.ribbon)
@@ -466,31 +476,35 @@ class TimelineWindow(QtWidgets.QMainWindow):
         elif not on and key in self._charts:
             self._charts.pop(key).setParent(None)
 
-    def _on_window(self, a, b, front_moved):
-        """User dragged the ribbon region. Dragging the BACK (left) edge only
-        resizes the historic tail — we stay live/playing and keep ingesting.
-        Dragging the FRONT (head) edge into the past parks (debounced; the own
-        preview updates immediately, the heavy dashboard re-stream coalesces)."""
+    def _on_preview(self, a, b):
+        """While dragging the ribbon: update only this window's PREVIEW charts
+        (cheap downsampled query), debounced. The shared clock is untouched, so
+        the main dashboard is undisturbed until release."""
         if self._syncing:
             return
+        self._dragging = True
         self.t0, self.t1 = a, b
-        self._refresh()                       # immediate preview feedback
-        if not front_moved:
-            self.tc.resize_back(a)                # tail resize — stay live/playing
-            return
-        self._pending_park = (a, b)
-        if self.tc.following:
-            self._commit_park()               # leave live now
-        else:
-            self._park_timer.start()          # debounce the dashboard re-stream
+        self._preview_win = (a, b)
+        self._preview_timer.start()
 
-    def _commit_park(self):
-        if self._pending_park is None:
+    def _do_preview(self):
+        if self._preview_win is None:
             return
-        a, b = self._pending_park
-        self._pending_park = None
-        self.tc.width = max(1e-3, b - a)
-        self.tc.park(b)                       # head = window end → fires the replay
+        self.t0, self.t1 = self._preview_win
+        self._refresh()                       # downsampled query — cheap
+
+    def _on_window(self, a, b, front_moved):
+        """Drag RELEASED → commit to the shared clock. Back-edge → resize the tail
+        (stay live/playing); front-edge → park the head. This is the one heavy
+        step: the main analysis re-streams the full-res slice (with progress)."""
+        self._dragging = False
+        if self._syncing:
+            return
+        if not front_moved:
+            self.tc.resize_back(a)            # tail resize
+        else:
+            self.tc.width = max(1e-3, b - a)
+            self.tc.park(b)                   # head jump → full-res re-stream
 
     def _live_tick(self):
         """500 ms VIEW refresh: move the live marker and grow the ribbon coverage
@@ -589,6 +603,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
     def _on_tc(self):
         """The shared head moved (us, a play/live tick, or elsewhere) → reflect it
         in the ribbon, preview charts, transport and clock readout."""
+        if self._dragging:                    # mid-drag: the preview owns the view,
+            self._sync_transport()            # don't let a live tick yank the region
+            return
         self.now = time.time()
         self.t0, self.t1 = self.tc.window
         self._syncing = True                  # ribbon update must not re-park tc
@@ -613,7 +630,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
     def closeEvent(self, ev):
         # leave the head/view exactly as-is — the dockable Player controls the
         # head independently, so closing the scrubber changes nothing.
-        self._live_timer.stop(); self._park_timer.stop()
+        self._live_timer.stop(); self._preview_timer.stop()
         try:
             self._tc_unsub()
         except Exception:
