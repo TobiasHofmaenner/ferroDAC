@@ -25,6 +25,11 @@ def _label(key: str) -> str:
     return key.rsplit("/", 1)[-1]            # show the source id, not the full path
 
 
+def _wf_cmap():
+    return pg.ColorMap([0.0, 0.5, 1.0],
+                       [(12, 10, 40), (190, 50, 90), (255, 235, 130)])
+
+
 class Ribbon(pg.PlotWidget):
     """Per-source coverage tracks + a draggable window region + playhead."""
 
@@ -147,9 +152,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.t0 = max(self.t0, lo - 1)
 
         self._build_ui()
-        scalars = [k for k in self._sources                 # the preview is line-only
-                   if store.source_dtype(k) != "trace"]      # for now (traces → main UI)
-        for k in scalars[:3]:                               # show the first few by default
+        for k in self._sources[:3]:                         # show the first few by default
             self._src_list.findItems(_label(k), QtCore.Qt.MatchExactly)[0] \
                 .setCheckState(QtCore.Qt.Checked)
         self._refresh()
@@ -221,11 +224,18 @@ class TimelineWindow(QtWidgets.QMainWindow):
             p.setBackground(_PANEL)
             p.setMinimumHeight(150)
             p.showGrid(x=True, y=True, alpha=0.15)
-            p.setLabel("left", _label(key))
             p.setMouseEnabled(y=False)
             if self._charts:
-                p.setXLink(next(iter(self._charts.values())))
-            p._curve = p.plot(pen=pg.mkPen(_ACCENT, width=2), connect="finite")
+                p.setXLink(next(iter(self._charts.values())))   # shared time axis
+            if self.store.source_dtype(key) == "trace":         # spectrogram track
+                p.setLabel("left", "m/z")
+                img = pg.ImageItem()
+                img.setLookupTable(_wf_cmap().getLookupTable())
+                p.addItem(img)
+                p._img = img
+            else:
+                p.setLabel("left", _label(key))
+                p._curve = p.plot(pen=pg.mkPen(_ACCENT, width=2), connect="finite")
             self._charts[key] = p
             self._charts_box.addWidget(p)
             self._refresh_one(key)
@@ -317,7 +327,28 @@ class TimelineWindow(QtWidgets.QMainWindow):
         p = self._charts.get(key)
         if p is None:
             return
+        if hasattr(p, "_img"):                       # trace source → waterfall track
+            self._refresh_waterfall(key, p)
+            return
         x, y = self.resolver.query(key, self.t0, self.t1,
                                    max_points=max(400, p.width() * 2))
         p._curve.setData(x, y)
+        p.setXRange(self.t0, self.t1, padding=0)
+
+    def _refresh_waterfall(self, key, p):
+        """Render a trace source as a spectrogram over the window: X = time,
+        Y = swept axis (m/z), colour = log intensity, via the display-decimated
+        query_trace (never the analysis path)."""
+        blocks = [b for b in self.store.query_trace(key, self.t0, self.t1, max_scans=320)
+                  if len(b[0])]
+        if not blocks:
+            p._img.clear()
+            p.setXRange(self.t0, self.t1, padding=0)
+            return
+        times, Y, x = max(blocks, key=lambda b: len(b[0]))    # densest epoch in view
+        z = np.log10(np.clip(Y, 1e-12, None))                 # (n_time, n_mass)
+        p._img.setImage(z, autoLevels=True)
+        x0, x1 = float(x[0]), float(x[-1])
+        p._img.setRect(QtCore.QRectF(float(times[0]), x0,
+                                     max(1e-6, float(times[-1] - times[0])), x1 - x0))
         p.setXRange(self.t0, self.t1, padding=0)
