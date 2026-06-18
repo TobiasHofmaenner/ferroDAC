@@ -29,6 +29,7 @@ class TimeContext:
         self.following: bool = True
         self.playing: bool = False
         self.speed: float = 1.0
+        self.rate: float = 1.0           # achieved playback rate (set by the driver)
         self._subs: list = []
 
     @property

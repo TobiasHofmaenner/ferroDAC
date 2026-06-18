@@ -1499,6 +1499,27 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.devices_dock)
         self.devices_dock.setVisible(False)
 
+        # transport player: control the shared replay head from the main window
+        # (without opening the Timeline). The app owns the clock heartbeat below
+        # so the Timeline and the player never double-drive it.
+        if self.time_context is not None:
+            from .player import PlayerBar
+            self.player = PlayerBar(self.time_context)
+            self.player_dock = QDockWidget("Player", self)
+            self.player_dock.setObjectName("PlayerDock")
+            self.player_dock.setWidget(self.player)
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.player_dock)
+            # the single clock heartbeat: advance the head while following and
+            # walk it while playing — owned here so live/play work without the
+            # Timeline and the two views never double-drive the clock.
+            self._play_wall = None
+            self._tc_live_timer = QTimer(self)
+            self._tc_live_timer.timeout.connect(self._tc_live_tick)
+            self._tc_live_timer.start(500)
+            self._tc_play_timer = QTimer(self)
+            self._tc_play_timer.timeout.connect(self._tc_play_tick)
+            self._tc_play_timer.start(50)
+
         self._build_menus()
 
         self.engine.tick.connect(self._on_tick)
@@ -1867,6 +1888,28 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _remember(path: str) -> None:
         QSettings("ferroDAC", "ferroDAC").setValue("lastSession", path)
+
+    def _tc_live_tick(self) -> None:
+        """Advance the head to now while following (live)."""
+        if self.time_context is not None:
+            self.time_context.tick_live()
+
+    def _tc_play_tick(self) -> None:
+        """Walk the parked head forward while playing — a FIXED sim-step per frame
+        (speed × 0.05) with the real wall gap measured, so the achieved rate (on
+        tc.rate, shown by the player + Timeline HUD) falls below requested when
+        frames can't keep up. Settles to live when it catches now."""
+        tc = self.time_context
+        if tc is None or not tc.playing:
+            self._play_wall = None
+            return
+        now = time.perf_counter()
+        wall = (now - self._play_wall) if self._play_wall else 0.05
+        self._play_wall = now
+        tc.tick_play(0.05)
+        if tc.playing:
+            ach = min(tc.speed, (tc.speed * 0.05) / max(1e-4, wall))
+            tc.rate = 0.7 * tc.rate + 0.3 * ach
 
     def _replay_reset(self) -> None:
         """Called by the ReplayController when the head jumps (park / scrub /

@@ -295,9 +295,10 @@ class TimelineWindow(QtWidgets.QMainWindow):
         now = time.time()
         lo = min((c[0][0] for c in self._cover.values() if c), default=now - 600)
         self.now = now
-        # adopt the shared head; open on the last 10 min if it's stale/following
-        self.tc.set_width(600.0)
-        self.tc.follow_now()
+        # adopt the CURRENT shared head/window — opening the scrubber doesn't
+        # change what the app is showing (live or parked); just ensure a width.
+        if self.tc.width <= 0:
+            self.tc.set_width(600.0)
         self.t0, self.t1 = self.tc.window
         self.t0 = max(self.t0, lo - 1)
 
@@ -307,16 +308,13 @@ class TimelineWindow(QtWidgets.QMainWindow):
                 .setCheckState(QtCore.Qt.Checked)
         self._refresh()
 
-        self._ratio = 0.0
-        self._last_play_wall = None
         self._cov_ticks = 0
         self._pending_park = None
         self._tc_unsub = self.tc.subscribe(self._on_tc)
+        # view-refresh timer only (the app owns the clock heartbeat that ticks tc)
         self._live_timer = QtCore.QTimer(self, interval=500)
         self._live_timer.timeout.connect(self._live_tick)
         self._live_timer.start()
-        self._play_timer = QtCore.QTimer(self, interval=50)
-        self._play_timer.timeout.connect(self._play_tick)
         # debounce scrub → park so a drag doesn't fire a full-res re-stream per
         # mouse event (that synchronous stream is what stutters the UI thread)
         self._park_timer = QtCore.QTimer(self, interval=70, singleShot=True)
@@ -439,9 +437,10 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.tc.park(b)                       # head = window end → fires the replay
 
     def _live_tick(self):
-        """500 ms heartbeat: advance the head (if following), move the live
-        marker, and grow the ribbon coverage bars as new data lands."""
-        self.tc.tick_live()
+        """500 ms VIEW refresh: move the live marker and grow the ribbon coverage
+        bars as data lands. (The CLOCK heartbeat that ticks tc lives in the app,
+        so the head advances even with the Timeline closed and the two views
+        never double-drive it.)"""
         self.now = time.time()
         self.ribbon.set_now(self.now)
         self._cov_ticks += 1
@@ -504,32 +503,14 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._refresh()
 
     def _toggle_play(self):
+        # the app's play timer does the ticking; here we only flip tc.playing
         if self.tc.playing:
             self.tc.playing = False
-            self._play_timer.stop()
-            self.perf.set_play("⏸ paused")
         else:
             if self.tc.following:             # nothing ahead of now → park first
                 self.tc.park(self.tc.head)
             self.tc.playing = True
-            self._ratio = 0.0; self._last_play_wall = None
-            self._play_timer.start()
         self._sync_transport()
-
-    def _play_tick(self):
-        """Advance a FIXED sim-step per frame (speed × 0.05) and measure the
-        actual wall time — so when frames get slow the achieved rate falls below
-        the requested one. That gap is the 'can I replay this in realtime?' HUD."""
-        now = time.perf_counter()
-        wall = (now - self._last_play_wall) if self._last_play_wall else 0.05
-        self._last_play_wall = now
-        self.tc.tick_play(0.05)
-        if not self.tc.playing:               # caught up to now → _on_tc shows live
-            return
-        ach = min(self.tc.speed, (self.tc.speed * 0.05) / max(1e-4, wall))
-        self._ratio = (0.7 * self._ratio + 0.3 * ach) if self._ratio else ach
-        self.perf.set_play(f"▶ {self.tc.speed:.0f}× req · {self._ratio:.1f}× actual"
-                           f" · {1 / max(1e-4, wall):.0f} fps")
 
     def _set_live(self, on):
         if on:
@@ -562,12 +543,12 @@ class TimelineWindow(QtWidgets.QMainWindow):
             self.ribbon.follow_view(self.t1)  # keep the live edge in view
         self._syncing = False
         self._refresh()
-        if not self.tc.playing and self._play_timer.isActive():
-            self._play_timer.stop()
         self._sync_transport()
         if self.tc.following:
             self.perf.set_play("● live · 1.0× realtime")
-        elif not self.tc.playing:
+        elif self.tc.playing:
+            self.perf.set_play(f"▶ {self.tc.speed:.0f}× req · {self.tc.rate:.1f}× actual")
+        else:
             self.perf.set_play("⏸ parked")
         dt = self.now - self.t1
         tag = ("● LIVE" if self.tc.following
@@ -576,12 +557,13 @@ class TimelineWindow(QtWidgets.QMainWindow):
                             + f"   {tag}")
 
     def closeEvent(self, ev):
-        self._live_timer.stop(); self._play_timer.stop(); self._park_timer.stop()
+        # leave the head/view exactly as-is — the dockable Player controls the
+        # head independently, so closing the scrubber changes nothing.
+        self._live_timer.stop(); self._park_timer.stop()
         try:
             self._tc_unsub()
         except Exception:
             pass
-        self.tc.follow_now()                  # closing the scrubber returns to live
         super().closeEvent(ev)
 
     def _refresh(self):
