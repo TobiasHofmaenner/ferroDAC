@@ -1,27 +1,24 @@
-"""Engine — the data-plane hub.
+"""Engine — the Qt wrapper around the data-plane Bus.
 
-Sources push Readings into the engine from their acquisition threads. The engine
-buffers them and, on a timer (the GUI thread), **drains the buffer in batches**
-and fans them out to registered **sinks** — so the consume/repaint rate is fully
-decoupled from the sample rate.
+The publish/subscribe/batch-drain mechanics live in the Qt-free `core.bus.Bus`
+(so replay/compute can use them headlessly, DESIGN §4.1). The Engine just owns a
+Bus, **pumps `drain()` from a `QTimer`** on the GUI thread, emits `tick`, and
+manages device lifecycle — so the consume/repaint rate stays decoupled from the
+sample rate.
 
 This is the one door everything hangs off:
   - the live cards subscribe (via the `tick` signal + `latest()`),
   - the chart subscribes as a sink,
-  - later, the CSV/network sinks and **user scripts** register here too.
+  - the CSV/store/network sinks and user scripts register here too.
 """
 
 from __future__ import annotations
 
-from collections import deque
-from typing import Callable
-
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 from qtpy.QtCore import QObject, QTimer, Signal
 
+from .bus import Bus
 from .reading import Reading
-
-Sink = Callable[[list], None]  # Callable[[list[Reading]], None]
 
 
 class Engine(QObject):
@@ -30,13 +27,25 @@ class Engine(QObject):
 
     def __init__(self, drain_ms: int = 50, parent=None):
         super().__init__(parent)
+        self._bus = Bus()
         self._devices: dict[str, object] = {}
-        self._inbox: deque = deque()        # thread-safe append / popleft
-        self._latest: dict[str, Reading] = {}
-        self._sinks: list[Sink] = []
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._drain)
         self._timer.start(drain_ms)
+
+    @property
+    def bus(self) -> Bus:
+        return self._bus
+
+    # -- bus delegation (same public API as before) --------------------------
+    def publish(self, reading: Reading) -> None:
+        self._bus.publish(reading)
+
+    def subscribe(self, sink):
+        return self._bus.subscribe(sink)
+
+    def latest(self) -> dict:
+        return self._bus.latest()
 
     # -- device streaming ----------------------------------------------------
     def start_device(self, device) -> None:
@@ -52,45 +61,12 @@ class Engine(QObject):
 
     def _ingest(self, reading: Reading) -> None:
         """Called from a device's acquisition thread — must stay cheap & safe."""
-        self._inbox.append(reading)
+        self._bus.publish(reading)
 
-    def publish(self, reading: Reading) -> None:
-        """Inject a reading from a non-device source (e.g. a virtual UI source)."""
-        self._inbox.append(reading)
-
-    # -- sinks ---------------------------------------------------------------
-    def subscribe(self, sink: Sink) -> Callable[[], None]:
-        """Register a sink (called on the GUI thread with a batch of Readings).
-        Returns an unsubscribe callable."""
-        self._sinks.append(sink)
-
-        def _unsub():
-            if sink in self._sinks:
-                self._sinks.remove(sink)
-
-        return _unsub
-
-    def latest(self) -> dict[str, Reading]:
-        return dict(self._latest)
-
-    # -- drain (GUI thread) --------------------------------------------------
+    # -- drain (GUI thread): pump the bus, then notify -----------------------
     def _drain(self) -> None:
-        if not self._inbox:
-            return
-        batch: list[Reading] = []
-        while True:
-            try:
-                batch.append(self._inbox.popleft())
-            except IndexError:
-                break
-        for r in batch:
-            self._latest[r.key] = r
-        for sink in list(self._sinks):
-            try:
-                sink(batch)
-            except Exception:
-                pass
-        self.tick.emit()
+        if self._bus.drain():            # fans out to sinks + updates latest
+            self.tick.emit()
 
     def shutdown(self) -> None:
         self._timer.stop()
