@@ -245,15 +245,18 @@ class ReplayController:
         navigated = nav != self._last_nav            # transport (pause/play/go-live)
         self._last_nav = nav
         if self.tc.following:
-            # going/being live never LOADS history — at most catch the front up to now;
-            # the live pass-through then keeps appending. (Pausing then playing here is
-            # free: the panels already hold the data.)
             if not self._was_following:
+                # returned to live: catch the front up to now; live then appends
                 if self._loaded is None:
                     self._reset_and_load(t0, t1)
                 elif t1 > self._loaded[1] + _EPS:
                     self.playback.stream(list(self._sources()), self._loaded[1], t1)
                     self._loaded = (self._loaded[0], t1)
+            elif navigated and self._loaded is not None and t0 < self._loaded[0] - _EPS:
+                # dragged the tail BACK while live → backfill the older history (clear +
+                # in-order re-stream of the window), then the live pass-through resumes
+                self._reset_and_load(t0, t1)
+            # transport ticks (no nav) while live → nothing; live pass-through handles it
             self._was_following = True
             return
         self._was_following = False
