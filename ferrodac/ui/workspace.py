@@ -801,19 +801,25 @@ class Dashboard(QObject):
             if isinstance(r.value, Trace) and not r.partial:
                 self._run_processors(r)
 
+    def _write_routed(self, key, value):
+        """Write a source value to every device control sink it's routed to."""
+        for sink_key in self._routes.get(key, ()):
+            sp = self._sinks.get(sink_key)
+            if sp is not None and sp.kind == "device":
+                self._write_to_device(sp, value)
+
     def _on_control_batch(self, batch):
-        """Engine sink (always live): write routed source values to device
-        control sinks. Control must never be driven by replayed history, so this
-        stays on the live engine, not the playback bus."""
+        """Engine sink: route RAW + manual source values to device control sinks.
+        On the live engine so manual/raw control is always live (even during a
+        replay). Derived (processor) control is routed in _run_processors."""
         for r in batch:
-            for sink_key in self._routes.get(r.key, ()):
-                sp = self._sinks.get(sink_key)
-                if sp is not None and sp.kind == "device":
-                    self._write_to_device(sp, r.value)
+            self._write_routed(r.key, r.value)
 
     def _run_processors(self, r):
-        """Feed a reading to every processor bound to its source, publishing the
-        derived values back into the data plane."""
+        """Feed a reading to every processor bound to its source. Derived outputs
+        go onto the PIPELINE bus (transient — never the engine, so they're never
+        persisted; the recorder/store stay raw-only, headless of analysis). Their
+        control routing is applied here so processor-driven control still works."""
         for proc in self._processors.values():
             if proc.input_key != r.key:
                 continue
@@ -824,7 +830,8 @@ class Dashboard(QObject):
                     sp.unit = port.unit          # adopt unit once known
                 if port.key in out:
                     dev, _, src = port.key.partition("/")
-                    self.engine.publish(Reading(dev, src, r.t, out[port.key]))
+                    self.data_bus.publish(Reading(dev, src, r.t, out[port.key]))
+                    self._write_routed(port.key, out[port.key])   # derived → control
 
     def _on_virtual_emit(self, source_key: str, value):
         src = self._sources.get(source_key)

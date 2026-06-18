@@ -193,7 +193,8 @@ class PlaybackSource:
     def _emit(self, batch) -> int:
         for r in batch:
             self.bus.publish(r)
-        self.bus.drain()                             # fan the chunk to subscribers
+        while self.bus.drain():                      # fan the chunk + flush any derived
+            pass                                     # a processor emits back onto the bus
         return len(batch)
 
 
@@ -228,7 +229,8 @@ class ReplayController:
         if self.tc.following:                        # live → straight to the playback bus
             for r in batch:
                 self.bus.publish(r)
-            self.bus.drain()
+            while self.bus.drain():                  # loop: flush derived a processor
+                pass                                 # emits back onto the bus mid-drain
             if batch:                                # track what the live panels now hold
                 lo = min(r.t for r in batch)
                 hi = max(r.t for r in batch)

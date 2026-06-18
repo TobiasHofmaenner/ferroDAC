@@ -635,6 +635,41 @@ Shown on the track *and* the finder coverage band; it also enables **epoch-aware
 export** (select within one hue → one tidy CSV), and the export action confirms
 "this selection spans N epochs → N files" before writing.
 
+### 7.5 Headless acquisition — the data-plane North Star (decided 2026-06-18)
+
+The single governing rule that collapses "live vs replay" and the
+write/read tangle:
+
+> **Acquisition is headless. The write path must never depend on the read path.**
+> Persist **raw device data only** — nothing derived, ever.
+
+- **Two independent paths.** *Write* (always on): `device → Engine(raw) → persist
+  (RAM ring · Zarr · remote)`. It runs identically whether you're live, replaying,
+  or the UI is shut — it just faithfully records every **device channel**. *Read*
+  (the viewer/analyzer): `query/stream a window → routing graph + processors →
+  display (+ live control)`. The read path **never writes to the store.**
+- **One pipeline; live is not special.** The routing graph is fed by a single
+  switchable **raw source**: live = the just-persisted stream; replay = raw read
+  from the store for the window. The graph is byte-identical either way.
+- **Derived is transient — never persisted.** Persisting an analyzer's output
+  would make "what's recorded" depend on "what the viewer is doing" — the exact
+  coupling we forbid. So processors publish derived onto the **pipeline bus, not
+  the Engine**; it's recomputed every time the pipeline runs. (No persist flag,
+  no checkbox — we deliberately dropped that to keep the write path pure.)
+- **Control is always live; replay never gates it.** Commands hit the real device
+  *now*, in any view state. There's **no attempt to distinguish closed-loop from
+  manual** (we can't reliably) — the user owns that footgun. What makes this safe
+  for the *record* is the readback rule below.
+- **Readback rule (how control is captured):** we don't record commands — devices
+  expose their control settings as **readback channels** (e.g. RGA SEM-voltage),
+  and the headless writer records *those* as ordinary raw data. So "what was the
+  setpoint at T" is answered by the device's own channel, and correlation is
+  post-hoc over recorded raw — acquisition stays self-contained. *(Driver
+  guideline: every control input should expose a corresponding readback source.)*
+- **Consequence:** ordering is the store's job (tiers are time-ordered → queries
+  return ordered data; the chart is a view, not an arrival-order buffer), and a
+  replay re-deriving its own analysis can never re-pollute the live record.
+
 ---
 
 ## 8. Project folder = system of record
