@@ -347,6 +347,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._live_btn.clicked.connect(lambda: self._set_live(self._live_btn.isChecked()))
         bar.addWidget(self._live_btn)
         bar.addWidget(mk("📅 Date", self._open_calendar))
+        bar.addWidget(mk("⤢ Fit", self._fit_to_view))
+        bar.addWidget(mk("⊡ Frame", self._frame_slice))
         sp = QtWidgets.QLabel("  speed"); sp.setStyleSheet(f"color:{_MUTED};")
         bar.addWidget(sp)
         self._speed = QtWidgets.QComboBox()
@@ -407,6 +409,24 @@ class TimelineWindow(QtWidgets.QMainWindow):
 
     def _recenter(self, t):
         self.tc.park(t + self.tc.width / 2)   # double-click → centre the head on t
+
+    def _fit_to_view(self):
+        """Snap the window/head to whatever the ribbon currently shows — navigate
+        the finder (drag=pan, scroll=zoom) to frame a region, then Fit."""
+        x0, x1 = self.ribbon.getPlotItem().getViewBox().viewRange()[0]
+        if x1 - x0 < 1e-6:
+            return
+        self.tc.width = x1 - x0
+        self.tc.park(x1)
+
+    def _frame_slice(self):
+        """Reverse of Fit: zoom the finder to frame the current window (with a
+        margin so the handles sit inset). Moves only the ribbon view."""
+        t0, t1 = self.tc.window
+        if t1 - t0 <= 0:
+            return
+        pad = (t1 - t0) * 0.1
+        self.ribbon.getPlotItem().getViewBox().setXRange(t0 - pad, t1 + pad, padding=0)
 
     def _day_densities(self):
         """{date: 0..1} fraction of each day covered by any source — for the
