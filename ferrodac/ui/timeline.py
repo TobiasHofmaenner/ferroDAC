@@ -197,8 +197,15 @@ class Ribbon(pg.PlotWidget):
                                     pen=pg.mkPen("#ff6b6b", width=2))
         self.head.setZValue(20)
         self.addItem(self.head)
+        self.now_line = pg.InfiniteLine(                  # the live edge
+            angle=90, movable=False, pen=pg.mkPen("#69db7c", width=1,
+            style=QtCore.Qt.DashLine), label="live",
+            labelOpts={"position": 0.04, "color": "#69db7c"})
+        self.now_line.setZValue(15)
+        self.addItem(self.now_line)
+        self._now_t = t1
         self.setXRange(t0, t1, padding=0.02)
-        self.getPlotItem().getViewBox().setLimits(xMin=t0 - 1, xMax=t1 + 86400)
+        self.set_now(t1)
         self.set_window(t0, t1)
         self.scene().sigMouseClicked.connect(self._click)
         self.getPlotItem().getViewBox().sigXRangeChanged.connect(self._reflow)
@@ -221,6 +228,16 @@ class Ribbon(pg.PlotWidget):
 
     def set_coverage(self, cover):
         self._draw_bars(cover)
+
+    def set_now(self, now):
+        """Move the live marker to `now` and clamp the view so you can't pan/zoom
+        into the future — leaving a small margin so the marker isn't flush right."""
+        self._now_t = now
+        self.now_line.setPos(now)
+        vb = self.getPlotItem().getViewBox()
+        (x0, x1), _ = vb.viewRange()
+        margin = 0.12 * max(1.0, x1 - x0)
+        vb.setLimits(xMin=None, xMax=now + margin)
 
     def follow_view(self, head):
         """While following live, pan the view to keep the head near the right
@@ -401,9 +418,11 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.tc.park(b)                       # head = window end → fires the replay
 
     def _live_tick(self):
-        """500 ms heartbeat: advance the head (if following) and grow the ribbon
-        coverage bars as new data lands (the preview charts already grow via tc)."""
+        """500 ms heartbeat: advance the head (if following), move the live
+        marker, and grow the ribbon coverage bars as new data lands."""
         self.tc.tick_live()
+        self.now = time.time()
+        self.ribbon.set_now(self.now)
         self._cover = {k: self.resolver.coverage(k) for k in self._sources}
         self.ribbon.set_coverage(self._cover)
 
