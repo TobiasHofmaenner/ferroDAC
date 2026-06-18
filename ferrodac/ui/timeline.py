@@ -41,16 +41,15 @@ class Ribbon(pg.PlotWidget):
         self.getAxis("left").setStyle(showValues=False)
         self.getAxis("left").setWidth(60)
         self._labels = []
-        rows = list(sources)
-        for i, key in enumerate(rows):
-            y = len(rows) - 1 - i
-            for (a, b) in cover.get(key, []):
-                self.addItem(pg.BarGraphItem(x0=a, width=max(b - a, 1.0), y0=y + 0.15,
-                             height=0.5, brush="#4dabf7", pen=None))
+        self._bars = []
+        self._rows = list(sources)
+        for i, key in enumerate(self._rows):
+            y = len(self._rows) - 1 - i
             lab = pg.TextItem(_label(key), color=_MUTED, anchor=(0, 0.5))
             self.addItem(lab)
             self._labels.append((lab, y + 0.4))
-        self.setYRange(-0.5, max(1, len(rows)), padding=0)
+        self._draw_bars(cover)
+        self.setYRange(-0.5, max(1, len(self._rows)), padding=0)
         self.region = pg.LinearRegionItem(brush=(77, 171, 247, 40),
                                            hoverBrush=(77, 171, 247, 70))
         self.region.setZValue(10)
@@ -66,6 +65,33 @@ class Ribbon(pg.PlotWidget):
         self.scene().sigMouseClicked.connect(self._click)
         self.getPlotItem().getViewBox().sigXRangeChanged.connect(self._reflow)
         self._reflow()
+
+    def _draw_bars(self, cover):
+        """(Re)draw the per-source coverage bars — called on open and whenever
+        live data extends coverage, so the tracks grow with the data."""
+        for b in self._bars:
+            self.removeItem(b)
+        self._bars = []
+        n = len(self._rows)
+        for i, key in enumerate(self._rows):
+            y = n - 1 - i
+            for (a, b) in cover.get(key, []):
+                item = pg.BarGraphItem(x0=a, width=max(b - a, 1.0), y0=y + 0.15,
+                                       height=0.5, brush="#4dabf7", pen=None)
+                self.addItem(item)
+                self._bars.append(item)
+
+    def set_coverage(self, cover):
+        self._draw_bars(cover)
+
+    def follow_view(self, head):
+        """While following live, pan the view to keep the head near the right
+        edge (preserving the user's zoom width); no-op if it's already in view."""
+        vb = self.getPlotItem().getViewBox()
+        (x0, x1), _ = vb.viewRange()
+        w = max(1.0, x1 - x0)
+        if head > x1 - w * 0.08 or head < x0:
+            vb.setXRange(head - w * 0.9, head + w * 0.1, padding=0)
 
     def _on_region(self):
         a, b = self.region.getRegion()
@@ -130,7 +156,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
 
         self._tc_unsub = self.tc.subscribe(self._on_tc)
         self._live_timer = QtCore.QTimer(self, interval=500)
-        self._live_timer.timeout.connect(self.tc.tick_live)
+        self._live_timer.timeout.connect(self._live_tick)
         self._live_timer.start()
         self._play_timer = QtCore.QTimer(self, interval=50)
         self._play_timer.timeout.connect(lambda: self.tc.tick_play(0.05))
@@ -215,6 +241,13 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.tc.width = max(1e-3, b - a)
         self.tc.park(b)                       # head = window end → fires the replay
 
+    def _live_tick(self):
+        """500 ms heartbeat: advance the head (if following) and grow the ribbon
+        coverage bars as new data lands (the preview charts already grow via tc)."""
+        self.tc.tick_live()
+        self._cover = {k: self.resolver.coverage(k) for k in self._sources}
+        self.ribbon.set_coverage(self._cover)
+
     def _recenter(self, t):
         self.tc.park(t + self.tc.width / 2)   # double-click → centre the head on t
 
@@ -254,6 +287,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.t0, self.t1 = self.tc.window
         self._syncing = True                  # ribbon update must not re-park tc
         self.ribbon.set_window(self.t0, self.t1)
+        if self.tc.following:
+            self.ribbon.follow_view(self.t1)  # keep the live edge in view
         self._syncing = False
         self._refresh()
         if not self.tc.playing and self._play_timer.isActive():
