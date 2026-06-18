@@ -309,12 +309,18 @@ class TimelineWindow(QtWidgets.QMainWindow):
 
         self._ratio = 0.0
         self._last_play_wall = None
+        self._cov_ticks = 0
+        self._pending_park = None
         self._tc_unsub = self.tc.subscribe(self._on_tc)
         self._live_timer = QtCore.QTimer(self, interval=500)
         self._live_timer.timeout.connect(self._live_tick)
         self._live_timer.start()
         self._play_timer = QtCore.QTimer(self, interval=50)
         self._play_timer.timeout.connect(self._play_tick)
+        # debounce scrub → park so a drag doesn't fire a full-res re-stream per
+        # mouse event (that synchronous stream is what stutters the UI thread)
+        self._park_timer = QtCore.QTimer(self, interval=70, singleShot=True)
+        self._park_timer.timeout.connect(self._commit_park)
 
     # -- layout --
     def _build_ui(self):
@@ -409,11 +415,26 @@ class TimelineWindow(QtWidgets.QMainWindow):
             self._charts.pop(key).setParent(None)
 
     def _on_window(self, a, b):
-        """User dragged the ribbon region → park the shared head there. This is
-        what routes the selected slice into the live dashboard (the controller,
-        on the same tc, clears the panels and re-streams the slice full-res)."""
+        """User dragged the ribbon region → park the shared head there. The own
+        preview updates immediately (cheap, decimated); the dashboard re-stream
+        (full-res, the heavy bit) is debounced so a drag doesn't hammer the UI
+        thread. The first event parks at once so we stop following (no live yank
+        mid-drag); intermediate events only re-stream once the drag settles."""
         if self._syncing:
             return
+        self.t0, self.t1 = a, b
+        self._refresh()                       # immediate preview feedback
+        self._pending_park = (a, b)
+        if self.tc.following:
+            self._commit_park()               # leave live now
+        else:
+            self._park_timer.start()          # debounce the dashboard re-stream
+
+    def _commit_park(self):
+        if self._pending_park is None:
+            return
+        a, b = self._pending_park
+        self._pending_park = None
         self.tc.width = max(1e-3, b - a)
         self.tc.park(b)                       # head = window end → fires the replay
 
@@ -423,8 +444,12 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.tc.tick_live()
         self.now = time.time()
         self.ribbon.set_now(self.now)
-        self._cover = {k: self.resolver.coverage(k) for k in self._sources}
-        self.ribbon.set_coverage(self._cover)
+        self._cov_ticks += 1
+        if self._cov_ticks % 4 == 0:                  # coverage changes slowly (~2s)
+            cov = {k: self.resolver.coverage(k) for k in self._sources}
+            if cov != self._cover:                    # redraw bars only when changed
+                self._cover = cov
+                self.ribbon.set_coverage(cov)
 
     def _recenter(self, t):
         self.tc.park(t + self.tc.width / 2)   # double-click → centre the head on t
@@ -551,7 +576,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
                             + f"   {tag}")
 
     def closeEvent(self, ev):
-        self._live_timer.stop(); self._play_timer.stop()
+        self._live_timer.stop(); self._play_timer.stop(); self._park_timer.stop()
         try:
             self._tc_unsub()
         except Exception:
