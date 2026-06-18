@@ -499,6 +499,13 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._live_btn.blockSignals(True)
         self._live_btn.setChecked(self.tc.following)
         self._live_btn.blockSignals(False)
+        txt = f"{self.tc.speed:.0f}×"                  # reflect speed (e.g. hit-live→1×)
+        if self._speed.currentText() != txt:
+            i = self._speed.findText(txt)
+            if i >= 0:
+                self._speed.blockSignals(True)
+                self._speed.setCurrentIndex(i)
+                self._speed.blockSignals(False)
 
     def _on_tc(self):
         """The shared head moved (us, a play/live tick, or elsewhere) → reflect it

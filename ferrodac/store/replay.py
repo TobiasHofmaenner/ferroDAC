@@ -48,11 +48,14 @@ class TimeContext:
 
     # -- transport -----------------------------------------------------------
     def follow_now(self):
+        # catching up to now settles into live at realtime (no overshoot past now)
         self.following, self.playing, self.head = True, False, self._now()
+        self.speed = 1.0
         self._notify()
 
     def park(self, head: float):
-        self.following, self.head = False, float(head)
+        # the head can never be in the future — clamp to now
+        self.following, self.head = False, min(float(head), self._now())
         self._notify()
 
     def set_width(self, width: float):
