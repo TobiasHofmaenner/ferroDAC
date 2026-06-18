@@ -30,6 +30,87 @@ def _wf_cmap():
                        [(12, 10, 40), (190, 50, 90), (255, 235, 130)])
 
 
+class CpuBars(QtWidgets.QWidget):
+    """One mini bar per logical core (green/amber/red by load)."""
+
+    def __init__(self):
+        super().__init__()
+        self._vals = []
+        self.setFixedSize(200, 22)
+
+    def set_vals(self, vals):
+        self._vals = list(vals)
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QtGui.QPainter(self)
+        n = max(1, len(self._vals))
+        w = self.width() / n
+        for i, v in enumerate(self._vals):
+            h = self.height() * min(100.0, v) / 100.0
+            col = "#69db7c" if v < 60 else "#ffa94d" if v < 88 else "#ff6b6b"
+            p.fillRect(QtCore.QRectF(i * w + 0.5, self.height() - h, w - 1, h),
+                       QtGui.QColor(col))
+        p.end()
+
+
+class PerfStrip(QtWidgets.QWidget):
+    """Always-on HUD: per-core CPU, RAM (+free), this app's own usage, and the
+    live playback rate — requested vs *actually achieved* (the 'can I replay
+    this in realtime?' readout that matters once tracks get dense)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(28)
+        self.setStyleSheet(f"background:{_PANEL};")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(10, 2, 10, 2)
+        lay.setSpacing(14)
+        self._ps = None
+        try:
+            import psutil
+            self._ps = psutil
+            self._proc = psutil.Process()
+            psutil.cpu_percent(percpu=True)          # prime the deltas
+            self._proc.cpu_percent()
+        except Exception:
+            pass
+        lay.addWidget(self._lbl("CPU"))
+        self.bars = CpuBars()
+        lay.addWidget(self.bars)
+        self.ram = self._lbl("RAM —")
+        lay.addWidget(self.ram)
+        self.app = self._lbl("app —")
+        lay.addWidget(self.app)
+        lay.addStretch(1)
+        self.play = self._lbl("● live")
+        self.play.setStyleSheet(f"color:{_ACCENT}; font-weight:600;")
+        lay.addWidget(self.play)
+        self._timer = QtCore.QTimer(self, interval=1000)
+        self._timer.timeout.connect(self.refresh_res)
+        self._timer.start()
+        self.refresh_res()
+
+    def _lbl(self, t):
+        l = QtWidgets.QLabel(t)
+        l.setStyleSheet(f"color:{_MUTED};")
+        return l
+
+    def refresh_res(self):
+        if self._ps is None:
+            self.ram.setText("RAM — (pip install psutil)")
+            return
+        self.bars.set_vals(self._ps.cpu_percent(percpu=True))
+        vm = self._ps.virtual_memory()
+        self.ram.setText(f"RAM {vm.used/1e9:.1f}/{vm.total/1e9:.0f} GB "
+                         f"({vm.percent:.0f}%) · {vm.available/1e9:.1f} free")
+        self.app.setText(f"app {self._proc.cpu_percent():.0f}% cpu · "
+                         f"{self._proc.memory_info().rss/1e6:.0f} MB")
+
+    def set_play(self, text):
+        self.play.setText(text)
+
+
 class Ribbon(pg.PlotWidget):
     """Per-source coverage tracks + a draggable window region + playhead."""
 
@@ -157,12 +238,14 @@ class TimelineWindow(QtWidgets.QMainWindow):
                 .setCheckState(QtCore.Qt.Checked)
         self._refresh()
 
+        self._ratio = 0.0
+        self._last_play_wall = None
         self._tc_unsub = self.tc.subscribe(self._on_tc)
         self._live_timer = QtCore.QTimer(self, interval=500)
         self._live_timer.timeout.connect(self._live_tick)
         self._live_timer.start()
         self._play_timer = QtCore.QTimer(self, interval=50)
-        self._play_timer.timeout.connect(lambda: self.tc.tick_play(0.05))
+        self._play_timer.timeout.connect(self._play_tick)
 
     # -- layout --
     def _build_ui(self):
@@ -197,6 +280,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         vsplit.setSizes([480, 150])
         rv.addWidget(vsplit, 1)
         rv.addLayout(self._transport())
+        self.perf = PerfStrip()                              # always-on resource HUD
+        rv.addWidget(self.perf)
         self.ribbon.set_window(self.t0, self.t1)
         split.addWidget(right)
         split.setStretchFactor(1, 1)
@@ -209,6 +294,15 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._live_btn = QtWidgets.QToolButton(text="● Now", checkable=True)
         self._live_btn.clicked.connect(lambda: self._set_live(self._live_btn.isChecked()))
         bar.addWidget(self._live_btn)
+        sp = QtWidgets.QLabel("  speed"); sp.setStyleSheet(f"color:{_MUTED};")
+        bar.addWidget(sp)
+        self._speed = QtWidgets.QComboBox()
+        self._speed.addItems(["1×", "4×", "30×", "120×"])
+        self._speed.setCurrentText("30×")
+        self.tc.speed = 30.0
+        self._speed.currentTextChanged.connect(
+            lambda t: setattr(self.tc, "speed", float(t.rstrip("×"))))
+        bar.addWidget(self._speed)
         bar.addStretch(1)
         self._clock = QtWidgets.QLabel("")
         self._clock.setStyleSheet(f"color:{_MUTED};")
@@ -270,12 +364,29 @@ class TimelineWindow(QtWidgets.QMainWindow):
         if self.tc.playing:
             self.tc.playing = False
             self._play_timer.stop()
+            self.perf.set_play("⏸ paused")
         else:
             if self.tc.following:             # nothing ahead of now → park first
                 self.tc.park(self.tc.head)
             self.tc.playing = True
+            self._ratio = 0.0; self._last_play_wall = None
             self._play_timer.start()
         self._sync_transport()
+
+    def _play_tick(self):
+        """Advance a FIXED sim-step per frame (speed × 0.05) and measure the
+        actual wall time — so when frames get slow the achieved rate falls below
+        the requested one. That gap is the 'can I replay this in realtime?' HUD."""
+        now = time.perf_counter()
+        wall = (now - self._last_play_wall) if self._last_play_wall else 0.05
+        self._last_play_wall = now
+        self.tc.tick_play(0.05)
+        if not self.tc.playing:               # caught up to now → _on_tc shows live
+            return
+        ach = min(self.tc.speed, (self.tc.speed * 0.05) / max(1e-4, wall))
+        self._ratio = (0.7 * self._ratio + 0.3 * ach) if self._ratio else ach
+        self.perf.set_play(f"▶ {self.tc.speed:.0f}× req · {self._ratio:.1f}× actual"
+                           f" · {1 / max(1e-4, wall):.0f} fps")
 
     def _set_live(self, on):
         if on:
@@ -304,6 +415,10 @@ class TimelineWindow(QtWidgets.QMainWindow):
         if not self.tc.playing and self._play_timer.isActive():
             self._play_timer.stop()
         self._sync_transport()
+        if self.tc.following:
+            self.perf.set_play("● live · 1.0× realtime")
+        elif not self.tc.playing:
+            self.perf.set_play("⏸ parked")
         dt = self.now - self.t1
         tag = ("● LIVE" if self.tc.following
                else (f"-{dt/60:.1f} min" if dt > 1 else "now"))
