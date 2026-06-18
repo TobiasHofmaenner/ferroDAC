@@ -107,6 +107,14 @@ class DataflowGraph:
     def downstream_of(self, nid: str) -> list:
         return [self._nodes[d] for d in self._out.get(nid, ()) if d in self._nodes]
 
+    def replace(self, other: "DataflowGraph") -> None:
+        """Swap in another graph's nodes + edges and fire one change. Lets a UI
+        rebuild a fresh snapshot and atomically publish it to observers."""
+        self._nodes = dict(other._nodes)
+        self._out = {k: set(v) for k, v in other._out.items()}
+        self._in = {k: set(v) for k, v in other._in.items()}
+        self._notify()
+
     # -- change notification (Qt-free observer; UI bridges to its signal) ----
     def subscribe(self, cb):
         self._subs.append(cb)

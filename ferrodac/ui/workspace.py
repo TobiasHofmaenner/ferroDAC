@@ -204,6 +204,7 @@ class Dashboard(QObject):
         self._sources: dict[str, SourcePort] = {}
         self._sinks: dict[str, SinkPort] = {}
         self._routes: dict[str, set] = {}        # source_key -> set(sink_key)
+        self.graph = DataflowGraph()             # live core model (DESIGN §4.1)
         self._counter = 0
         self.default_sink_id = None              # default chart panel id
 
@@ -221,6 +222,7 @@ class Dashboard(QObject):
 
         self.area.on_configure = self._configure_panel
         engine.subscribe(self._on_batch)
+        self.ports_changed.connect(self._sync_graph)   # keep the core graph current
         manager.active_changed.connect(self._rebuild_device_ports)
         self._rebuild_device_ports()
 
@@ -390,11 +392,18 @@ class Dashboard(QObject):
                 if sp.dtype == "trace" and self._routes.get(key)}
 
     def build_graph(self) -> DataflowGraph:
-        """A core, Qt-free snapshot of the current dataflow (DESIGN §4.1) — the
-        model introspection / replay / distribution consult, decoupled from the
-        UI's internal port dicts. (The Dashboard stays the *editor*; this is the
-        extracted *model* — step toward the graph owning routing outright.)"""
-        g = DataflowGraph()
+        """The **live** core dataflow model (DESIGN §4.1) — kept current on every
+        ports_changed. Consumers (introspection, replay, distribution) read this
+        and may `subscribe` to its change observer. The Dashboard stays the
+        *editor*; this is the decoupled *model*."""
+        return self.graph
+
+    def _sync_graph(self) -> None:
+        fresh = DataflowGraph()
+        self._populate_graph(fresh)
+        self.graph.replace(fresh)                    # atomic publish + one notify
+
+    def _populate_graph(self, g: DataflowGraph) -> None:
         for key, sp in self._sources.items():
             g.add_node(Node(key, SOURCE, sp.name, dtype=sp.dtype, unit=sp.unit,
                             origin=sp.origin,
@@ -412,7 +421,6 @@ class Dashboard(QObject):
         for src, targets in self._routes.items():    # source → sink routes
             for dst in targets:
                 g.connect(src, dst)
-        return g
 
     def detectors_for(self, sink_key: str) -> list:
         with self._det_lock:
