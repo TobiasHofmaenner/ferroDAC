@@ -1457,13 +1457,18 @@ class MainWindow(QMainWindow):
         self.hub = HubController(
             self.dashboard, engine, manager, self,
             store=self.store_writer.store if self.store_writer is not None else None)
-        self.hub.status.connect(lambda msg: self.statusBar().showMessage(msg, 6000))
+        # All three fire from hub worker threads (gRPC / sync) — force
+        # QueuedConnection so the slots run on the GUI thread (see hubclient).
+        # A bound method (not a lambda) gives the queued call an explicit
+        # GUI-thread receiver, so showMessage's QTimer is never started off-thread.
+        self.hub.status.connect(self._on_hub_status, Qt.QueuedConnection)
         # hub link + store-sync read-out in the status bar, and a recoloured Hub
         # button when connected (the sync runs headlessly in the background).
         self.sync_status = SyncStatusWidget()
         self.statusBar().addPermanentWidget(self.sync_status)
-        self.hub.sync_status.connect(self.sync_status.set_state)
-        self.hub.connection_changed.connect(self._on_hub_connection)
+        self.hub.sync_status.connect(self.sync_status.set_state, Qt.QueuedConnection)
+        self.hub.connection_changed.connect(self._on_hub_connection,
+                                            Qt.QueuedConnection)
 
         # working-session autosave (tags/layout survive restart & crashes)
         self._autosave_on = False
@@ -1621,6 +1626,9 @@ class MainWindow(QMainWindow):
         self._timeline_win.show()
         self._timeline_win.raise_()
         self._timeline_win.activateWindow()
+
+    def _on_hub_status(self, msg: str) -> None:
+        self.statusBar().showMessage(msg, 6000)
 
     def _on_hub_connection(self, connected: bool) -> None:
         """Recolour the Hub toolbar button to signal the live link, and seed the

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import socket
 
-from qtpy.QtCore import QObject, Signal
+from qtpy.QtCore import QObject, Qt, Signal
 from qtpy.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
                             QLabel, QLineEdit, QVBoxLayout)
 
@@ -45,8 +45,12 @@ class HubController(QObject):
         self._tags_wired = False
         self._local: set = set()
         self.addr = ""
-        self._catalog.connect(self._on_catalog_gui)
-        self._tag.connect(self._on_tag_gui)
+        # These signals are emitted from raw (non-QThread) gRPC worker threads;
+        # force QueuedConnection so the slots ALWAYS run on the GUI thread. With
+        # AutoConnection, PySide6 can mis-detect a non-QThread emitter and deliver
+        # directly on the worker thread → Qt-off-GUI-thread → heap corruption.
+        self._catalog.connect(self._on_catalog_gui, Qt.QueuedConnection)
+        self._tag.connect(self._on_tag_gui, Qt.QueuedConnection)
 
     @property
     def available(self) -> bool:

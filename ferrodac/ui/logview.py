@@ -17,7 +17,7 @@ import logging
 from collections import deque
 from html import escape
 
-from qtpy.QtCore import QObject, Qt, Signal
+from qtpy.QtCore import QTimer
 from qtpy.QtGui import QTextCursor
 from qtpy.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
                             QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
@@ -38,19 +38,18 @@ _COLOURS = {
 }
 
 
-class _Emitter(QObject):
-    message = Signal(str, int)            # formatted line, levelno
-
-
 class QtLogHandler(logging.Handler):
-    """A logging handler that forwards each record to the GUI as a Qt signal.
+    """A logging handler that buffers records for the GUI to drain.
 
-    Emitting a signal across threads is queued by Qt, so this is safe to attach
-    to the root logger even though records originate on worker threads."""
+    Records arrive on *any* thread — including raw (non-QThread) worker threads
+    from gRPC/asyncio/the sync runner. Touching Qt from those threads corrupts
+    the heap, so this handler does **zero** Qt work: it only appends to a
+    thread-safe ``deque`` (CPython ``append``/``popleft`` are atomic). The GUI
+    thread polls it (see ``LogPanel``)."""
 
-    def __init__(self, level=logging.NOTSET):
+    def __init__(self, level=logging.NOTSET, capacity: int = 10000):
         super().__init__(level)
-        self.emitter = _Emitter()
+        self.records: deque = deque(maxlen=capacity)
         self.setFormatter(logging.Formatter(
             "%(asctime)s  %(name)s  %(message)s", datefmt="%H:%M:%S"))
 
@@ -59,7 +58,7 @@ class QtLogHandler(logging.Handler):
             msg = self.format(record)
         except Exception:                 # never let logging crash the app
             return
-        self.emitter.message.emit(msg, record.levelno)
+        self.records.append((msg, record.levelno))   # no Qt here — GUI drains
 
 
 class LogPanel(QWidget):
@@ -67,6 +66,7 @@ class LogPanel(QWidget):
 
     def __init__(self, handler: QtLogHandler, capacity: int = 5000, parent=None):
         super().__init__(parent)
+        self._handler = handler
         self._buf: deque = deque(maxlen=capacity)
         self._min_level = logging.NOTSET
 
@@ -100,13 +100,22 @@ class LogPanel(QWidget):
         lay.addLayout(head)
         lay.addWidget(self._view, 1)
 
-        handler.emitter.message.connect(self.append)
+        # poll the handler's buffer on the GUI thread — never the worker threads
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._drain)
+        self._timer.start(250)
 
-    # -- slots ---------------------------------------------------------------
-    def append(self, msg: str, level: int) -> None:
-        self._buf.append((msg, level))
-        if level >= self._min_level:
-            self._emit_line(msg, level)
+    # -- slots (GUI thread) --------------------------------------------------
+    def _drain(self) -> None:
+        recs = self._handler.records
+        while True:
+            try:
+                msg, level = recs.popleft()      # atomic in CPython
+            except IndexError:
+                break
+            self._buf.append((msg, level))
+            if level >= self._min_level:
+                self._emit_line(msg, level)
 
     def _emit_line(self, msg: str, level: int) -> None:
         colour = _COLOURS.get(level, "#c5ccd6")
