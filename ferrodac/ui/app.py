@@ -1442,6 +1442,7 @@ class MainWindow(QMainWindow):
                 sources=lambda: self.dashboard.source_keys(),
                 on_reset=self._replay_reset,
                 on_progress=self._replay_progress,
+                reader=self.resolver,        # replay full-res via RAM+store+hub tier
             )
         except Exception as exc:                       # noqa: BLE001
             logging.getLogger("ferrodac").warning("durable store disabled: %s", exc)

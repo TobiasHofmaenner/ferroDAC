@@ -50,6 +50,14 @@ class RamTier:
             return _interleave(*_downsample(t, v, v, f))
         return t, v
 
+    def read_raw(self, series, t0, t1):                  # FULL-RES (replay/analysis)
+        pts = [(t, v) for (t, v, s) in self.history.slice(series, t0, t1) if s == 0]
+        if not pts:
+            return np.array([]), np.array([])
+        t = np.fromiter((p[0] for p in pts), dtype="f8", count=len(pts))
+        v = np.fromiter((p[1] for p in pts), dtype="f8", count=len(pts))
+        return t, v
+
 
 class Resolver:
     def __init__(self, tiers):
@@ -93,6 +101,46 @@ class Resolver:
         if not xs:
             return np.array([]), np.array([])
         return np.concatenate(xs), np.concatenate(ys)
+
+    def read_raw(self, series, t0, t1):
+        """FULL-RES scalar samples stitched across tiers (nearest-wins per
+        sub-range), no decimation — the replay/analysis read. Tiers without a
+        read_raw (or with no data) are skipped; the hub fills what's only remote."""
+        ts, vs = [], []
+        for a, b, tier in self._partition(series, t0, t1):
+            rr = getattr(tier, "read_raw", None) if tier is not None else None
+            if rr is None:
+                continue
+            t, v = rr(series, a, b)
+            if len(t):
+                ts.append(np.asarray(t, dtype="f8")); vs.append(np.asarray(v, dtype="f8"))
+        if not ts:
+            return np.array([]), np.array([])
+        t = np.concatenate(ts); v = np.concatenate(vs)
+        order = np.argsort(t, kind="stable")             # tier boundaries → re-order
+        return t[order], v[order]
+
+    def read_raw_trace(self, series, t0, t1) -> list:
+        """FULL-RES trace blocks stitched across tiers that hold traces (local
+        store / hub). list of (times[k], Y[k, m], x[m])."""
+        out = []
+        for a, b, tier in self._partition(series, t0, t1):
+            rr = getattr(tier, "read_raw_trace", None) if tier is not None else None
+            if rr is not None:
+                out.extend(rr(series, a, b))
+        return out
+
+    def source_dtype(self, series) -> str:
+        """First tier that actually knows the source's dtype ('trace'|'scalar');
+        lets the replay pick read_raw vs read_raw_trace for hub-only sources too."""
+        for tier in self.tiers:
+            f = getattr(tier, "source_dtype", None)
+            if f is None:
+                continue
+            dt = f(series)
+            if dt and dt != "scalar":
+                return dt
+        return "scalar"
 
     def _partition(self, series, t0, t1):
         """Tile [t0,t1] into (a, b, tier|None) segments — nearest covering tier

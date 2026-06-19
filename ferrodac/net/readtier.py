@@ -35,6 +35,7 @@ class HubReadTier:
         self.stub = rpc.StoreStub(channel)
         self.token = token
         self.timeout = timeout
+        self._dtypes = None                          # cached {key: dtype} catalog
 
     # -- tier protocol (same shape as RamTier / ZarrStore) -------------------
     def coverage(self, series) -> list:
@@ -77,7 +78,14 @@ class HubReadTier:
         try:
             resp = self.stub.ListSources(pb.SourcesRequest(token=self.token),
                                          timeout=self.timeout)
-            return [(s.key, s.name, s.unit, s.dtype) for s in resp.sources]
+            srcs = [(s.key, s.name, s.unit, s.dtype) for s in resp.sources]
+            self._dtypes = {k: dt for k, _n, _u, dt in srcs}   # refresh dtype cache
+            return srcs
         except Exception as exc:                     # noqa: BLE001
             log.debug("hub ListSources failed: %s", exc)
             return []
+
+    def source_dtype(self, series) -> str:
+        if self._dtypes is None:
+            self.sources()                           # one ListSources, then cached
+        return (self._dtypes or {}).get(str(series), "scalar")

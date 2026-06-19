@@ -208,11 +208,14 @@ class ReplayController:
     optimisation, signalled by the realtime-rate readout)."""
 
     def __init__(self, engine, store, time_context, sources=None, on_reset=None,
-                 on_progress=None):
+                 on_progress=None, reader=None):
         self.store = store
         self.tc = time_context
         self.bus = Bus()                             # what the dashboard subscribes to
-        self.playback = PlaybackSource(store, self.bus)
+        # replay reads full-res through `reader` — the RESOLVER (RAM + local store
+        # + hub tier) when given, so parking re-streams history the client lacks
+        # locally (e.g. from the hub after a local wipe); else the bare store.
+        self.playback = PlaybackSource(reader or store, self.bus)
         self._sources = sources or store.sources     # callable → [source keys]
         self.on_reset = on_reset
         self.on_progress = on_progress               # frac 0..1 during a load; None=done
