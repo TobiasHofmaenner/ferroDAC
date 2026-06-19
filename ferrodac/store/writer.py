@@ -22,7 +22,8 @@ import numpy as np
 from ..core.trace import Trace
 
 _CHUNK = 4096            # samples buffered per source before a flush
-_INTERVAL = 5.0         # …or this many seconds, whichever first
+_INTERVAL = 2.0         # …or this many seconds, whichever first (bounds crash loss:
+#                         the durable store is now the sole crash-safe write path)
 _ROLLUP_EVERY = 50_000  # rebuild a source's rollup pyramid every N new samples
 
 

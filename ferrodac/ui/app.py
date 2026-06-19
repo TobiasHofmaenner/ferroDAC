@@ -50,8 +50,6 @@ from ..core.engine import Engine
 from ..core.history import HistoryBuffer
 from ..core.manager import DeviceManager
 from ..core.markers import RECORDING
-from ..core import recorder as rec
-from ..core.recorder import Recorder
 from ..core.registry import load_builtin_drivers
 from ..core.device import DeviceDescriptor, RateMode, SinkKind
 from ..vision.detector import FAIL_LABELS, PARSE_LABELS, WHITELIST_PRESETS, Detector
@@ -1410,12 +1408,13 @@ class MainWindow(QMainWindow):
         self.workspace = WorkspaceArea()
         self.setCentralWidget(self.workspace)
 
-        # data plane: always-on hot history + the recorder. Built BEFORE the
-        # dashboard so the dashboard can render through the replay playback bus.
+        # data plane: always-on hot history. Built BEFORE the dashboard so the
+        # dashboard can render through the replay playback bus. The durable
+        # StoreWriter (Zarr) is the crash-safe write path; a "recording" is just
+        # a marked span over it, auto-exported on Stop (no separate capture file).
         self.history = HistoryBuffer()
         engine.subscribe(self.history.feed)
-        self.recorder = Recorder(engine, self.history, on_change=self._on_record_change)
-        self._rec_start_mid = None
+        self._rec_start_mid = None         # the open REC marker while recording
 
         # durable store: persist EVERYTHING continuously (§7.4) so data survives a
         # restart and a span can be recorded retroactively. Degrades to the RAM
@@ -1575,9 +1574,8 @@ class MainWindow(QMainWindow):
             "Scanning for devices…  ·  open “Devices” to add one"
         )
         self.manager.start()
-        self._check_recovery()
         if self._restore_last:
-            self._init_session_persistence()
+            self._init_session_persistence()    # restores markers, then recovers
 
     def _build_menus(self):
         filemenu = self.menuBar().addMenu("&File")
@@ -1811,47 +1809,74 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported {n} plot(s) → {folder}", 6000)
 
     def _toggle_record(self):
+        """A recording is just a marked SPAN over the always-on durable store.
+        Start opens a REC marker (data is already being persisted); Stop closes it
+        and auto-exports the span as a bundle from the resolver/Zarr."""
         ms = self.dashboard.markers
-        if not self.recorder.active:
-            sources = self.dashboard.capture_sources()
-            traces = self.dashboard.capture_traces()
-            if not sources and not traces:
-                self.statusBar().showMessage(
-                    "Nothing to record — route some sources to a chart first.", 5000)
-                return
-            run_dir = os.path.join(self._runs_dir(),
-                                   "run_" + time.strftime("%Y-%m-%dT%H-%M-%S"))
-            n = len(sources) + len(traces)
-            self._rec_start_mid = ms.add(
-                time.time(), kind=RECORDING, label="REC",
-                comment=f"{n} sources", run_dir=run_dir)
-            self.recorder.start(run_dir, sources, traces)
-            self.statusBar().showMessage(f"● Recording → {run_dir}")
-        else:
-            m = ms.get(self._rec_start_mid)
-            t0 = m.t if m else None
-            t1 = time.time()
-            ms.update(self._rec_start_mid, t_end=t1)   # close the region
-            out = self.recorder.stop(t_start=t0, t_stop=t1)
-            self._rec_start_mid = None
-            self.statusBar().showMessage(f"■ Saved {out}", 8000)
-
-    def _on_record_change(self):
-        if self.recorder.active:
+        if self._rec_start_mid is None:                 # start
+            self._rec_start_mid = ms.add(time.time(), kind=RECORDING, label="REC",
+                                         comment="recording…")
             self.record_action.setText("■ Stop")
-        else:
+            self.statusBar().showMessage("● Recording — persisting to the store")
+        else:                                            # stop → finalise + export
+            mid, self._rec_start_mid = self._rec_start_mid, None
             self.record_action.setText("● Record")
+            m = ms.get(mid)
+            t0 = m.t if m else time.time()
+            t1 = time.time()
+            ms.update(mid, t_end=t1)                      # close the region
+            self._finalize_recording(mid, t0, t1)
 
-    def _check_recovery(self):
-        """Crash-safety: materialise any capture left unfinalised by a crash."""
-        recovered = 0
-        for run_dir in rec.find_unfinalized(self._runs_dir()):
-            if rec.recover(run_dir):
-                recovered += 1
-        if recovered:
+    def _finalize_recording(self, mid, t0, t1) -> None:
+        """Flush the store and materialise the span as a self-describing bundle
+        (export_window via the resolver — RAM + store + hub). The durable Zarr
+        store IS the crash-safe data; there's no separate capture file."""
+        if self.store_writer is not None:
+            try:
+                self.store_writer.flush_all()             # a clean stop loses nothing
+            except Exception:                             # noqa: BLE001
+                pass
+        if self.resolver is None:
+            return
+        sources = self.dashboard.export_sources()
+        from ..store import export_window
+        dest = os.path.join(self._runs_dir(),
+                            "run_" + time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(t0)))
+        try:
+            man = export_window(dest, sources, self.resolver, t0, t1)
+        except Exception as exc:                          # noqa: BLE001
+            self.statusBar().showMessage(f"Recording kept; export failed: {exc}", 8000)
+            return
+        n = len(man.get("sources", []))
+        self.dashboard.markers.update(mid, run_dir=dest, comment=f"{n} sources")
+        self.statusBar().showMessage(f"■ Saved recording: {n} source(s) → {dest}", 8000)
+
+    def _recover_open_recordings(self) -> None:
+        """A recording interrupted by a crash survives as an OPEN REC marker
+        (t_end=None) in the restored session — the data is already in the store.
+        Finalise the span (t_end = the last data we have) and export the bundle."""
+        ms = self.dashboard.markers
+        open_recs = [m for m in ms.all() if m.kind == RECORDING and m.t_end is None]
+        for m in open_recs:
+            t_end = self._last_data_time(m.t) or m.t
+            ms.update(m.id, t_end=t_end)
+            self._finalize_recording(m.id, m.t, t_end)
+        if open_recs:
             self.statusBar().showMessage(
-                f"Recovered {recovered} unfinalised recording(s) after a crash.",
-                8000)
+                f"Recovered {len(open_recs)} recording(s) interrupted by a crash.", 8000)
+
+    def _last_data_time(self, t0):
+        """Latest stored sample time in [t0, now] across sources (for finalising a
+        crashed recording's end). None if nothing was stored."""
+        if self.resolver is None:
+            return None
+        now = time.time()
+        latest = None
+        for key in self.dashboard.export_sources():
+            for a, b in self.resolver.coverage(key):
+                if a <= now and b >= t0:
+                    latest = min(b, now) if latest is None else max(latest, min(b, now))
+        return latest
 
     def _on_tick(self):
         self.sources_panel.update_live(self.engine.latest())
@@ -1974,6 +1999,7 @@ class MainWindow(QMainWindow):
     def _restore_and_enable_autosave(self):
         self.open_session(os.path.join(self._app_dir(), "session.json"))
         self._autosave_on = True
+        self._recover_open_recordings()         # finalise any crash-interrupted REC
 
     def open_session(self, path: str) -> None:
         try:
@@ -2092,13 +2118,9 @@ class MainWindow(QMainWindow):
             self.dashboard.set_time_window(*self.time_context.window)
 
     def closeEvent(self, event):  # noqa: N802
-        if self.recorder.active:        # finalize rather than leave it dangling
-            ms = self.dashboard.markers
-            m = ms.get(self._rec_start_mid) if self._rec_start_mid else None
-            t1 = time.time()
-            if m:
-                ms.update(self._rec_start_mid, t_end=t1)
-            self.recorder.stop(t_start=m.t if m else None, t_stop=t1)
+        if self._rec_start_mid is not None:    # close the open recording cleanly
+            self.dashboard.markers.update(self._rec_start_mid, t_end=time.time())
+            self._rec_start_mid = None         # store_writer.stop() below flushes it
         if self._autosave_on:
             self._do_autosave()
         self.hub.disconnect()

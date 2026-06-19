@@ -431,29 +431,15 @@ class Dashboard(QObject):
             if plot is not None:
                 plot.setXRange(x0, x1, padding=0.05)
 
-    def capture_sources(self) -> dict:
-        """Numeric sources currently routed somewhere — the Record capture set
-        (open-decision #4: the active dashboard's channels)."""
-        out = {}
-        for key, sp in self._sources.items():
-            if sp.dtype in ("float", "bool") and self._routes.get(key):
-                out[key] = {"name": sp.name, "unit": sp.unit}
-        return out
-
     def export_sources(self) -> dict:
         """ALL data-bearing sources (scalar + trace), routed or not — live,
-        historic-local and hub — for a full-window export. {key: {name,unit,dtype}}."""
+        historic-local and hub — for a full-window export / recording bundle.
+        {key: {name, unit, dtype}}."""
         out = {}
         for key, sp in self._sources.items():
             if sp.dtype in ("float", "bool", "trace"):
                 out[key] = {"name": sp.name, "unit": sp.unit, "dtype": sp.dtype}
         return out
-
-    def capture_traces(self) -> dict:
-        """Routed trace (array) sources — recorded full-scan to per-trace CSVs."""
-        return {key: {"name": sp.name}
-                for key, sp in self._sources.items()
-                if sp.dtype == "trace" and self._routes.get(key)}
 
     def build_graph(self) -> DataflowGraph:
         """The **live** core dataflow model (DESIGN §4.1) — kept current on every
