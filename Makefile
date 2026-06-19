@@ -2,7 +2,7 @@
 .DEFAULT_GOAL := help
 QT := QT_QPA_PLATFORM=offscreen
 
-.PHONY: help test test-core test-ui test-int run hub codegen
+.PHONY: help test test-core test-ui test-int run hub codegen render
 
 help:  ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -19,6 +19,9 @@ test-ui:  ## UI smoke tests only (offscreen Qt)
 
 test-int:  ## the real-gRPC end-to-end tests only
 	pytest -m integration -ra
+
+render:  ## render panels to /tmp/ferrodac_*.png for visual QA (SCENE=all|waterfall|…)
+	$(QT) python tools/render.py $(or $(SCENE),all)
 
 run:  ## launch the app
 	python -m ferrodac
