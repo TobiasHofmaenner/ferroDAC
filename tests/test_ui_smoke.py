@@ -497,6 +497,34 @@ def test_waterfall_autorange_ignores_markers(qapp):
 
 
 @pytest.mark.ui
+def test_hub_project_incoming_appears_and_clears(qapp):
+    """A project record arriving from the hub materialises into the ProjectManager
+    (as a hub project) and shows in the Projects dock; disconnect drops it."""
+    w = _mainwindow(qapp)
+    try:
+        mgr = w._project_mgr
+        assert w.hub._project_mgr is mgr            # the app wired hub-project sync
+        n0 = len(mgr.projects())
+        rec = {"id": "hubX", "name": "Shared X", "version": 1,
+               "sources": ["mg/ch1"], "windows": [], "layouts": {}, "deleted": False}
+        w.hub._on_project_gui(rec)                  # the queued _project signal path
+        hp = mgr.get("hubX")
+        assert hp is not None and hp.is_hub and hp.name == "Shared X"
+        assert len(mgr.projects()) == n0 + 1
+        labels = [w.projects_panel._list.item(i).text()
+                  for i in range(w.projects_panel._list.count())]
+        assert any("Shared X" in t for t in labels)
+        # a newer version edits in place (LWW); a stale one is ignored
+        w.hub._on_project_gui({**rec, "name": "Shared X2", "version": 2})
+        assert mgr.get("hubX").name == "Shared X2"
+        # disconnect → hub projects vanish (not available offline)
+        mgr.clear_hub()
+        assert mgr.get("hubX") is None
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"

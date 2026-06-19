@@ -27,6 +27,7 @@ class HubController(QObject):
     # emitted from worker threads → slots run on the GUI thread (queued)
     _catalog = Signal(str, object)        # event_type, pb.DeviceDescriptor
     _tag = Signal(object)                 # an incoming Marker from the hub
+    _project = Signal(object)             # an incoming project record (dict) from the hub
     status = Signal(str)                  # human status line
     sync_status = Signal(str, str)        # store-sync (state, detail) — §12.1
     connection_changed = Signal(bool)     # connected ↔ disconnected
@@ -44,6 +45,9 @@ class HubController(QObject):
         self._agent = None
         self._viewer = None
         self._tagsync = None
+        self._projsync = None            # hub project sync (opt-in, role-independent)
+        self._project_mgr = None         # set post-construction (after _setup_projects)
+        self._on_projects = None         # () -> refresh the Projects dock
         self._sync = None                # store-and-forward SyncRunner (agent role)
         self._agent_unsub = None
         self._tags_wired = False
@@ -55,6 +59,18 @@ class HubController(QObject):
         # directly on the worker thread → Qt-off-GUI-thread → heap corruption.
         self._catalog.connect(self._on_catalog_gui, Qt.QueuedConnection)
         self._tag.connect(self._on_tag_gui, Qt.QueuedConnection)
+        self._project.connect(self._on_project_gui, Qt.QueuedConnection)
+
+    def set_projects(self, project_mgr, on_change) -> None:
+        """Wire hub-project sync to the client ProjectManager (called by the app
+        after it builds the manager). `on_change` refreshes the Projects UI."""
+        self._project_mgr = project_mgr
+        self._on_projects = on_change
+
+    def publish_project(self, record: dict) -> None:
+        """Push a project record up (opt-in: an 'on hub' create / edit / share)."""
+        if self._projsync is not None and record:
+            self._projsync.publish(record)
 
     @property
     def available(self) -> bool:
@@ -125,6 +141,15 @@ class HubController(QObject):
         self._wire_tags()
         for m in self.dashboard.markers.snapshot():   # push our current tags up
             self._tagsync.publish(m)
+        # Projects ride their own channel too, but are OPT-IN — we just watch +
+        # publish on demand; we never auto-push local projects (DESIGN §8.1).
+        if self._project_mgr is not None:
+            from ..net.projects import HubProjectSync
+            self._projsync = HubProjectSync(
+                addr, agent_id=aid,
+                on_project=lambda rec: self._project.emit(rec),
+                on_state=self._state_cb("projects"))
+            self._projsync.start()
         self.status.emit(f"ferroDAC Cloud: connecting to {addr} …")
         self.connection_changed.emit(True)
 
@@ -155,6 +180,13 @@ class HubController(QObject):
         if self._tagsync is not None:
             self._tagsync.stop()
             self._tagsync = None
+        if self._projsync is not None:
+            self._projsync.stop()
+            self._projsync = None
+        if self._project_mgr is not None:
+            self._project_mgr.clear_hub()        # hub projects aren't offline
+            if self._on_projects is not None:
+                self._on_projects()
         self.dashboard.clear_remote_devices()
         if self.addr:
             self.status.emit("ferroDAC Cloud: disconnected")
@@ -195,6 +227,16 @@ class HubController(QObject):
         """An incoming tag from the hub (GUI thread). upsert() merges LWW and
         emits only `changed` — it never re-fires tag_changed, so no echo."""
         self.dashboard.markers.upsert(marker)
+
+    def _on_project_gui(self, record) -> None:
+        """An incoming project record from the hub (GUI thread). Materialise it into
+        the ProjectManager cache (LWW); the manager ignores our own echo by version.
+        Then refresh the Projects UI."""
+        if self._project_mgr is None:
+            return
+        self._project_mgr.apply_hub_record(record)
+        if self._on_projects is not None:
+            self._on_projects()
 
     # -- agent side (GUI thread) --------------------------------------------
     def _feed_agent(self, batch) -> None:

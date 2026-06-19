@@ -2180,10 +2180,13 @@ class MainWindow(QMainWindow):
         # a REGISTRY of tracked project folders (anywhere on disk); the active id
         # lives in it too. Migrates Phase-1 projects from the old scanned root.
         reg = os.path.join(self._app_dir(), "projects.json")
-        self._project_mgr = ProjectManager(reg)
+        self._project_mgr = ProjectManager(
+            reg, hub_cache_dir=os.path.join(self._app_dir(), "hub_cache"))
         self._project_mgr.ensure_default(
             default_dir=os.path.join(self._app_dir(), "projects", "Default"),
             legacy_root=os.path.join(self._app_dir(), "projects"))
+        # hub projects sync through this manager (opt-in; the hub is authoritative)
+        self.hub.set_projects(self._project_mgr, self._on_hub_projects_changed)
         self._migrate_legacy_session()
         # new tags file under the active project; tags themselves stay GLOBAL
         self.dashboard.markers.default_projects = [self._project_mgr.active.id]
@@ -2325,6 +2328,13 @@ class MainWindow(QMainWindow):
         ex = getattr(self, "project_explorer", None)
         if ex is not None:
             ex.refresh()
+
+    def _on_hub_projects_changed(self) -> None:
+        """Hub projects arrived / changed / vanished (sync or disconnect) — refresh
+        the Projects views. Runs on the GUI thread (queued from the sync)."""
+        if getattr(self, "projects_panel", None) is not None:
+            self.projects_panel.refresh()
+        self._refresh_explorer()
 
     # -- docs (reference files filed under the project) ----------------------
     def _add_doc(self) -> None:

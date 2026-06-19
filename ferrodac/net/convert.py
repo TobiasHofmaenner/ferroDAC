@@ -10,6 +10,7 @@ from __future__ import annotations
 import numbers
 
 import numpy as np
+from google.protobuf import json_format
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 
 from ..core.device import DeviceDescriptor, SinkKind
@@ -176,3 +177,19 @@ def tag_from_proto(t: pb.Tag) -> Marker:
         severity=_SEVERITY_FROM_PROTO.get(t.severity, "info"),
         payload=dict(t.payload), projects=list(t.projects),
         version=int(t.version), deleted=bool(t.deleted))
+
+
+# --- project (shared experiment index, §8.1) -------------------------------- #
+# The wire form is the project's portable RECORD dict (Project.to_record()), which
+# is already proto-shaped — so these are thin json_format wrappers. The hub stores
+# the record as a real folder; the client renders it into a cache folder.
+def project_to_proto(rec: dict) -> pb.Project:
+    return json_format.ParseDict(rec, pb.Project(), ignore_unknown_fields=True)
+
+
+def project_from_proto(p: pb.Project) -> dict:
+    rec = json_format.MessageToDict(p, preserving_proto_field_name=True)
+    rec.setdefault("id", p.id)                   # MessageToDict omits defaults —
+    rec.setdefault("version", int(p.version) or 1)   # guarantee the keys the
+    rec["deleted"] = bool(p.deleted)             # client's LWW/materialise needs
+    return rec
