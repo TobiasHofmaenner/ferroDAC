@@ -588,24 +588,49 @@ class SpectrumPanel(Panel):
             self.on_cursor_move(cid, float(line.value()))
 
 
-def _time_binned(scans, t0, t1, rows):
+def _time_binned(scans, t0, t1, rows, hold=True):
     """Build a `rows`×m spectrogram image over the time window [t0,t1] from
-    (timestamp, log-intensity-row) `scans`: each scan lands in its TIME bin, so
-    sparse scans show real gaps and the Y axis is honest time. Empty bins are NaN
-    (transparent). Returns (img, m) or (None, 0) if nothing falls in the window."""
+    (timestamp, log-intensity-row) `scans`, mapped to their real TIME bin.
+
+    `hold=True` (sample-and-hold): each scan FILLS the bins from its time until
+    the next scan — a continuous waterfall where each band's height = the gap to
+    the next measurement (honest: it's the last-known spectrum, no interpolation).
+    `hold=False`: one thin row per scan, blank gaps — the bare data points.
+    Empty bins are NaN (transparent). Returns (img, m) or (None, 0)."""
     if not scans or t1 <= t0:
         return None, 0
     m = len(scans[-1][1])
+    rows_in = sorted(((t, y) for (t, y) in scans if len(y) == m and t0 <= t <= t1),
+                     key=lambda s: s[0])
+    if not rows_in:
+        return None, 0
     img = np.full((rows, m), np.nan, np.float32)
     span = t1 - t0
-    placed = False
-    for t, y in scans:
-        if len(y) != m or t < t0 or t > t1:
+    ts = np.array([t for t, _ in rows_in])
+    diffs = np.diff(ts) if len(ts) > 1 else None
+    _K = 8          # half-window of neighbouring gaps for the LOCAL cadence
+
+    def _bin(t):
+        return min(rows - 1, max(0, int((t - t0) / span * rows)))
+
+    for j, (t, y) in enumerate(rows_in):
+        i0 = _bin(t)
+        if not hold:
+            img[i0] = y                            # one row per scan (bare data points)
             continue
-        i = min(rows - 1, int((t - t0) / span * rows))
-        img[i] = y
-        placed = True
-    return (img, m) if placed else (None, 0)
+        t_next = rows_in[j + 1][0] if j + 1 < len(rows_in) else t1
+        if diffs is not None:
+            # Hold across a NORMAL gap, but a gap >> the LOCAL scan cadence is a
+            # real outage (device offline) → leave it blank. The cadence is a
+            # SLIDING window of nearby inter-scan gaps (the rate can change over
+            # time); a centered median is robust to a lone outage yet tracks a
+            # genuine rate change.
+            a, b = max(0, j - _K), min(len(diffs), j + _K)
+            cad = float(np.median(diffs[a:b])) if b > a else span
+            t_next = min(t_next, t + max(3.0 * cad, 1e-9))
+        i1 = max(i0 + 1, min(rows, int((t_next - t0) / span * rows)))
+        img[i0:i1] = y
+    return img, m
 
 
 class WaterfallPanel(Panel):
@@ -642,31 +667,37 @@ class WaterfallPanel(Panel):
         self._scans: list = []            # (timestamp, log-intensity row), absolute time
         self._win = None                  # (t0,t1) Y window from the shared timeline
         self._rows = 400                  # vertical render resolution (time bins)
+        self._hold = True                 # sample-and-hold (continuous) vs discrete scans
         self._x0, self._x1 = 0.0, 1.0
         self.markers = None
         self._marker_lines: dict = {}
 
     def config_fields(self):
         return super().config_fields() + [
+            ("hold", "Fill gaps (sample & hold)", "bool", self._hold, {}),
             ("rows", "Resolution (rows)", "int", self._rows, {"min": 64, "max": 2000}),
         ]
 
     def apply_config(self, values):
         super().apply_config(values)
+        if "hold" in values:
+            self._hold = bool(values["hold"])
         if values.get("rows"):
             self._rows = max(64, int(values["rows"]))
-            self._render()
+        self._render()
 
     def set_display_name(self, name):
         super().set_display_name(name)
         self.plot.setTitle(name or None)
 
     def state(self):
-        return {"rows": self._rows}
+        return {"rows": self._rows, "hold": self._hold}
 
     def set_state(self, st):
         if st.get("rows"):
             self._rows = max(64, int(st["rows"]))
+        if "hold" in st:
+            self._hold = bool(st["hold"])
         self.set_display_name(self.title)
 
     # -- markers (record regions / tags) on the time (Y) axis ----------------
@@ -688,6 +719,8 @@ class WaterfallPanel(Panel):
     def clear_history(self):
         self._scans = []                  # a fresh slice re-bins from scratch
         self.img.clear()
+        self.plot.enableAutoRange()       # auto-fit the new slice ONCE; then the
+        #                                   user's zoom/pan is respected (not forced)
 
     def set_window(self, t0, t1):
         win = (float(t0), float(t1))
@@ -723,7 +756,7 @@ class WaterfallPanel(Panel):
         t0, t1 = self._win if self._win else (self._scans[0][0], self._scans[-1][0])
         if t1 <= t0:
             t1 = t0 + 1.0
-        img, _m = _time_binned(self._scans, t0, t1, self._rows)
+        img, _m = _time_binned(self._scans, t0, t1, self._rows, hold=self._hold)
         if img is None:                              # no scan in the window → blank
             self.img.clear()
         else:
@@ -733,11 +766,11 @@ class WaterfallPanel(Panel):
             if hi <= lo:
                 hi = lo + 1.0
             self.img.setImage(img.T, autoLevels=False, levels=[lo, hi])
+            # place the image at its real time/x; the VIEW is the user's (auto-range
+            # fits the slice once, then their zoom is kept) — never force it per tick.
             self.img.setRect(QRectF(self._x0, t0, self._x1 - self._x0, t1 - t0))
             if self._bar is not None:
                 self._bar.setLevels((lo, hi))
-        self.plot.setXRange(self._x0, self._x1, padding=0)
-        self.plot.setYRange(t0, t1, padding=0)
         self._sync_markers()
 
     def _sync_markers(self):
@@ -842,6 +875,7 @@ class SpectrumWaterfallPanel(Panel):
         self._scans: list = []             # (timestamp, log-intensity row), absolute time
         self._win = None                   # (t0,t1) Y window from the shared timeline
         self._rows = 400                   # vertical render resolution (time bins)
+        self._hold = True                  # sample-and-hold (continuous) vs discrete
         self._x0, self._x1, self._xr = 0.0, 1.0, None
         self.markers = None
         self._marker_lines: dict = {}
@@ -850,6 +884,7 @@ class SpectrumWaterfallPanel(Panel):
     def config_fields(self):
         return super().config_fields() + [
             ("logy", "Logarithmic Y (spectrum)", "bool", self._logy, {}),
+            ("hold", "Fill gaps (sample & hold)", "bool", self._hold, {}),
             ("rows", "Waterfall resolution (rows)", "int", self._rows,
              {"min": 64, "max": 2000}),
         ]
@@ -859,21 +894,25 @@ class SpectrumWaterfallPanel(Panel):
         if "logy" in values:
             self._logy = bool(values["logy"])
             self.p_spec.setLogMode(x=False, y=self._logy)
+        if "hold" in values:
+            self._hold = bool(values["hold"])
         if values.get("rows"):
             self._rows = max(64, int(values["rows"]))
-            self._render_wf()
+        self._render_wf()
 
     def set_display_name(self, name):
         super().set_display_name(name)
         self.p_spec.setTitle(name or None)
 
     def state(self):
-        return {"logy": self._logy, "rows": self._rows}
+        return {"logy": self._logy, "rows": self._rows, "hold": self._hold}
 
     def set_state(self, st):
         self.apply_config({"logy": st.get("logy", True)})
         if st.get("rows"):
             self._rows = max(64, int(st["rows"]))
+        if "hold" in st:
+            self._hold = bool(st["hold"])
         self.set_display_name(self.title)
 
     # -- markers (record regions / tags) on the waterfall time (Y) axis -------
@@ -908,6 +947,8 @@ class SpectrumWaterfallPanel(Panel):
     def clear_history(self):
         self._scans = []                  # a fresh slice re-bins from scratch
         self.img.clear()
+        self.p_wf.enableAutoRange(y=True)  # auto-fit the slice's time span ONCE; the
+        #                                    user's zoom is then kept (X is m/z-linked)
         if self._prev_curve is not None:
             self._prev_curve.setData([], [])
         for c in self._curves.values():
@@ -963,7 +1004,7 @@ class SpectrumWaterfallPanel(Panel):
         t0, t1 = self._win if self._win else (self._scans[0][0], self._scans[-1][0])
         if t1 <= t0:
             t1 = t0 + 1.0
-        img, _m = _time_binned(self._scans, t0, t1, self._rows)
+        img, _m = _time_binned(self._scans, t0, t1, self._rows, hold=self._hold)
         if img is None:
             self.img.clear()
         else:
@@ -976,8 +1017,7 @@ class SpectrumWaterfallPanel(Panel):
             self.img.setRect(QRectF(self._x0, t0, self._x1 - self._x0, t1 - t0))
             if self._bar is not None:
                 self._bar.setLevels((loL, hiL))
-        self.p_wf.setYRange(t0, t1, padding=0)
-        self._sync_markers()
+        self._sync_markers()                # Y range is the user's (auto-range, not forced)
 
     def _sync_markers(self):
         """Record spans / tags as horizontal lines or a shaded band on the time
