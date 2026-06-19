@@ -475,7 +475,7 @@ class DevicesPanel(QWidget):
 class CollapsibleGroup(QWidget):
     """A titled, collapsible container — groups cards by what created them."""
 
-    def __init__(self, title, count, collapsed, on_toggle, parent=None):
+    def __init__(self, title, count, collapsed, on_toggle, action=None, parent=None):
         super().__init__(parent)
         self._title = title
         self._on_toggle = on_toggle
@@ -492,12 +492,26 @@ class CollapsibleGroup(QWidget):
             " border:none; padding:3px 2px; text-align:left; }"
             "QToolButton:hover { color:#c7d0db; }")
         self._btn.clicked.connect(self._toggle)
+        head = QHBoxLayout()                     # title + optional right-aligned action
+        head.setContentsMargins(0, 0, 0, 0)
+        head.addWidget(self._btn)
+        head.addStretch(1)
+        if action is not None:
+            text, cb = action
+            ab = QToolButton()
+            ab.setText(text)
+            ab.setCursor(Qt.PointingHandCursor)
+            ab.setStyleSheet(
+                "QToolButton { color:#8b95a4; font-size:11px; border:none;"
+                " padding:3px 4px; } QToolButton:hover { color:#c7d0db; }")
+            ab.clicked.connect(lambda: cb())
+            head.addWidget(ab)
         self._body = QWidget()
         self._bl = QVBoxLayout(self._body)
         self._bl.setContentsMargins(6, 0, 0, 4)
         self._bl.setSpacing(6)
         self._body.setVisible(not collapsed)
-        v.addWidget(self._btn)
+        v.addLayout(head)
         v.addWidget(self._body)
 
     def add(self, widget):
@@ -1562,6 +1576,154 @@ class ProjectsPanel(QWidget):
             self._on_activate(pid)
 
 
+def _dur(seconds) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60:02d}s"
+    return f"{s // 3600}h {(s % 3600) // 60:02d}m"
+
+
+class ProjectExplorer(QWidget):
+    """The ACTIVE project's contents, grouped and format-aware (Phase 3b). Every
+    group is SCANNED fresh from the filesystem — `layouts/`, the curated channels
+    in `sources.json`, the recordings in `reports/` — so it tracks disk with no
+    mirrored index. It's a *view*: opening a layout, revealing a recording, or
+    curating channels acts on what's already there; nothing here copies data."""
+
+    def __init__(self, project_provider, on_open_layout, on_reveal_path,
+                 on_curate, parent=None):
+        super().__init__(parent)
+        self._project = project_provider
+        self._on_open_layout = on_open_layout
+        self._on_reveal = on_reveal_path
+        self._on_curate = on_curate
+        self._collapsed: set = set()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self._label = QLabel("Project")
+        self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
+        root.addWidget(self._label)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        host = QWidget()
+        self._layout = QVBoxLayout(host)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(6)
+        self._layout.addStretch(1)
+        scroll.setWidget(host)
+        root.addWidget(scroll, 1)
+        self.refresh()
+
+    def refresh(self):
+        clear_layout(self._layout)
+        p = self._project()
+        if p is None:
+            self._label.setText("Project")
+            ph = QLabel("No active project.")
+            ph.setStyleSheet("color:#7f8a99;")
+            self._layout.addWidget(ph)
+            self._layout.addStretch(1)
+            return
+        self._label.setText(p.name)
+        self._add_group("Layouts", self._layout_cards(p),
+                        "No saved layouts yet.\nFile ▸ Save Layout files one here.")
+        self._add_group("Channels", self._channel_cards(p),
+                        "No channels curated — the Sources panel shows them all.\n"
+                        "Curate to focus this project.",
+                        action=("✔ Curate", self._on_curate))
+        self._add_group("Recordings", self._recording_cards(p),
+                        "No recordings yet.\nHit ● Record to capture a span.")
+        self._layout.addStretch(1)
+
+    # -- groups & cards ------------------------------------------------------
+    def _add_group(self, title, cards, empty_hint, action=None):
+        grp = CollapsibleGroup(title, len(cards), title in self._collapsed,
+                               self._on_toggle, action=action)
+        if cards:
+            for c in cards:
+                grp.add(c)
+        else:
+            ph = QLabel(empty_hint)
+            ph.setWordWrap(True)
+            ph.setStyleSheet("color:#6b7480; font-size:11px;")
+            grp.add(ph)
+        self._layout.addWidget(grp)
+
+    def _on_toggle(self, title, collapsed):
+        (self._collapsed.add if collapsed else self._collapsed.discard)(title)
+
+    def _card(self, title, sub, actions):
+        card = QFrame()
+        card.setObjectName("ExpCard")
+        card.setStyleSheet("#ExpCard { background:#171c26; border:1px solid #232a38;"
+                           " border-radius:8px; }")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(10, 7, 10, 7)
+        lay.setSpacing(2)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        t = QLabel(title)
+        t.setStyleSheet("font-weight:700;")
+        t.setToolTip(title)
+        top.addWidget(t)
+        top.addStretch(1)
+        for text, cb in actions:
+            b = QToolButton()
+            b.setText(text)
+            b.clicked.connect(lambda _=False, cb=cb: cb())
+            top.addWidget(b)
+        lay.addLayout(top)
+        if sub:
+            s = QLabel(sub)
+            s.setStyleSheet("color:#7f8a99; font-size:11px;")
+            lay.addWidget(s)
+        return card
+
+    def _layout_cards(self, p):
+        cards = []
+        for name in p.layouts():
+            n = p.layout_panels(name)
+            sub = f"{n} panel{'' if n == 1 else 's'}" if n else "layout"
+            cards.append(self._card(
+                name, sub,
+                [("Open", lambda path=p.layout_path(name): self._on_open_layout(path))]))
+        return cards
+
+    def _channel_cards(self, p):
+        cards = []
+        for s in p.sources():
+            key = s.get("key") if isinstance(s, dict) else s
+            label = (isinstance(s, dict) and s.get("label")) or key
+            cards.append(self._card(label, key, []))
+        return cards
+
+    def _recording_cards(self, p):
+        return [self._card(self._rec_title(r), self._rec_sub(r),
+                           [("Reveal", lambda path=r["path"]: self._on_reveal(path))])
+                for r in p.recordings()]
+
+    @staticmethod
+    def _rec_title(r):
+        t0 = r.get("t0")
+        return (time.strftime("%b %d, %H:%M", time.localtime(t0)) if t0
+                else r["name"])           # a friendlier label than the run_ folder
+
+    @staticmethod
+    def _rec_sub(r):
+        bits = []
+        t0, t1 = r.get("t0"), r.get("t1")
+        if t0 and t1 and t1 >= t0:
+            bits.append(_dur(t1 - t0))
+        bits.append(f"{r['sources']} src")
+        if r.get("tags"):
+            bits.append(f"{r['tags']} tags")
+        return "  ·  ".join(bits)
+
+
 # --------------------------------------------------------------------------- #
 #  Main window — dockable shell
 # --------------------------------------------------------------------------- #
@@ -1719,6 +1881,19 @@ class MainWindow(QMainWindow):
         self.projects_dock.setMinimumWidth(220)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.projects_dock)
 
+        # the active project's contents — layouts, curated channels, recordings —
+        # scanned from disk and shown as format-aware cards (Phase 3b).
+        self.project_explorer = ProjectExplorer(
+            lambda: self._project_mgr.active, on_open_layout=self.open_session,
+            on_reveal_path=self._reveal_path, on_curate=self._curate_sources)
+        self.explorer_dock = QDockWidget("Project", self)
+        self.explorer_dock.setObjectName("ProjectExplorerDock")
+        self.explorer_dock.setWidget(self.project_explorer)
+        self.explorer_dock.setMinimumWidth(220)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.explorer_dock)
+        self.tabifyDockWidget(self.projects_dock, self.explorer_dock)
+        self.projects_dock.raise_()
+
         # transport player: control the shared replay head from the main window
         # (without opening the Timeline). The app owns the clock heartbeat below
         # so the Timeline and the player never double-drive it.
@@ -1782,6 +1957,7 @@ class MainWindow(QMainWindow):
 
         view = self.menuBar().addMenu("&View")
         view.addAction(self.projects_dock.toggleViewAction())
+        view.addAction(self.explorer_dock.toggleViewAction())
         view.addAction(self.devices_dock.toggleViewAction())
         view.addAction(self.sources_dock.toggleViewAction())
         view.addAction(self.sinks_dock.toggleViewAction())
@@ -1967,6 +2143,7 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             p.set_sources([{"key": k} for k in dlg.selected_keys()])
             self._apply_source_lens()
+            self._refresh_explorer()               # the Channels group reflects it
 
     # -- global tags (one catalog, filtered by the active project lens) ------
     def _global_tags_path(self) -> str:
@@ -2048,12 +2225,21 @@ class MainWindow(QMainWindow):
         self.projects_panel.refresh()
         self._switch_project(p.id)
 
-    def _reveal_project(self) -> None:
+    def _reveal_path(self, path: str) -> None:
         from qtpy.QtCore import QUrl
         from qtpy.QtGui import QDesktopServices
+        if path and os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _reveal_project(self) -> None:
         p = self._project_mgr.active
         if p is not None:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(p.path))
+            self._reveal_path(p.path)
+
+    def _refresh_explorer(self) -> None:
+        ex = getattr(self, "project_explorer", None)
+        if ex is not None:
+            ex.refresh()
 
     def _switch_project(self, pid: str) -> None:
         """Make `pid` active: persist the current project's working layout, then
@@ -2082,6 +2268,7 @@ class MainWindow(QMainWindow):
         if not existed and not self.dashboard.panels():
             self.dashboard.add_panel("chart")      # fresh project → a default chart
         self._update_project_title()
+        self._refresh_explorer()                   # show the new project's contents
         self.statusBar().showMessage(f"Project: {mgr.active.name}", 5000)
 
     def _on_export(self):
@@ -2217,6 +2404,7 @@ class MainWindow(QMainWindow):
             return
         n = len(man.get("sources", []))
         self.dashboard.markers.update(mid, run_dir=dest, comment=f"{n} sources")
+        self._refresh_explorer()                   # the new recording card shows up
         self.statusBar().showMessage(f"■ Saved recording: {n} source(s) → {dest}", 8000)
 
     def _recover_open_recordings(self) -> None:
@@ -2345,6 +2533,7 @@ class MainWindow(QMainWindow):
     def save_session(self, path: str) -> None:
         self._write_session(path)
         self._remember(path)
+        self._refresh_explorer()                   # a new layout card may have landed
         self.statusBar().showMessage(f"Saved {os.path.basename(path)}", 4000)
 
     # -- working-session autosave (so tags/layout survive a restart or crash) -

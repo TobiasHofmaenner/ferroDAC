@@ -172,6 +172,33 @@ def test_project_sets_source_lens(qapp):
 
 
 @pytest.mark.ui
+def test_project_explorer_groups(qapp):
+    import json
+    import os
+    w = _mainwindow(qapp)
+    try:
+        ex = w.project_explorer
+        p = w._project_mgr.active
+        # the explorer follows the active project and exposes its three groups
+        assert ex._label.text() == p.name
+        assert ex._layout_cards(p) == [] and ex._recording_cards(p) == []
+        # drop a layout + a recording bundle on disk → the scan picks them up
+        open(p.layout_path("overview"), "w").write("{}")
+        run = os.path.join(p.reports_dir, "run_x")
+        os.makedirs(run)
+        json.dump({"t0": 1000.0, "t1": 1030.0, "sources": [{"key": "a"}]},
+                  open(os.path.join(run, "manifest.json"), "w"))
+        ex.refresh()                                  # what _switch_project/record call
+        assert len(ex._layout_cards(p)) == 1
+        assert len(ex._recording_cards(p)) == 1
+        # curated channels surface as their own group
+        p.set_sources([{"key": "dev/p1"}])
+        assert len(ex._channel_cards(p)) == 1
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"

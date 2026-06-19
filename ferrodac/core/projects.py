@@ -95,6 +95,15 @@ class Project:
     def layout_path(self, name: str) -> str:
         return os.path.join(self.layouts_dir, _safe(name) + ".json")
 
+    def layout_panels(self, name: str) -> int:
+        """How many panels a saved layout holds — parsed so the Explorer can show
+        a layout's shape, not just its name. 0 if the file is missing/unparseable."""
+        try:
+            with open(self.layout_path(name), encoding="utf-8") as fh:
+                return len(json.load(fh).get("layout", {}).get("panels", []))
+        except Exception:
+            return 0
+
     @property
     def working_path(self) -> str:
         """The autosaved working layout for this project (the live dashboard)."""
@@ -129,6 +138,39 @@ class Project:
     @property
     def reports_dir(self) -> str:
         return self.subdir("reports")
+
+    def recordings(self) -> list:
+        """Recorded spans filed under this project — `reports/<run>/` bundles, each
+        identified by its `manifest.json`. Parsed (span, #sources, #tags) so the
+        Explorer can show them as cards WITHOUT re-reading the data; scanned fresh,
+        newest first. The folder IS the list (no mirrored index)."""
+        out = []
+        reports = os.path.join(self.path, "reports")     # don't create on a read
+        try:
+            names = os.listdir(reports)
+        except FileNotFoundError:
+            return out
+        for name in names:
+            d = os.path.join(reports, name)
+            man = os.path.join(d, "manifest.json")
+            if not os.path.isfile(man):
+                continue
+            try:
+                with open(man, encoding="utf-8") as fh:
+                    m = json.load(fh)
+            except Exception:
+                m = {}
+            out.append({
+                "name": name,
+                "path": d,
+                "t0": m.get("t0"),
+                "t1": m.get("t1"),
+                "sources": len(m.get("sources", [])),
+                "tags": m.get("tags", 0),
+                "exported_at": m.get("exported_at", ""),
+            })
+        out.sort(key=lambda r: r.get("exported_at") or r["name"], reverse=True)
+        return out
 
     # -- creation ------------------------------------------------------------
     @classmethod
