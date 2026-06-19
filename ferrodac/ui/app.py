@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 
 from .. import __version__
@@ -1760,23 +1761,36 @@ class MainWindow(QMainWindow):
             self.dashboard.zoom_to(m.t, m.t_end)
 
     def _export_recording_csv(self, mid):
+        """Export a recording's span as the same self-describing bundle as
+        File ▸ Export — read through the resolver, so it includes TRACE sources
+        (spectra) too, not just the scalar capture set the old path saw."""
         m = self.dashboard.markers.get(mid)
-        if m is None or not m.run_dir:
+        if m is None or m.t_end is None:
             return
-        sources = rec.run_sources(m.run_dir)
+        if self.resolver is None:
+            self.statusBar().showMessage("Durable store unavailable — export disabled", 6000)
+            return
+        sources = self.dashboard.export_sources()
         if not sources:
-            self.statusBar().showMessage("This recording has no saved data.", 5000)
+            self.statusBar().showMessage("Nothing to export — no data sources.", 5000)
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export recording", (m.label or "recording") + ".csv",
-            "CSV (*.csv)")
-        if not path:
+        folder = QFileDialog.getExistingDirectory(self, "Export recording to folder")
+        if not folder:
             return
-        if not path.endswith(".csv"):
-            path += ".csv"
-        out = rec.materialize_capture(m.run_dir, sources, t_start=m.t,
-                                      t_stop=m.t_end, out_path=path)
-        self.statusBar().showMessage(f"Exported recording → {out}", 6000)
+        from ..store import export_window
+        label = re.sub(r"[^\w.-]", "_", m.label or "recording").strip("_") or "recording"
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(m.t))
+        dest = os.path.join(folder, f"{label}_{stamp}")
+        try:
+            man = export_window(dest, sources, self.resolver, m.t, m.t_end)
+        except Exception as exc:                       # noqa: BLE001
+            self.statusBar().showMessage(f"Export failed: {exc}", 8000)
+            return
+        n = len(man.get("sources", []))
+        if n == 0:
+            self.statusBar().showMessage("This recording's window has no stored data.", 6000)
+            return
+        self.statusBar().showMessage(f"Exported {n} source(s) → {dest}", 8000)
 
     def _export_plots(self, _mid=None):
         folder = QFileDialog.getExistingDirectory(self, "Export plots to folder")
