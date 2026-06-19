@@ -9,6 +9,9 @@ pyserial>=3.5
 # uses on S3, so the local↔remote tiers share read code and sync is a chunk copy.
 zarr>=3.0
 numcodecs>=0.13
+# Resource monitor in the Timeline perf HUD (CPU/RAM + playback-rate readout).
+# Optional at runtime — the HUD degrades to "pip install psutil" if it's absent.
+psutil>=5.9
 # Hub networking — publish to / consume from a ferroDAC hub (agent + viewer).
 # Optional at runtime (the app degrades via net.GRPC_AVAILABLE), but bundled so
 # the feature works in the packaged client. The protobuf floor satisfies the

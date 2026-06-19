@@ -56,6 +56,7 @@ hiddenimports += [
     "PySide6.QtOpenGLWidgets",
     "PySide6.QtSvg",
     "cv2",                           # vision preprocessing
+    "psutil",                        # Timeline perf HUD (runtime import in PerfStrip)
 ]
 
 datas = collect_data_files("pyqtgraph")
@@ -66,6 +67,21 @@ datas += [(os.path.join(ROOT, "ferrodac", "assets", "app.png"), "ferrodac/assets
 # Wrapped so a packaging hiccup can't break the build; the engine degrades to
 # Tesseract at runtime if it isn't bundled.
 binaries = []
+
+# Local data store (DESIGN §7.4) — NEW since the last release, so untested in a
+# frozen build. zarr 3.x registers codecs via entry points and numcodecs ships
+# compiled codecs, both of which PyInstaller misses without collect_all. Wrapped
+# so a bundling hiccup degrades the store (app.py guards it) rather than failing
+# the build.
+try:
+    for _pkg in ("zarr", "numcodecs"):
+        _d, _b, _h = collect_all(_pkg)
+        datas += _d
+        binaries += _b
+        hiddenimports += _h
+except Exception as exc:                                   # noqa: BLE001
+    print(f"[ferrodac.spec] local store not fully bundled: {exc}")
+
 try:
     hiddenimports += collect_submodules("rapidocr_onnxruntime")
     hiddenimports += collect_submodules("onnxruntime")
