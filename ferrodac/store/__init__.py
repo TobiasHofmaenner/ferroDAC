@@ -16,7 +16,8 @@ from .resolver import RamTier, Resolver
 from .writer import StoreWriter
 from .replay import PlaybackSource, ReplayController, TimeContext
 from .sync import LocalTransport, SyncEngine
+from .export import export_window
 
 __all__ = ["ZarrStore", "Resolver", "RamTier", "StoreWriter",
            "PlaybackSource", "ReplayController", "TimeContext",
-           "SyncEngine", "LocalTransport"]
+           "SyncEngine", "LocalTransport", "export_window"]

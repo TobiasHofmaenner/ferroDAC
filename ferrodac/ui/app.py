@@ -1721,20 +1721,37 @@ class MainWindow(QMainWindow):
         return os.path.join(self._app_dir(), "runs")
 
     def _on_export(self):
-        """File ▸ Export CSV — dumps the current in-memory history. Per-recording
-        slice export lives on each recording card in the Events dock."""
-        sources = self.dashboard.capture_sources()
+        """File ▸ Export CSV — materialise the current TIMELINE WINDOW for ALL
+        available sources (scalars + spectra), read through the resolver (RAM +
+        local store + hub), into a self-describing, reimportable bundle. So you
+        can export anything you can see — not just the RAM ring or a recording.
+        Per-recording slice export still lives on each Events-dock card."""
+        if self.resolver is None:
+            self.statusBar().showMessage("Durable store unavailable — export disabled", 6000)
+            return
+        sources = self.dashboard.export_sources()
         if not sources:
-            self.statusBar().showMessage(
-                "Nothing to export — route some sources to a chart first.", 5000)
+            self.statusBar().showMessage("Nothing to export — no data sources yet.", 5000)
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export CSV", "", "CSV (*.csv)")
-        if not path:
+        if self.time_context is not None:
+            t0, t1 = self.time_context.window
+        else:
+            t0, t1 = time.time() - 3600, time.time()
+        folder = QFileDialog.getExistingDirectory(self, "Export window to folder")
+        if not folder:
             return
-        if not path.endswith(".csv"):
-            path += ".csv"
-        out = rec.materialize_from_history(path, sources, self.history)
-        self.statusBar().showMessage(f"Exported → {out}", 6000)
+        from ..store import export_window
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(t1))
+        dest = os.path.join(folder, f"ferrodac_export_{stamp}")
+        try:
+            man = export_window(dest, sources, self.resolver, t0, t1)
+        except Exception as exc:                       # noqa: BLE001
+            self.statusBar().showMessage(f"Export failed: {exc}", 8000)
+            return
+        n = len(man.get("sources", []))
+        dur = max(0, int(t1 - t0))
+        self.statusBar().showMessage(
+            f"Exported {n} source(s) over {dur} s → {dest}", 8000)
 
     # -- recording-region actions (from the Events dock) ---------------------
     def _zoom_recording(self, mid):

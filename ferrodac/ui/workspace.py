@@ -440,6 +440,15 @@ class Dashboard(QObject):
                 out[key] = {"name": sp.name, "unit": sp.unit}
         return out
 
+    def export_sources(self) -> dict:
+        """ALL data-bearing sources (scalar + trace), routed or not — live,
+        historic-local and hub — for a full-window export. {key: {name,unit,dtype}}."""
+        out = {}
+        for key, sp in self._sources.items():
+            if sp.dtype in ("float", "bool", "trace"):
+                out[key] = {"name": sp.name, "unit": sp.unit, "dtype": sp.dtype}
+        return out
+
     def capture_traces(self) -> dict:
         """Routed trace (array) sources — recorded full-scan to per-trace CSVs."""
         return {key: {"name": sp.name}

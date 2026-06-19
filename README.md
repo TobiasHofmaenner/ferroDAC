@@ -132,6 +132,8 @@ make test-ui                  # PySide6 smoke tests only
 
 - **data plane** (`tests/test_dataplane.py`) — the Qt-free store / resolver /
   replay / sync / dataflow-graph self-tests, wrapped as real pass/fail.
+- **export** (`tests/test_export.py`) — the read-time CSV bundle: absolute time,
+  honest sparse-vs-forward-fill, trace matrices, self-describing manifest.
 - **gRPC e2e** (`tests/test_grpc_e2e.py`, marker `integration`) — real grpc.aio,
   in-process hub: store-and-forward sync + the hub-as-resolver-tier read path.
 - **UI smoke** (`tests/test_ui_smoke.py`, marker `ui`) — offscreen widget build
