@@ -1409,8 +1409,7 @@ class ProjectsPanel(QWidget):
         self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
         root.addWidget(self._label)
         self._list = QListWidget()
-        self._list.itemActivated.connect(self._activate)
-        self._list.itemDoubleClicked.connect(self._activate)
+        self._list.itemActivated.connect(self._activate)   # double-click or Enter
         root.addWidget(self._list, 1)
         row = QHBoxLayout()
         new = QPushButton("＋ New project")
@@ -1438,6 +1437,8 @@ class ProjectsPanel(QWidget):
             self._list.addItem(it)
 
     def _activate(self, item):
+        if item is None:                        # list cleared mid-signal → ignore
+            return
         pid = item.data(Qt.UserRole)
         if pid:
             self._on_activate(pid)
