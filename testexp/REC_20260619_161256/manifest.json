@@ -1,0 +1,31 @@
+{
+  "ferrodac_export": 1,
+  "exported_at": "2026-06-19T14:40:55.045271+00:00",
+  "t0": 1781878376.1354394,
+  "t1": 1781878664.4476538,
+  "time_columns": [
+    "time_iso",
+    "time_epoch_s"
+  ],
+  "fill": "none",
+  "sources": [
+    {
+      "key": "3dfe1388-7e4f-4729-bb7d-be1f5ff42723/temp",
+      "name": "Temperature",
+      "unit": "\u00b0C",
+      "dtype": "float",
+      "file": "data.csv",
+      "column": "Temperature [\u00b0C]",
+      "samples": 286
+    },
+    {
+      "key": "3e18de51-3e1e-48ff-9978-4cc6bfec25e3/spectrum",
+      "name": "spectrum",
+      "unit": "",
+      "dtype": "trace",
+      "file": "trace_spectrum.csv",
+      "scans": 1,
+      "bins": 1567
+    }
+  ]
+}

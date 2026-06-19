@@ -83,8 +83,15 @@ ferrodac/
     registry.py   loads device modules, collects Device subclasses
     identity.py   UUID registry + fingerprint resolution
     markers.py    shared session clock + tag / recording markers
-    history.py    bounded in-memory hot buffer (live display + Record pre-roll)
-    recorder.py   append-only capture -> materialised CSV
+    history.py    bounded in-memory hot buffer (live display + RAM read tier)
+  store/          durable data plane (DESIGN §7.4); Qt-free:
+    zarrstore.py  Zarr store — group/source, sub-array/config-epoch, rollup pyramid
+    resolver.py   tiered read: RAM ring -> local store -> hub, nearest-wins + stitch
+    writer.py     always-on durable writer (the crash-safe write path)
+    replay.py     TimeContext + PlaybackSource + ReplayController (head-driven)
+    export.py     read-time CSV bundle export of any window (via the resolver)
+    sync.py       store-and-forward sync to the hub (DESIGN §12.1)
+  net/            hub client, Qt-free: agent (publish) + viewer + read tier + sync
   devices/
     fake.py       hardware-free simulated instruments
     camera.py     host webcam via Qt Multimedia (image source)
