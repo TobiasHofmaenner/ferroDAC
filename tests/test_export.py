@@ -101,6 +101,26 @@ def test_trace_matrix_file():
     assert float(rows[1][0]) >= BASE                                 # absolute scan time
 
 
+def test_tags_in_export():
+    d, st = _store_with_data()
+    res = Resolver([RamTier(HistoryBuffer()), st])
+    tags = [
+        {"id": "t1", "t": BASE + 1, "label": "start", "kind": "tag",
+         "severity": "info", "projects": ["pA"], "comment": "go"},
+        {"id": "t2", "t": BASE - 1000, "label": "before window", "projects": ["pA"]},
+        {"id": "t3", "t": BASE + 2, "t_end": BASE + 8, "label": "run",
+         "kind": "recording", "projects": ["pA", "pB"]},
+        {"id": "t4", "t": BASE + 3, "label": "gone", "deleted": True, "projects": ["pA"]},
+    ]
+    man = export_window(os.path.join(d, "out"), _sources(), res, BASE - 1, BASE + 30, tags=tags)
+    assert man.get("tags_file") == "tags.csv" and man["tags"] == 2   # in-window, live
+    rows = _read(os.path.join(d, "out", "tags.csv"))
+    assert rows[0][:3] == ["time_iso", "time_epoch_s", "t_end_epoch_s"]
+    assert {r[3] for r in rows[1:]} == {"start", "run"}     # t2 out, t4 tombstoned
+    run = next(r for r in rows[1:] if r[3] == "run")
+    assert run[6] == "pA;pB" and run[2]                    # projects col + span end
+
+
 def test_only_sources_with_data_in_window():
     d, st = _store_with_data()
     res = Resolver([RamTier(HistoryBuffer()), st])

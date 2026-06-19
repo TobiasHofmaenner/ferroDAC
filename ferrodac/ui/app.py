@@ -744,7 +744,8 @@ class EventsPanel(QWidget):
     """Lists session markers (tags + record bookmarks); edit/remove."""
 
     def __init__(self, markers, clock, on_zoom=None, on_export_csv=None,
-                 on_export_plots=None, on_lens=None, parent=None):
+                 on_export_plots=None, on_lens=None, projects_provider=None,
+                 parent=None):
         super().__init__(parent)
         self.markers = markers
         self.clock = clock
@@ -752,6 +753,7 @@ class EventsPanel(QWidget):
         self._on_export_csv = on_export_csv
         self._on_export_plots = on_export_plots
         self._on_lens = on_lens
+        self._projects_provider = projects_provider     # () -> [(id, name)]
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
@@ -823,6 +825,13 @@ class EventsPanel(QWidget):
         top.addWidget(name)
         top.addStretch(1)
         top.addWidget(info)
+        if self._projects_provider is not None:
+            proj = QToolButton()
+            proj.setText("🏷")
+            proj.setToolTip("Assign to projects")
+            proj.clicked.connect(
+                lambda _=False, mid=m.id, b=None: self._assign_menu(mid, self.sender()))
+            top.addWidget(proj)
         edit = QToolButton()
         edit.setText("✎")
         edit.clicked.connect(lambda _=False, mid=m.id: self._edit(mid))
@@ -852,6 +861,30 @@ class EventsPanel(QWidget):
             acts.addStretch(1)
             lay.addLayout(acts)
         return card
+
+    def _assign_menu(self, mid, anchor):
+        """A checkable menu of projects → add/remove this tag's membership (a tag
+        can be in many). Reopen to toggle several."""
+        m = self.markers.get(mid)
+        if m is None or self._projects_provider is None:
+            return
+        member = set(m.projects or [])
+        menu = QMenu(self)
+        any_proj = False
+        for pid, name in self._projects_provider():
+            any_proj = True
+            act = menu.addAction(name)
+            act.setCheckable(True)
+            act.setChecked(pid in member)
+            act.toggled.connect(
+                lambda on, pid=pid, mid=mid:
+                self.markers.add_to_project(mid, pid) if on
+                else self.markers.remove_from_project(mid, pid))
+        if not any_proj:
+            menu.addAction("(no projects)").setEnabled(False)
+        pos = (anchor.mapToGlobal(anchor.rect().bottomLeft())
+               if anchor is not None else self.cursor().pos())
+        menu.exec(pos)
 
     def _edit(self, mid):
         m = self.markers.get(mid)
@@ -1583,7 +1616,10 @@ class MainWindow(QMainWindow):
         self.events_panel = EventsPanel(
             self.dashboard.markers, self.dashboard.clock,
             on_zoom=self._zoom_recording, on_export_csv=self._export_recording_csv,
-            on_export_plots=self._export_plots, on_lens=self._set_tag_lens_all)
+            on_export_plots=self._export_plots, on_lens=self._set_tag_lens_all,
+            projects_provider=lambda: [(p.id, p.name)
+                                       for p in self._project_mgr.projects()]
+            if getattr(self, "_project_mgr", None) else [])
         self.events_dock = QDockWidget("Events", self)
         self.events_dock.setObjectName("EventsDock")
         self.events_dock.setWidget(self.events_panel)
@@ -1965,7 +2001,8 @@ class MainWindow(QMainWindow):
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(t1))
         dest = os.path.join(folder, f"ferrodac_export_{stamp}")
         try:
-            man = export_window(dest, sources, self.resolver, t0, t1)
+            man = export_window(dest, sources, self.resolver, t0, t1,
+                                tags=self.dashboard.markers.to_list())
         except Exception as exc:                       # noqa: BLE001
             self.statusBar().showMessage(f"Export failed: {exc}", 8000)
             return
@@ -2002,7 +2039,8 @@ class MainWindow(QMainWindow):
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(m.t))
         dest = os.path.join(folder, f"{label}_{stamp}")
         try:
-            man = export_window(dest, sources, self.resolver, m.t, m.t_end)
+            man = export_window(dest, sources, self.resolver, m.t, m.t_end,
+                                tags=self.dashboard.markers.to_list())
         except Exception as exc:                       # noqa: BLE001
             self.statusBar().showMessage(f"Export failed: {exc}", 8000)
             return
@@ -2065,7 +2103,8 @@ class MainWindow(QMainWindow):
         dest = os.path.join(self._runs_dir(),
                             "run_" + time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(t0)))
         try:
-            man = export_window(dest, sources, self.resolver, t0, t1)
+            man = export_window(dest, sources, self.resolver, t0, t1,
+                                tags=self.dashboard.markers.to_list())
         except Exception as exc:                          # noqa: BLE001
             self.statusBar().showMessage(f"Recording kept; export failed: {exc}", 8000)
             return

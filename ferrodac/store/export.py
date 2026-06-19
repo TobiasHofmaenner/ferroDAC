@@ -47,9 +47,11 @@ def _column(name: str, unit: str) -> str:
     return f"{name} [{unit}]" if unit else (name or "value")
 
 
-def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = False) -> dict:
+def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = False,
+                  tags: list = None) -> dict:
     """Export ``[t0,t1]`` for `sources` ({key: {name, unit, dtype}}) via `reader`.
-    Writes the bundle described in the module docstring; returns the manifest."""
+    Writes the bundle described in the module docstring; returns the manifest.
+    `tags` (marker dicts) overlapping the window are written to `tags.csv`."""
     os.makedirs(dest_dir, exist_ok=True)
     t0, t1 = float(t0), float(t1)
     manifest = {
@@ -86,6 +88,10 @@ def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = Fal
                 "file": "data.csv", "column": header, "samples": int(len(t))})
     if scalars:
         _write_scalars(os.path.join(dest_dir, "data.csv"), scalars, fill)
+    n_tags = _write_tags(os.path.join(dest_dir, "tags.csv"), tags or [], t0, t1)
+    if n_tags:
+        manifest["tags_file"] = "tags.csv"
+        manifest["tags"] = n_tags
     with open(os.path.join(dest_dir, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)
     return manifest
@@ -124,6 +130,35 @@ def _write_scalars(path: str, cols: list, fill: bool) -> None:
                 else:
                     cells.append("")
             w.writerow([_iso(ts), f"{ts:.6f}"] + cells)
+
+
+def _write_tags(path: str, tags: list, t0: float, t1: float) -> int:
+    """Tags/events overlapping [t0,t1] → tags.csv (absolute time + project ids).
+    `tags` are marker dicts (marker_to_dict). Returns the count written (0 → no
+    file). The projects column lets a consumer filter without losing the catalog."""
+    rows = []
+    for d in tags:
+        t = float(d.get("t", 0.0))
+        te = d.get("t_end")
+        end = float(te) if te is not None else t
+        if t <= t1 and end >= t0 and not d.get("deleted"):
+            rows.append(d)
+    if not rows:
+        return 0
+    rows.sort(key=lambda d: d.get("t", 0.0))
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["time_iso", "time_epoch_s", "t_end_epoch_s", "label", "kind",
+                    "severity", "projects", "comment", "origin"])
+        for d in rows:
+            t = float(d.get("t", 0.0))
+            te = d.get("t_end")
+            w.writerow([_iso(t), f"{t:.6f}",
+                        f"{float(te):.6f}" if te is not None else "",
+                        d.get("label", ""), d.get("kind", ""), d.get("severity", ""),
+                        ";".join(d.get("projects") or []), d.get("comment", ""),
+                        d.get("origin_kind", "")])
+    return len(rows)
 
 
 def _write_trace(path: str, times, Y, x) -> None:
