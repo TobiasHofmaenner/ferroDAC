@@ -62,13 +62,22 @@ class SyncRunner:
     failed pass is logged and retried next tick; the hub's reported state always
     drives what's (re-)uploaded, so nothing is lost or duplicated."""
 
-    def __init__(self, local_store, addr: str, interval: float = 5.0, token: str = ""):
+    def __init__(self, local_store, addr: str, interval: float = 5.0, token: str = "",
+                 on_status=None):
         self.local_store = local_store
         self.addr = addr
         self.interval = interval
         self.token = token
+        self._on_status = on_status      # callback(state, detail); fired off-thread
         self._stop = threading.Event()
         self._thread: "threading.Thread | None" = None
+
+    def _report(self, state: str, detail: str = "") -> None:
+        if self._on_status is not None:
+            try:
+                self._on_status(state, detail)
+            except Exception:            # a bad observer must never break sync
+                pass
 
     def start(self) -> bool:
         if not GRPC_AVAILABLE or self._thread is not None:
@@ -88,13 +97,20 @@ class SyncRunner:
         channel = grpc.insecure_channel(self.addr)
         engine = SyncEngine(self.local_store, GrpcSyncTransport(channel, self.token))
         log.info("sync started → %s", self.addr)
+        self._report("connecting", f"→ {self.addr}")
         while not self._stop.is_set():
             try:
+                self._report("syncing")
                 n = engine.sync_once()
                 if n:
                     log.info("synced %d samples", n)
+                    self._report("idle", f"synced {n} samples")
+                else:
+                    self._report("idle", "up to date")
             except Exception as exc:                  # noqa: BLE001  (reconnect next tick)
                 log.warning("sync pass failed (retry in %.0fs): %s", self.interval, exc)
+                self._report("error", str(exc).splitlines()[0][:80])
             self._stop.wait(self.interval)
         channel.close()
         log.info("sync stopped")
+        self._report("offline", "")

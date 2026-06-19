@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 
@@ -56,6 +57,7 @@ from ..vision.detector import FAIL_LABELS, PARSE_LABELS, WHITELIST_PRESETS, Dete
 from ..vision.ocr import available_engines, get_engine, ocr_backend, qimage_to_rgb
 from ._common import STATUS_COLORS, clear_layout, color_for, fmt
 from .hubclient import ConnectHubDialog, HubController
+from .logview import LogPanel, QtLogHandler, SyncStatusWidget
 from .panels import PANEL_TYPES
 from .workspace import Dashboard, WorkspaceArea
 
@@ -1442,7 +1444,6 @@ class MainWindow(QMainWindow):
                 on_progress=self._replay_progress,
             )
         except Exception as exc:                       # noqa: BLE001
-            import logging
             logging.getLogger("ferrodac").warning("durable store disabled: %s", exc)
 
         # the dashboard renders through the replay playback bus when available,
@@ -1457,6 +1458,12 @@ class MainWindow(QMainWindow):
             self.dashboard, engine, manager, self,
             store=self.store_writer.store if self.store_writer is not None else None)
         self.hub.status.connect(lambda msg: self.statusBar().showMessage(msg, 6000))
+        # hub link + store-sync read-out in the status bar, and a recoloured Hub
+        # button when connected (the sync runs headlessly in the background).
+        self.sync_status = SyncStatusWidget()
+        self.statusBar().addPermanentWidget(self.sync_status)
+        self.hub.sync_status.connect(self.sync_status.set_state)
+        self.hub.connection_changed.connect(self._on_hub_connection)
 
         # working-session autosave (tags/layout survive restart & crashes)
         self._autosave_on = False
@@ -1532,6 +1539,21 @@ class MainWindow(QMainWindow):
             self._load_bar.setVisible(False)
             self.statusBar().addPermanentWidget(self._load_bar)
 
+        # in-app log viewer: a QtLogHandler on the root logger forwards every
+        # record (incl. worker-thread ones, e.g. the sync runner) here.
+        self._log_handler = QtLogHandler()
+        self.log_panel = LogPanel(self._log_handler)
+        logging.getLogger().addHandler(self._log_handler)
+        self.log_dock = QDockWidget("Log", self)
+        self.log_dock.setObjectName("LogDock")
+        self.log_dock.setWidget(self.log_panel)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+        if getattr(self, "player_dock", None) is not None:
+            self.tabifyDockWidget(self.player_dock, self.log_dock)
+            self.player_dock.raise_()
+        else:
+            self.log_dock.setVisible(False)
+
         self._build_menus()
 
         self.engine.tick.connect(self._on_tick)
@@ -1557,6 +1579,7 @@ class MainWindow(QMainWindow):
         view.addAction(self.events_dock.toggleViewAction())
         if getattr(self, "player_dock", None) is not None:
             view.addAction(self.player_dock.toggleViewAction())
+        view.addAction(self.log_dock.toggleViewAction())
         view.addSeparator()
         self.edit_action = view.addAction("Edit layout")
         self.edit_action.setCheckable(True)
@@ -1572,6 +1595,7 @@ class MainWindow(QMainWindow):
         self.hub_action = netmenu.addAction("Connect to hub…", self._open_hub)
 
         tb = self.addToolBar("Main")
+        self.main_toolbar = tb
         tb.setObjectName("MainToolBar")
         tb.setMovable(False)
         tb.addAction(self.devices_dock.toggleViewAction())
@@ -1597,6 +1621,17 @@ class MainWindow(QMainWindow):
         self._timeline_win.show()
         self._timeline_win.raise_()
         self._timeline_win.activateWindow()
+
+    def _on_hub_connection(self, connected: bool) -> None:
+        """Recolour the Hub toolbar button to signal the live link, and seed the
+        sync read-out (the SyncRunner then drives it from its background pass)."""
+        self.hub_action.setText("Hub ✓" if connected else "Connect to hub…")
+        btn = self.main_toolbar.widgetForAction(self.hub_action)
+        if btn is not None:
+            btn.setStyleSheet(
+                "QToolButton{color:#0b0f16;background:#3fb950;border-radius:3px;"
+                "padding:2px 8px;font-weight:700;}" if connected else "")
+        self.sync_status.set_state("connecting" if connected else "offline")
 
     def _open_hub(self):
         if not self.hub.available:

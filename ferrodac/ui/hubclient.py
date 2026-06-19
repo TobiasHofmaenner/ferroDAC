@@ -28,6 +28,8 @@ class HubController(QObject):
     _catalog = Signal(str, object)        # event_type, pb.DeviceDescriptor
     _tag = Signal(object)                 # an incoming Marker from the hub
     status = Signal(str)                  # human status line
+    sync_status = Signal(str, str)        # store-sync (state, detail) — §12.1
+    connection_changed = Signal(bool)     # connected ↔ disconnected
 
     def __init__(self, dashboard, engine, manager, parent=None, store=None):
         super().__init__(parent)
@@ -79,7 +81,9 @@ class HubController(QObject):
             # a background thread, never blocks acquisition (DESIGN §12.1).
             if self._store is not None:
                 from ..net.sync import SyncRunner
-                self._sync = SyncRunner(self._store, addr)
+                self._sync = SyncRunner(
+                    self._store, addr,
+                    on_status=lambda s, d: self.sync_status.emit(s, d))
                 self._sync.start()
         if as_viewer:
             self._viewer = HubViewer(
@@ -98,6 +102,7 @@ class HubController(QObject):
         for m in self.dashboard.markers.snapshot():   # push our current tags up
             self._tagsync.publish(m)
         self.status.emit(f"hub: connecting to {addr} …")
+        self.connection_changed.emit(True)
 
     def disconnect(self) -> None:
         if self._agent_unsub is not None:
@@ -123,6 +128,8 @@ class HubController(QObject):
         self.dashboard.clear_remote_devices()
         if self.addr:
             self.status.emit("hub: disconnected")
+            self.sync_status.emit("offline", "")
+            self.connection_changed.emit(False)
         self.addr = ""
 
     # -- tag sync (role-independent) ----------------------------------------
