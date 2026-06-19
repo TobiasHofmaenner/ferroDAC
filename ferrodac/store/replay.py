@@ -70,6 +70,24 @@ class TimeContext:
         self.nav += 1
         self._notify()
 
+    def park_window(self, t0: float, t1: float):
+        """Jump the window to cover exactly [t0, t1] (back..front) and stop motion.
+        Like `park`, this is discontinuous navigation (bumps nav) so the controller
+        re-streams that slice — used to land on a recording and actually pull its
+        data in, not just pan an empty view there. Front edge is clamped to now."""
+        t0, t1 = float(t0), float(t1)
+        if t1 < t0:
+            t0, t1 = t1, t0
+        self.following = self.playing = False
+        self.head = min(t1, self._now())
+        back = min(t0, self.head)
+        if self.grow:
+            self.anchor = back
+        else:
+            self.width = max(1e-3, self.head - back)
+        self.nav += 1
+        self._notify()
+
     @property
     def moving(self) -> bool:
         """The head is advancing — live (following at 1x) or replaying (playing).

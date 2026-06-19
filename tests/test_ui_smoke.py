@@ -250,6 +250,30 @@ def test_events_split_recordings_and_tags(qapp):
 
 
 @pytest.mark.ui
+def test_zoom_recording_parks_window(qapp):
+    """Zoom on a recording parks the timeline ON its span (and flags navigation)
+    so the controller re-streams that slice — not just pans the charts there."""
+    import time as _time
+    from ferrodac.core.tag import RECORDING
+    w = _mainwindow(qapp)
+    try:
+        tc = w.time_context
+        assert tc is not None                         # data plane up in tests
+        now = _time.time()
+        ms = w.dashboard.markers
+        r = ms.add(now - 500, kind=RECORDING, label="REC")
+        ms.update(r, t_end=now - 200)
+        nav0 = tc.nav
+        w._zoom_recording(r)
+        t0, t1 = tc.window
+        assert abs(t0 - (now - 500)) < 1 and abs(t1 - (now - 200)) < 1   # window on the span
+        assert tc.following is False                  # parked (not live-following)
+        assert tc.nav == nav0 + 1                     # navigation → controller reloads
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_autorange_ignores_markers(qapp):
     """The "A" auto-range fits the DATA — tags/recordings are annotations and must
     not drag the time axis open (ignoreBounds on the marker items)."""

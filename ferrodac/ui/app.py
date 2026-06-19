@@ -2340,8 +2340,13 @@ class MainWindow(QMainWindow):
     # -- recording-region actions (from the Events dock) ---------------------
     def _zoom_recording(self, mid):
         m = self.dashboard.markers.get(mid)
-        if m and m.t_end is not None:
-            self.dashboard.zoom_to(m.t, m.t_end)
+        if m is None or m.t_end is None:
+            return
+        # park the timeline window ON the recording so the controller re-streams
+        # that slice (its data may not be loaded yet) — then fit the charts to it.
+        if self.time_context is not None:
+            self.time_context.park_window(m.t, m.t_end)
+        self.dashboard.zoom_to(m.t, m.t_end)
 
     def _export_recording_csv(self, mid):
         """Export a recording's span as the same self-describing bundle as
