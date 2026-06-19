@@ -9,8 +9,15 @@ on viewers, §6.1). Everything here is pure asyncio, single event loop.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
+
+from google.protobuf import json_format
 
 from ferrodac_contract.v1 import data_plane_pb2 as pb
+
+log = logging.getLogger("hub")
 
 CONTRACT_VERSION = 1
 HUB_VERSION = "0.1.0"
@@ -48,15 +55,19 @@ class Subscriber:
 
 
 class Hub:
-    def __init__(self) -> None:
+    def __init__(self, tags_path: "str | None" = None) -> None:
         self._devices: dict[str, pb.DeviceDescriptor] = {}
         self._subs: set[Subscriber] = set()
         self._watchers: set[asyncio.Queue] = set()
         # Tags (DESIGN §7.3): a durable, reliable store keyed by id, merged
         # last-write-wins on version, tombstones kept so deletes propagate.
-        # Separate from readings — never drop-oldest. In-memory in M1.
+        # Held in RAM for fan-out; PERSISTED to a JSON TagBackend so the hub is
+        # authoritative — tags survive a restart (the data already does, via Zarr).
         self._tags: dict[str, pb.Tag] = {}
         self._tag_watchers: set[asyncio.Queue] = set()
+        self._tags_path = tags_path
+        self._save_pending = False
+        self._load_tags()
 
     # -- catalog -------------------------------------------------------------
     def snapshot(self) -> list:
@@ -106,6 +117,46 @@ class Hub:
                 if wanted:
                     _offer(sub.queue, pb.ReadingBatch(readings=wanted))
 
+    # -- tag persistence (JSON backend; SQLite/Postgres-CNPG later) ----------
+    def _load_tags(self) -> None:
+        if not self._tags_path or not os.path.isfile(self._tags_path):
+            return
+        try:
+            with open(self._tags_path, encoding="utf-8") as fh:
+                for d in json.load(fh):
+                    t = json_format.ParseDict(d, pb.Tag())
+                    if t.id:
+                        self._tags[t.id] = t
+            log.info("loaded %d tag(s) from %s", len(self._tags), self._tags_path)
+        except Exception as exc:                     # noqa: BLE001
+            log.warning("could not load tags (%s): %s", self._tags_path, exc)
+
+    def _mark_dirty(self) -> None:
+        """Persist soon — coalesce a burst (e.g. a client's snapshot on connect)
+        into one atomic write instead of O(N) rewrites of a growing file."""
+        if not self._tags_path or self._save_pending:
+            return
+        self._save_pending = True
+        try:
+            asyncio.get_running_loop().call_later(1.0, self._flush_tags)
+        except RuntimeError:                         # no loop (tests) → write now
+            self._flush_tags()
+
+    def _flush_tags(self) -> None:
+        self._save_pending = False
+        if not self._tags_path:
+            return
+        try:
+            data = [json_format.MessageToDict(t, preserving_proto_field_name=True)
+                    for t in self._tags.values()]
+            tmp = self._tags_path + ".tmp"
+            os.makedirs(os.path.dirname(self._tags_path) or ".", exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            os.replace(tmp, self._tags_path)         # atomic — no corruption on crash
+        except Exception as exc:                     # noqa: BLE001
+            log.warning("could not persist tags: %s", exc)
+
     # -- tags (own reliable channel; LWW by id+version, tombstoned) ----------
     def tag_snapshot(self) -> list:
         """Every stored tag — live AND tombstones — so a reconnecting peer
@@ -128,6 +179,7 @@ class Hub:
                 and not tag.deleted and not cur.deleted:
             return False                         # idempotent same-version upsert
         self._tags[tag.id] = tag
+        self._mark_dirty()                           # persist (durable + authoritative)
         if tag.deleted:
             etype = pb.TagEvent.REMOVED
         elif cur is None:

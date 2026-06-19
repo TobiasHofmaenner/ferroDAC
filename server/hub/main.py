@@ -46,8 +46,19 @@ def build_server(hub: "Hub | None" = None, store=None
     return server, hub
 
 
+def _tags_path():
+    """Where the hub persists tags (JSON). Beside the Zarr store by default."""
+    p = os.environ.get("HUB_TAGS_PATH")
+    if p:
+        return p
+    store_dir = os.environ.get("HUB_STORE_DIR")
+    return os.path.join(os.path.dirname(store_dir.rstrip("/")), "tags.json") \
+        if store_dir else None
+
+
 async def serve() -> None:
-    server, _ = build_server(store=_open_store(os.environ.get("HUB_STORE_DIR")))
+    hub = Hub(tags_path=_tags_path())
+    server, _ = build_server(hub=hub, store=_open_store(os.environ.get("HUB_STORE_DIR")))
     addr = os.environ.get("HUB_GRPC_ADDR", "0.0.0.0:50051")
     server.add_insecure_port(addr)
     await server.start()
