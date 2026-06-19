@@ -268,6 +268,15 @@ class Dashboard(QObject):
             except Exception:
                 pass
 
+    def set_time_window(self, t0: float, t1: float) -> None:
+        """Push the shared timeline window [t0,t1] to time-axis panels (waterfall)
+        so their Y range tracks the window (live growth / scrub). Charts ignore it."""
+        for panel in self._panels.values():
+            try:
+                panel.set_window(t0, t1)
+            except Exception:
+                pass
+
     def panels(self) -> list:
         """The live panels (display + input), for the replay reset hook."""
         return list(self._panels.values())

@@ -81,7 +81,12 @@ class StoreWriter:
         if len(x) == 0:
             return
         last = self._trace_x.get(key)
-        if last is None or last.shape != x.shape or not np.array_equal(last, x):
+        # A new config-epoch ONLY on a MEANINGFUL axis change (shape, or values
+        # beyond tolerance). Real instruments (RGA) jitter the swept axis by tiny
+        # floats every scan — an exact compare would roll a fresh epoch per scan,
+        # fragmenting the store into one-scan epochs (ribbon dots, empty waterfall).
+        if last is None or last.shape != x.shape \
+                or not np.allclose(last, x, rtol=1e-4, atol=1e-6):
             self._trace_gen[key] = self._trace_gen.get(key, -1) + 1   # axis change
             self._trace_x[key] = x
         if key not in self._known:

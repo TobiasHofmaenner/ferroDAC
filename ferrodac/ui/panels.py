@@ -71,6 +71,10 @@ class Panel(QWidget):
         """Drop accumulated data older than x_min (relative-time coords) so the
         live window slides instead of growing. Time-axis panels override."""
 
+    def set_window(self, t0: float, t1: float) -> None:
+        """The shared time window [t0,t1] moved (live growth / scrub). Time-axis
+        panels (waterfall) override to map their Y range to it. Default: ignore."""
+
     def state(self) -> dict:
         """Per-panel state to persist in a saved session (override as needed)."""
         return {}
@@ -584,9 +588,31 @@ class SpectrumPanel(Panel):
             self.on_cursor_move(cid, float(line.value()))
 
 
+def _time_binned(scans, t0, t1, rows):
+    """Build a `rows`×m spectrogram image over the time window [t0,t1] from
+    (timestamp, log-intensity-row) `scans`: each scan lands in its TIME bin, so
+    sparse scans show real gaps and the Y axis is honest time. Empty bins are NaN
+    (transparent). Returns (img, m) or (None, 0) if nothing falls in the window."""
+    if not scans or t1 <= t0:
+        return None, 0
+    m = len(scans[-1][1])
+    img = np.full((rows, m), np.nan, np.float32)
+    span = t1 - t0
+    placed = False
+    for t, y in scans:
+        if len(y) != m or t < t0 or t > t1:
+            continue
+        i = min(rows - 1, int((t - t0) / span * rows))
+        img[i] = y
+        placed = True
+    return (img, m) if placed else (None, 0)
+
+
 class WaterfallPanel(Panel):
-    """A trace over time as a heatmap (spectrogram): x = swept axis, y = scan,
-    colour = log intensity. Single-bind — one source per waterfall."""
+    """A trace over time as a heatmap (spectrogram): x = swept axis, **y = time**,
+    colour = log intensity. The Y range follows the shared timeline window, so
+    sparse scans (e.g. a slow RGA sweep) show their real time gaps and record
+    markers can overlay. Single-bind — one source per waterfall."""
 
     kind = "waterfall"
     accepts = frozenset({"trace"})
@@ -596,9 +622,9 @@ class WaterfallPanel(Panel):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.plot = pg.PlotWidget()
+        self.plot = pg.PlotWidget(
+            axisItems={"left": pg.DateAxisItem(orientation="left")})  # Y = time
         self.plot.setLabel("bottom", "x")
-        self.plot.setLabel("left", "scan")
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.img = pg.ImageItem()
         self.plot.addItem(self.img)
@@ -613,21 +639,23 @@ class WaterfallPanel(Panel):
             self._bar = None
         lay.addWidget(self.plot)
         self._src_key = None
-        self._buf = None
-        self._n = 0                       # scans actually filled (≤ _rows) → image height
-        self._rows = 240
+        self._scans: list = []            # (timestamp, log-intensity row), absolute time
+        self._win = None                  # (t0,t1) Y window from the shared timeline
+        self._rows = 400                  # vertical render resolution (time bins)
         self._x0, self._x1 = 0.0, 1.0
+        self.markers = None
+        self._marker_lines: dict = {}
 
     def config_fields(self):
         return super().config_fields() + [
-            ("rows", "History (scans)", "int", self._rows, {"min": 10, "max": 2000}),
+            ("rows", "Resolution (rows)", "int", self._rows, {"min": 64, "max": 2000}),
         ]
 
     def apply_config(self, values):
         super().apply_config(values)
         if values.get("rows"):
-            self._rows = max(10, int(values["rows"]))
-            self._buf = None             # rebuilt at the new height on next scan
+            self._rows = max(64, int(values["rows"]))
+            self._render()
 
     def set_display_name(self, name):
         super().set_display_name(name)
@@ -638,62 +666,116 @@ class WaterfallPanel(Panel):
 
     def set_state(self, st):
         if st.get("rows"):
-            self._rows = max(10, int(st["rows"]))
-            self._buf = None
+            self._rows = max(64, int(st["rows"]))
         self.set_display_name(self.title)
+
+    # -- markers (record regions / tags) on the time (Y) axis ----------------
+    def attach_session(self, clock, markers):
+        self.markers = markers
+        markers.changed.connect(self._sync_markers)
+        self._sync_markers()
 
     def add_source(self, key, source):
         self._src_key = key
-        self._buf = None
+        self._scans = []
 
     def remove_source(self, key):
         if key == self._src_key:
             self._src_key = None
-            self._buf = None
+            self._scans = []
             self.img.clear()
 
     def clear_history(self):
-        self._buf = None                  # rebuilt blank on the next replayed scan
-        self._n = 0                       # ← so a fresh slice starts empty, not padded
+        self._scans = []                  # a fresh slice re-bins from scratch
         self.img.clear()
 
-    def _push(self, tr):
-        """Roll one complete scan into the history buffer."""
-        y = np.log10(np.clip(tr.y, 1e-12, None)).astype(np.float32)
-        if self._buf is None or self._buf.shape[1] != len(y):
-            self._buf = np.full((self._rows, len(y)), float(y.min()), np.float32)
-            self._n = 0
-            self._x0, self._x1 = float(tr.x[0]), float(tr.x[-1])
-            self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
-        self._buf = np.roll(self._buf, -1, axis=0)
-        self._buf[-1] = y
-        self._n = min(self._n + 1, self._rows)
+    def set_window(self, t0, t1):
+        win = (float(t0), float(t1))
+        if win != self._win:
+            self._win = win
+            self._render()                # grow/scrub → Y follows the timeline window
+
+    def trim_to(self, x_min):
+        self._scans = [(t, y) for (t, y) in self._scans if t >= x_min]
 
     def feed(self, batch):
         # EVERY complete scan in the batch (a replay batch carries many) — not
         # just the last, else a parked slice shows only one row.
-        scans = [r.value for r in batch
-                 if r.key == self._src_key and isinstance(r.value, Trace)
-                 and not r.partial]
-        if not scans:
+        added = False
+        for r in batch:
+            if r.key != self._src_key or not isinstance(r.value, Trace) or r.partial:
+                continue
+            tr = r.value
+            self._scans.append(
+                (float(r.t), np.log10(np.clip(tr.y, 1e-12, None)).astype(np.float32)))
+            self._x0, self._x1 = float(tr.x[0]), float(tr.x[-1])
+            self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
+            added = True
+        if not added:
             return
-        for tr in scans:
-            self._push(tr)
-        # render ONLY the rows actually filled — so a replayed slice fills the view
-        # with its own scans (not the last few over a blank-padded buffer).
-        view = self._buf[self._rows - self._n:]
-        # levels span baseline → peak so the narrow peaks stay visible
-        lo = float(np.percentile(view, 50))
-        hi = float(view.max())
-        if hi <= lo:
-            hi = lo + 1.0
-        self.img.setImage(view.T, autoLevels=False, levels=[lo, hi])
-        # setImage resets the rect — re-apply the m/z × scan mapping each frame
-        self.img.setRect(QRectF(self._x0, 0.0, self._x1 - self._x0, float(self._n)))
+        if len(self._scans) > 8000:                  # bound memory on long sessions
+            self._scans = self._scans[-8000:]
+        self._render()
+
+    def _render(self):
+        if not self._scans:
+            return
+        t0, t1 = self._win if self._win else (self._scans[0][0], self._scans[-1][0])
+        if t1 <= t0:
+            t1 = t0 + 1.0
+        img, _m = _time_binned(self._scans, t0, t1, self._rows)
+        if img is None:                              # no scan in the window → blank
+            self.img.clear()
+        else:
+            finite = img[np.isfinite(img)]
+            lo = float(np.percentile(finite, 50)) if finite.size else 0.0
+            hi = float(finite.max()) if finite.size else lo + 1.0
+            if hi <= lo:
+                hi = lo + 1.0
+            self.img.setImage(img.T, autoLevels=False, levels=[lo, hi])
+            self.img.setRect(QRectF(self._x0, t0, self._x1 - self._x0, t1 - t0))
+            if self._bar is not None:
+                self._bar.setLevels((lo, hi))
         self.plot.setXRange(self._x0, self._x1, padding=0)
-        self.plot.setYRange(0, self._n, padding=0)
-        if self._bar is not None:
-            self._bar.setLevels((lo, hi))
+        self.plot.setYRange(t0, t1, padding=0)
+        self._sync_markers()
+
+    def _sync_markers(self):
+        """Draw markers as HORIZONTAL lines / a shaded region on the time (Y)
+        axis — so a recording span or a tag shows where it sits in the scans."""
+        if self.markers is None:
+            return
+        current = {m.id: m for m in self.markers.all()}
+        for mid in list(self._marker_lines):
+            if mid not in current:
+                self.plot.removeItem(self._marker_lines.pop(mid))
+        for mid, m in current.items():
+            item = self._marker_lines.get(mid)
+            if m.kind == RECORDING and m.t_end is not None:
+                if not isinstance(item, pg.LinearRegionItem):
+                    if item is not None:
+                        self.plot.removeItem(item)
+                    item = pg.LinearRegionItem(
+                        orientation="horizontal", movable=False,
+                        brush=pg.mkBrush(m.color[0], m.color[1], m.color[2], 40)
+                        if isinstance(m.color, (tuple, list)) else pg.mkBrush(77, 171, 247, 40))
+                    item.setZValue(10)
+                    self.plot.addItem(item)
+                    self._marker_lines[mid] = item
+                item.setRegion((m.t, m.t_end))
+            else:
+                if not isinstance(item, pg.InfiniteLine):
+                    if item is not None:
+                        self.plot.removeItem(item)
+                    item = pg.InfiniteLine(
+                        angle=0, movable=False,
+                        pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
+                        label=m.label, labelOpts={"color": m.color,
+                                                  "fill": (10, 14, 19, 180)})
+                    item.setZValue(11)
+                    self.plot.addItem(item)
+                    self._marker_lines[mid] = item
+                item.setPos(m.t)
 
 
 class SpectrumWaterfallPanel(Panel):
@@ -706,7 +788,8 @@ class SpectrumWaterfallPanel(Panel):
     accepts = frozenset({"trace"})
     single_bind = True
 
-    _AXIS_W = 64        # equal left-axis width → the two ViewBoxes align in x
+    _AXIS_W = 74        # equal left-axis width → the two ViewBoxes align in x
+    #                     (wide enough for the waterfall's time labels)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -729,9 +812,9 @@ class SpectrumWaterfallPanel(Panel):
         self.p_spec.setClipToView(True)
         self.p_spec.addLegend(offset=(-10, 10))
 
-        # -- waterfall (bottom) ----------------------------------------------
-        self.p_wf = self.glw.addPlot(row=1, col=0)
-        self.p_wf.setLabel("left", "scan")
+        # -- waterfall (bottom) — Y = time -----------------------------------
+        self.p_wf = self.glw.addPlot(
+            row=1, col=0, axisItems={"left": pg.DateAxisItem(orientation="left")})
         self.p_wf.setLabel("bottom", "m/z")
         self.p_wf.getAxis("left").setWidth(self._AXIS_W)
         self.p_wf.getAxis("bottom").enableAutoSIPrefix(False)
@@ -756,17 +839,19 @@ class SpectrumWaterfallPanel(Panel):
         self._cursor_lines: dict = {}
         self.on_cursor_move = None          # set by the Dashboard
         self._src_key = None
-        self._buf = None
-        self._n = 0                        # scans filled (≤ _rows) → waterfall height
-        self._rows = 240
+        self._scans: list = []             # (timestamp, log-intensity row), absolute time
+        self._win = None                   # (t0,t1) Y window from the shared timeline
+        self._rows = 400                   # vertical render resolution (time bins)
         self._x0, self._x1, self._xr = 0.0, 1.0, None
+        self.markers = None
+        self._marker_lines: dict = {}
 
     # -- configuration -------------------------------------------------------
     def config_fields(self):
         return super().config_fields() + [
             ("logy", "Logarithmic Y (spectrum)", "bool", self._logy, {}),
-            ("rows", "Waterfall history (scans)", "int", self._rows,
-             {"min": 10, "max": 2000}),
+            ("rows", "Waterfall resolution (rows)", "int", self._rows,
+             {"min": 64, "max": 2000}),
         ]
 
     def apply_config(self, values):
@@ -775,8 +860,8 @@ class SpectrumWaterfallPanel(Panel):
             self._logy = bool(values["logy"])
             self.p_spec.setLogMode(x=False, y=self._logy)
         if values.get("rows"):
-            self._rows = max(10, int(values["rows"]))
-            self._buf = None               # rebuilt at the new height next scan
+            self._rows = max(64, int(values["rows"]))
+            self._render_wf()
 
     def set_display_name(self, name):
         super().set_display_name(name)
@@ -788,9 +873,14 @@ class SpectrumWaterfallPanel(Panel):
     def set_state(self, st):
         self.apply_config({"logy": st.get("logy", True)})
         if st.get("rows"):
-            self._rows = max(10, int(st["rows"]))
-            self._buf = None
+            self._rows = max(64, int(st["rows"]))
         self.set_display_name(self.title)
+
+    # -- markers (record regions / tags) on the waterfall time (Y) axis -------
+    def attach_session(self, clock, markers):
+        self.markers = markers
+        markers.changed.connect(self._sync_markers)
+        self._sync_markers()
 
     # -- data ----------------------------------------------------------------
     def add_source(self, key, source):
@@ -802,7 +892,7 @@ class SpectrumWaterfallPanel(Panel):
         self._curves[key] = self.p_spec.plot(
             [], [], pen=pg.mkPen(color_for(key), width=1.5),
             name=getattr(source, 'label', source.name))
-        self._buf = None
+        self._scans = []
 
     def remove_source(self, key):
         if key != self._src_key:
@@ -813,16 +903,24 @@ class SpectrumWaterfallPanel(Panel):
         self._prev_curve = None
         self._src_key = None
         self.img.clear()
-        self._buf = None
+        self._scans = []
 
     def clear_history(self):
-        self._buf = None
-        self._n = 0                       # fresh slice starts empty, not blank-padded
+        self._scans = []                  # a fresh slice re-bins from scratch
         self.img.clear()
         if self._prev_curve is not None:
             self._prev_curve.setData([], [])
         for c in self._curves.values():
             c.setData([], [])
+
+    def set_window(self, t0, t1):
+        win = (float(t0), float(t1))
+        if win != self._win:
+            self._win = win
+            self._render_wf()
+
+    def trim_to(self, x_min):
+        self._scans = [(t, y) for (t, y) in self._scans if t >= x_min]
 
     def feed(self, batch):
         show = None
@@ -831,7 +929,7 @@ class SpectrumWaterfallPanel(Panel):
             if r.key == self._src_key and isinstance(r.value, Trace):
                 show = r.value
                 if not r.partial:
-                    completes.append(r.value)     # EVERY complete scan (replay-safe)
+                    completes.append((float(r.t), r.value))   # (time, scan), replay-safe
         if show is None or self._src_key not in self._curves:
             return
         # spectrum — current run (bright), log-safe
@@ -846,30 +944,78 @@ class SpectrumWaterfallPanel(Panel):
             self._xr = (lo, hi)
         if not completes:
             return
-        # completed scans → dim ghost (last) + one waterfall row per scan
-        last = completes[-1]
+        # completed scans → dim ghost (last) + one waterfall row per scan, at its time
+        last = completes[-1][1]
         cy = np.where(last.y > 0, last.y, np.nan)
         if self._prev_curve is not None:
             self._prev_curve.setData(last.x, cy, connect="finite")
-        for cscan in completes:
-            wy = np.log10(np.clip(cscan.y, 1e-12, None)).astype(np.float32)
-            if self._buf is None or self._buf.shape[1] != len(wy):
-                self._buf = np.full((self._rows, len(wy)), float(wy.min()), np.float32)
-                self._n = 0
-                self._x0, self._x1 = lo, hi
-            self._buf = np.roll(self._buf, -1, axis=0)
-            self._buf[-1] = wy
-            self._n = min(self._n + 1, self._rows)
-        view = self._buf[self._rows - self._n:]   # only the filled rows → fills the slice
-        loL = float(np.percentile(view, 50))
-        hiL = float(view.max())
-        if hiL <= loL:
-            hiL = loL + 1.0
-        self.img.setImage(view.T, autoLevels=False, levels=[loL, hiL])
-        self.img.setRect(QRectF(self._x0, 0.0, self._x1 - self._x0, float(self._n)))
-        self.p_wf.setYRange(0, self._n, padding=0)
-        if self._bar is not None:
-            self._bar.setLevels((loL, hiL))
+        self._x0, self._x1 = lo, hi
+        for t, cscan in completes:
+            self._scans.append(
+                (t, np.log10(np.clip(cscan.y, 1e-12, None)).astype(np.float32)))
+        if len(self._scans) > 8000:
+            self._scans = self._scans[-8000:]
+        self._render_wf()
+
+    def _render_wf(self):
+        if not self._scans:
+            return
+        t0, t1 = self._win if self._win else (self._scans[0][0], self._scans[-1][0])
+        if t1 <= t0:
+            t1 = t0 + 1.0
+        img, _m = _time_binned(self._scans, t0, t1, self._rows)
+        if img is None:
+            self.img.clear()
+        else:
+            finite = img[np.isfinite(img)]
+            loL = float(np.percentile(finite, 50)) if finite.size else 0.0
+            hiL = float(finite.max()) if finite.size else loL + 1.0
+            if hiL <= loL:
+                hiL = loL + 1.0
+            self.img.setImage(img.T, autoLevels=False, levels=[loL, hiL])
+            self.img.setRect(QRectF(self._x0, t0, self._x1 - self._x0, t1 - t0))
+            if self._bar is not None:
+                self._bar.setLevels((loL, hiL))
+        self.p_wf.setYRange(t0, t1, padding=0)
+        self._sync_markers()
+
+    def _sync_markers(self):
+        """Record spans / tags as horizontal lines or a shaded band on the time
+        (Y) axis of the waterfall."""
+        if self.markers is None:
+            return
+        current = {m.id: m for m in self.markers.all()}
+        for mid in list(self._marker_lines):
+            if mid not in current:
+                self.p_wf.removeItem(self._marker_lines.pop(mid))
+        for mid, m in current.items():
+            item = self._marker_lines.get(mid)
+            if m.kind == RECORDING and m.t_end is not None:
+                if not isinstance(item, pg.LinearRegionItem):
+                    if item is not None:
+                        self.p_wf.removeItem(item)
+                    br = (m.color if isinstance(m.color, (tuple, list))
+                          else (77, 171, 247))
+                    item = pg.LinearRegionItem(
+                        orientation="horizontal", movable=False,
+                        brush=pg.mkBrush(br[0], br[1], br[2], 40))
+                    item.setZValue(10)
+                    self.p_wf.addItem(item)
+                    self._marker_lines[mid] = item
+                item.setRegion((m.t, m.t_end))
+            else:
+                if not isinstance(item, pg.InfiniteLine):
+                    if item is not None:
+                        self.p_wf.removeItem(item)
+                    item = pg.InfiniteLine(
+                        angle=0, movable=False,
+                        pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
+                        label=m.label, labelOpts={"color": m.color,
+                                                  "fill": (10, 14, 19, 180)})
+                    item.setZValue(11)
+                    self.p_wf.addItem(item)
+                    self._marker_lines[mid] = item
+                item.setPos(m.t)
 
     # -- trend cursors (mirrors SpectrumPanel, on the spectrum subplot) ------
     def set_cursors(self, cursors):

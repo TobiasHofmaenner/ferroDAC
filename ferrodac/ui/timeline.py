@@ -763,23 +763,31 @@ class TimelineWindow(QtWidgets.QMainWindow):
         p.setXRange(self.t0, self.t1, padding=0)
 
     def _refresh_waterfall(self, key, p):
-        """Render a trace source as a spectrogram over the window: X = time,
-        Y = swept axis (m/z), colour = log intensity, via the display-decimated
-        query_trace (never the analysis path)."""
+        """Render a trace source as a spectrogram over the window: X = TIME (so it
+        lines up with the ribbon), Y = swept axis (m/z), colour = log intensity.
+        Scans are binned by their real time, so sparse scans (slow RGA) show their
+        true gaps — across ALL epochs in view, not just the most recent block."""
+        from .panels import _time_binned
         blocks = [b for b in self.resolver.query_trace(key, self.t0, self.t1,
                                                         max_scans=320)
                   if len(b[0])]
-        if not blocks:
+        x_ref = max(blocks, key=lambda b: b[0][-1])[2] if blocks else None
+        scans = []
+        for times, Y, x in blocks:
+            if x_ref is None or len(x) != len(x_ref):
+                continue                                  # different axis length → skip
+            z = np.log10(np.clip(Y, 1e-12, None)).astype(np.float32)
+            scans.extend((float(times[i]), z[i]) for i in range(len(times)))
+        scans.sort(key=lambda s: s[0])
+        img, _m = _time_binned(scans, self.t0, self.t1, 320)
+        if img is None:
             p._img.clear()
             p.setXRange(self.t0, self.t1, padding=0)
             return
-        # the MOST RECENT epoch in view — live scans land in the current epoch,
-        # which may have fewer scans than an older (denser) one; picking by count
-        # would freeze the preview on stale history.
-        times, Y, x = max(blocks, key=lambda b: b[0][-1])
-        z = np.log10(np.clip(Y, 1e-12, None))                 # (n_time, n_mass)
-        p._img.setImage(z, autoLevels=True)
-        x0, x1 = float(x[0]), float(x[-1])
-        p._img.setRect(QtCore.QRectF(float(times[0]), x0,
-                                     max(1e-6, float(times[-1] - times[0])), x1 - x0))
+        finite = img[np.isfinite(img)]
+        lvl = ([float(np.percentile(finite, 50)), float(finite.max())]
+               if finite.size else [0.0, 1.0])
+        p._img.setImage(img, autoLevels=False, levels=lvl)   # (time-rows, m) → X=time
+        x0, x1 = float(x_ref[0]), float(x_ref[-1])
+        p._img.setRect(QtCore.QRectF(self.t0, x0, self.t1 - self.t0, x1 - x0))
         p.setXRange(self.t0, self.t1, padding=0)

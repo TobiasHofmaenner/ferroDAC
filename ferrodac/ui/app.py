@@ -1437,6 +1437,12 @@ class MainWindow(QMainWindow):
             # straight through (≡ today); parked → re-stream history (W2). W1
             # wires the pass-through and verifies it's behaviour-identical.
             self.time_context = TimeContext()
+            # Start in GROW mode anchored at app launch: the window is
+            # [launch, live] and grows — so charts and the time-axis waterfall
+            # show the whole session by default (not a sliding tail). Drag the
+            # back edge / hit Slide to change it.
+            self.time_context.grow = True
+            self.time_context.anchor = self.time_context.head
             self.replay = ReplayController(
                 engine, store, self.time_context,
                 sources=lambda: self.dashboard.source_keys(),
@@ -2021,6 +2027,7 @@ class MainWindow(QMainWindow):
         tc.tick_live()
         if tc.following:
             self.dashboard.trim_live(tc.window[0])
+        self.dashboard.set_time_window(*tc.window)   # waterfalls track the window
 
     def _tc_play_tick(self) -> None:
         """Walk the parked head forward while playing — a FIXED sim-step per frame
@@ -2038,6 +2045,7 @@ class MainWindow(QMainWindow):
         if tc.playing:
             ach = min(tc.speed, (tc.speed * 0.05) / max(1e-4, wall))
             tc.rate = 0.7 * tc.rate + 0.3 * ach
+        self.dashboard.set_time_window(*tc.window)   # waterfalls follow the playhead
 
     def _replay_reset(self) -> None:
         """Called by the ReplayController when the head jumps (park / scrub /
@@ -2049,6 +2057,8 @@ class MainWindow(QMainWindow):
                 panel.clear_history()
             except Exception:
                 pass
+        if self.time_context is not None:           # re-bin waterfalls to the new window
+            self.dashboard.set_time_window(*self.time_context.window)
 
     def closeEvent(self, event):  # noqa: N802
         if self.recorder.active:        # finalize rather than leave it dangling
