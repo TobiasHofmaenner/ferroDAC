@@ -65,6 +65,8 @@ class MarkerModel(QObject):
         self._label_counter = 0
         self.default_projects: list = []     # new tags are filed under these (the
         #                                      active project) unless add() overrides
+        self._lens: "set | None" = None      # project-id filter for the views;
+        #                                      None = show all (no lens)
 
     # -- local mutations (user/recorder; bump version + announce locally) ----
     def add(self, t: float, label: str = "", comment: str = "", kind: str = TAG,
@@ -153,6 +155,25 @@ class MarkerModel(QObject):
     def all(self) -> list[Marker]:
         return sorted((m for m in self._markers.values() if not m.deleted),
                       key=lambda m: m.t)
+
+    # -- project lens (filter the VIEWS, never the catalog) ------------------
+    def set_lens(self, project_ids) -> None:
+        """Show only tags in these projects (+ unfiled). None = show everything.
+        Changes what the views render; the catalog (all()/to_list) is untouched."""
+        self._lens = set(project_ids) if project_ids is not None else None
+        self.changed.emit()
+
+    @property
+    def lens(self):
+        return None if self._lens is None else set(self._lens)
+
+    def visible(self) -> list[Marker]:
+        """Tags the active lens shows: everything when no lens; else those in the
+        lens — plus UNFILED tags (no project), which are global/uncategorised."""
+        ms = self.all()
+        if self._lens is None:
+            return ms
+        return [m for m in ms if not m.projects or (set(m.projects) & self._lens)]
 
     def of_kind(self, kind: str) -> list[Marker]:
         return [m for m in self.all() if m.kind == kind]

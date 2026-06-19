@@ -111,6 +111,39 @@ def test_projects_default_create_switch(qapp):
 
 
 @pytest.mark.ui
+def test_tag_project_lens(qapp):
+    from ferrodac.core.markers import MarkerModel
+    ms = MarkerModel()
+    ms.default_projects = ["pA"]                      # new tags file under the active
+    ms.add(1.0, label="in A")                         # → pA by default
+    b = ms.add(2.0, label="in B", projects=["pB"])
+    ms.add(3.0, label="unfiled", projects=[])
+    assert {m.label for m in ms.visible()} == {"in A", "in B", "unfiled"}  # no lens
+    ms.set_lens(["pA"])                               # active-project lens
+    assert {m.label for m in ms.visible()} == {"in A", "unfiled"}   # B hidden, unfiled kept
+    ms.set_lens(None)
+    assert len(ms.visible()) == 3                     # widen → all
+    ms.add_to_project(b, "pA")                        # re-file B into A
+    ms.set_lens(["pA"])
+    assert "in B" in {m.label for m in ms.visible()}
+    assert len(ms.all()) == 3                         # the catalog is never filtered
+
+
+@pytest.mark.ui
+def test_project_sets_tag_lens(qapp):
+    w = _mainwindow(qapp)
+    try:
+        assert w.dashboard.markers.lens == {w._project_mgr.active.id}   # active lens
+        w._set_tag_lens_all(True)
+        assert w.dashboard.markers.lens is None                        # show all
+        w._set_tag_lens_all(False)
+        w._create_project("Exp")
+        assert w.dashboard.markers.lens == {w._project_mgr.active.id}   # follows switch
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"

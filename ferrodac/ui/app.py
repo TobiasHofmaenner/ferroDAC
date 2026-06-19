@@ -744,19 +744,27 @@ class EventsPanel(QWidget):
     """Lists session markers (tags + record bookmarks); edit/remove."""
 
     def __init__(self, markers, clock, on_zoom=None, on_export_csv=None,
-                 on_export_plots=None, parent=None):
+                 on_export_plots=None, on_lens=None, parent=None):
         super().__init__(parent)
         self.markers = markers
         self.clock = clock
         self._on_zoom = on_zoom
         self._on_export_csv = on_export_csv
         self._on_export_plots = on_export_plots
+        self._on_lens = on_lens
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
+        head = QHBoxLayout()
         self._label = QLabel("Events")
         self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
-        root.addWidget(self._label)
+        head.addWidget(self._label)
+        head.addStretch(1)
+        self._all = QCheckBox("All projects")       # off = active project lens
+        self._all.setToolTip("Show tags from every project, not just the active one")
+        self._all.toggled.connect(lambda on: self._on_lens and self._on_lens(on))
+        head.addWidget(self._all)
+        root.addLayout(head)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -772,16 +780,21 @@ class EventsPanel(QWidget):
 
     def _rebuild(self):
         clear_layout(self._layout)
-        ms = self.markers.all()
+        ms = self.markers.visible()                 # the active project lens
         if not ms:
-            ph = QLabel("No events.\nDrop a tag with “＋ Tag”.")
+            hint = ("No events here.\nUntick “All projects” is on the active one."
+                    if self.markers.lens is not None
+                    else "No events.\nDrop a tag with “＋ Tag”.")
+            ph = QLabel(hint)
             ph.setStyleSheet("color:#7f8a99;")
             ph.setWordWrap(True)
             self._layout.addWidget(ph)
         for m in ms:
             self._layout.addWidget(self._row(m))
         self._layout.addStretch(1)
-        self._label.setText(f"Events  ({len(ms)})")
+        total = len(self.markers.all())
+        self._label.setText(f"Events  ({len(ms)}/{total})" if len(ms) != total
+                            else f"Events  ({len(ms)})")
 
     def _row(self, m):
         card = QFrame()
@@ -1537,14 +1550,19 @@ class MainWindow(QMainWindow):
         self.hub.connection_changed.connect(self._on_hub_connection,
                                             Qt.QueuedConnection)
 
-        # working-session autosave (tags/layout survive restart & crashes)
+        # working-LAYOUT autosave (per-project working.json) — layout only now
         self._autosave_on = False
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(1500)
         self._autosave_timer.timeout.connect(self._do_autosave)
         self.dashboard.ports_changed.connect(self._schedule_autosave)
-        self.dashboard.markers.changed.connect(self._schedule_autosave)
+        # tags are GLOBAL — autosaved to tags.json on any change (own debounce)
+        self._tag_save_timer = QTimer(self)
+        self._tag_save_timer.setSingleShot(True)
+        self._tag_save_timer.setInterval(1000)
+        self._tag_save_timer.timeout.connect(self._save_global_tags)
+        self.dashboard.markers.changed.connect(self._schedule_tag_save)
 
         self.sources_panel = SourcesPanel(manager, self.dashboard)
         self.sources_dock = QDockWidget("Sources", self)
@@ -1561,10 +1579,11 @@ class MainWindow(QMainWindow):
         self.sinks_dock.setWidget(self.sinks_panel)
         self.sinks_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.RightDockWidgetArea, self.sinks_dock)
+        self._tags_show_all = False
         self.events_panel = EventsPanel(
             self.dashboard.markers, self.dashboard.clock,
             on_zoom=self._zoom_recording, on_export_csv=self._export_recording_csv,
-            on_export_plots=self._export_plots)
+            on_export_plots=self._export_plots, on_lens=self._set_tag_lens_all)
         self.events_dock = QDockWidget("Events", self)
         self.events_dock.setObjectName("EventsDock")
         self.events_dock.setWidget(self.events_panel)
@@ -1804,7 +1823,64 @@ class MainWindow(QMainWindow):
         s.setValue("project/root", root)
         s.setValue("project/active", self._project_mgr.active.id)
         self._migrate_legacy_session()
+        # new tags file under the active project; tags themselves stay GLOBAL
+        self.dashboard.markers.default_projects = [self._project_mgr.active.id]
+        self._apply_tag_lens()
+        self._load_global_tags()
         self._update_project_title()
+
+    def _apply_tag_lens(self) -> None:
+        """Show all projects' tags, or just the active one's (the clutter fix)."""
+        p = self._project_mgr.active
+        self.dashboard.markers.set_lens(
+            None if (self._tags_show_all or p is None) else [p.id])
+
+    def _set_tag_lens_all(self, show_all: bool) -> None:
+        self._tags_show_all = bool(show_all)
+        self._apply_tag_lens()
+
+    # -- global tags (one catalog, filtered by the active project lens) ------
+    def _global_tags_path(self) -> str:
+        return os.path.join(self._app_dir(), "tags.json")
+
+    def _load_global_tags(self) -> None:
+        path = self._global_tags_path()
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    self.dashboard.markers.from_list(json.load(fh))
+                return
+            except Exception:                       # noqa: BLE001
+                pass
+        # one-time migration: lift markers embedded in a legacy session / working
+        # layout into the global tag store.
+        for src in (os.path.join(self._app_dir(), "session.json"),
+                    self._project_mgr.active.working_path):
+            if src and os.path.exists(src):
+                try:
+                    with open(src, encoding="utf-8") as fh:
+                        embedded = json.load(fh).get("layout", {}).get("markers", [])
+                except Exception:                   # noqa: BLE001
+                    embedded = []
+                if embedded:
+                    self.dashboard.markers.from_list(embedded)
+                    self._save_global_tags()
+                    return
+
+    def _schedule_tag_save(self):
+        if getattr(self, "_autosave_on", False):
+            self._tag_save_timer.start()
+
+    def _save_global_tags(self):
+        path = self._global_tags_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.dashboard.markers.to_list(), fh)
+            os.replace(tmp, path)                    # atomic
+        except Exception:                            # noqa: BLE001
+            pass
 
     def _migrate_legacy_session(self) -> None:
         """Carry an existing global session.json into the Default project's
@@ -1848,6 +1924,8 @@ class MainWindow(QMainWindow):
             pass
         mgr.set_active(pid)
         QSettings("ferroDAC", "ferroDAC").setValue("project/active", pid)
+        self.dashboard.markers.default_projects = [pid]   # new tags file here
+        self._apply_tag_lens()                            # and the view filters to it
         wp = mgr.active.working_path
         layout = {}
         existed = os.path.exists(wp)
@@ -2275,6 +2353,7 @@ class MainWindow(QMainWindow):
             self._rec_start_mid = None         # store_writer.stop() below flushes it
         if self._autosave_on:
             self._do_autosave()
+            self._save_global_tags()        # flush the global tag catalog
         self.hub.disconnect()
         if self.replay is not None:
             self.replay.stop()              # unsubscribe the playback bus

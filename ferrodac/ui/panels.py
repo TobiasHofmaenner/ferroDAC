@@ -232,7 +232,7 @@ class ChartPanel(Panel):
     def _sync_markers(self):
         if self.markers is None:
             return
-        current = {m.id: m for m in self.markers.all()}
+        current = {m.id: m for m in self.markers.visible()}   # active project lens
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid)[0])
@@ -778,7 +778,7 @@ class WaterfallPanel(Panel):
         axis — so a recording span or a tag shows where it sits in the scans."""
         if self.markers is None:
             return
-        current = {m.id: m for m in self.markers.all()}
+        current = {m.id: m for m in self.markers.visible()}   # active project lens
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid))
@@ -1024,7 +1024,7 @@ class SpectrumWaterfallPanel(Panel):
         (Y) axis of the waterfall."""
         if self.markers is None:
             return
-        current = {m.id: m for m in self.markers.all()}
+        current = {m.id: m for m in self.markers.visible()}   # active project lens
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.p_wf.removeItem(self._marker_lines.pop(mid))

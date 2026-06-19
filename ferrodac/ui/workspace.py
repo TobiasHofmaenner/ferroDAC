@@ -581,9 +581,11 @@ class Dashboard(QObject):
         processors = [{"kind": p.kind, "id": p.id, "input": p.input_key,
                        "state": p.state()} for p in self._processors.values()]
         routes = {k: sorted(v) for k, v in self._routes.items() if v}
+        # NOTE: markers/tags are NOT in the layout — they're GLOBAL (one catalog,
+        # persisted to tags.json, filtered by the active project lens). A layout is
+        # just the dashboard view; switching projects must not swap the tags.
         return {"panels": panels, "detectors": detectors, "processors": processors,
-                "routes": routes, "default_sink": self.default_sink_id,
-                "markers": self.markers.to_list()}
+                "routes": routes, "default_sink": self.default_sink_id}
 
     def clear_layout(self) -> None:
         for pid in list(self._panels):
@@ -596,7 +598,10 @@ class Dashboard(QObject):
 
     def import_layout(self, data: dict) -> None:
         self.clear_layout()
-        self.markers.from_list(data.get("markers", []))
+        # markers are GLOBAL now (one catalog in tags.json) — a layout no longer
+        # carries them, so importing a layout / switching projects leaves the tag
+        # catalog intact. (One-time migration of legacy embedded markers is done by
+        # the app at startup, not here.)
         for p in data.get("panels", []):
             pid = self.add_panel(p["kind"], pid=p["id"], title=p.get("title"))
             panel = self._panels.get(pid)
