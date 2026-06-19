@@ -86,6 +86,24 @@ async def main() -> int:
     print(f"✓ read tier over gRPC: ListSources={len(keys)}, coverage, "
           f"ReadRaw={len(raw.t)} pts, Query={len(qy.x)} pts")
 
+    # 4) HUB AS A RESOLVER TIER: a client with EMPTY local tiers reads the hub's
+    #    history through the resolver (the wiped-local-store / viewer scenario).
+    from ferrodac.store import RamTier, Resolver, ZarrStore as _ZS
+    from ferrodac.core.history import HistoryBuffer
+    from ferrodac.net.readtier import HubReadTier
+    empty = _ZS(os.path.join(d, "client.zarr"))
+    resolver = Resolver([RamTier(HistoryBuffer()), empty])
+    assert resolver.coverage("dev/g1") == []                  # nothing locally
+    resolver.set_remote(HubReadTier(channel))
+    rcov = await asyncio.to_thread(lambda: resolver.coverage("dev/g1"))
+    rx, _ = await asyncio.to_thread(
+        lambda: resolver.query("dev/g1", BASE, BASE + 60, max_points=200))
+    assert rcov and len(rx) > 0, (rcov, len(rx))
+    resolver.clear_remote()
+    assert resolver.coverage("dev/g1") == []                  # detaches cleanly
+    print(f"✓ hub as resolver tier: empty local → reads hub history "
+          f"(coverage={len(rcov)}, query={len(rx)} pts), detaches clean")
+
     channel.close()
     await server.stop(grace=0)
     print("\nSYNC E2E PASS")

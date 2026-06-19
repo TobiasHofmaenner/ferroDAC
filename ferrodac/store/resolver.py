@@ -54,6 +54,19 @@ class RamTier:
 class Resolver:
     def __init__(self, tiers):
         self.tiers = list(tiers)                         # nearest → far
+        self._remote = None
+
+    def set_remote(self, tier) -> None:
+        """Attach the hub as the FARTHEST tier (local RAM/store win on overlap;
+        the hub fills history we lack locally). Replaces any prior remote."""
+        self.clear_remote()
+        self._remote = tier
+        self.tiers.append(tier)
+
+    def clear_remote(self) -> None:
+        if self._remote is not None and self._remote in self.tiers:
+            self.tiers.remove(self._remote)
+        self._remote = None
 
     def coverage(self, series):
         ivs = []

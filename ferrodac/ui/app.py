@@ -1456,7 +1456,8 @@ class MainWindow(QMainWindow):
         # networking: publish to / consume from a hub (optional, needs grpcio)
         self.hub = HubController(
             self.dashboard, engine, manager, self,
-            store=self.store_writer.store if self.store_writer is not None else None)
+            store=self.store_writer.store if self.store_writer is not None else None,
+            resolver=self.resolver)
         # All three fire from hub worker threads (gRPC / sync) — force
         # QueuedConnection so the slots run on the GUI thread (see hubclient).
         # A bound method (not a lambda) gives the queued call an explicit
@@ -1612,6 +1613,16 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.hub_action)
 
+    def _timeline_sources(self) -> dict:
+        """{key: name} for the Timeline: the dashboard's live/historic sources
+        UNIONED with the hub's catalog (so hub-only history — e.g. after a local
+        wipe — is listed and served via the resolver's hub read tier)."""
+        names = dict(self.dashboard.source_names())
+        if getattr(self, "hub", None) is not None:
+            for key, name, _unit, _dtype in self.hub.hub_sources():
+                names.setdefault(key, name or "")
+        return names
+
     def _open_timeline(self):
         if self.resolver is None or self.time_context is None:
             self.statusBar().showMessage("Durable store unavailable — timeline disabled", 6000)
@@ -1620,8 +1631,8 @@ class MainWindow(QMainWindow):
             from .timeline import TimelineWindow
             win = TimelineWindow(self.resolver, self.store_writer.store,
                                  self.time_context, self,
-                                 names=self.dashboard.source_names(),
-                                 sources_fn=self.dashboard.source_names)
+                                 names=self._timeline_sources(),
+                                 sources_fn=self._timeline_sources)
             win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
             self._timeline_win = win
         self._timeline_win.show()

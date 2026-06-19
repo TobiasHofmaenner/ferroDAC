@@ -31,12 +31,16 @@ class HubController(QObject):
     sync_status = Signal(str, str)        # store-sync (state, detail) — §12.1
     connection_changed = Signal(bool)     # connected ↔ disconnected
 
-    def __init__(self, dashboard, engine, manager, parent=None, store=None):
+    def __init__(self, dashboard, engine, manager, parent=None, store=None,
+                 resolver=None):
         super().__init__(parent)
         self.dashboard = dashboard
         self.engine = engine
         self.manager = manager
         self._store = store              # local durable ZarrStore (for hub sync)
+        self._resolver = resolver        # local read resolver (gets a hub READ tier)
+        self._read_chan = None           # sync channel for the hub read tier
+        self._hub_sources: list = []     # cached [(key,name,unit,dtype)] from the hub
         self._agent = None
         self._viewer = None
         self._tagsync = None
@@ -63,6 +67,12 @@ class HubController(QObject):
     @property
     def roles(self) -> tuple:
         return (self._agent is not None, self._viewer is not None)
+
+    def hub_sources(self) -> list:
+        """Cached [(key, name, unit, dtype)] the hub holds (fetched once on
+        connect) — so the historic catalog/Timeline can list hub-only sources
+        without a gRPC call per refresh tick."""
+        return list(self._hub_sources)
 
     # -- lifecycle -----------------------------------------------------------
     def connect(self, addr: str, as_agent: bool, as_viewer: bool) -> None:
@@ -96,6 +106,16 @@ class HubController(QObject):
                 on_readings=self._on_readings_net,
                 on_state=self._state_cb("viewer"))
             self._viewer.start()
+        # hub READ tier: serve history the client lacks locally (DESIGN §12.1
+        # read side) — wired whenever connected, independent of agent/viewer, so
+        # a wiped local store can be back-read from the hub.
+        if self._resolver is not None and net.GRPC_AVAILABLE:
+            import grpc
+            from ..net.readtier import HubReadTier
+            self._read_chan = grpc.insecure_channel(addr)
+            tier = HubReadTier(self._read_chan)
+            self._resolver.set_remote(tier)
+            self._hub_sources = tier.sources()        # one ListSources for the catalog
         # Tags ride their own channel and are role-independent — sync them
         # whenever connected, regardless of agent/viewer (DESIGN §7.3).
         self._tagsync = HubTagSync(addr, agent_id=aid,
@@ -117,6 +137,12 @@ class HubController(QObject):
         except (TypeError, RuntimeError):
             pass
         self._unwire_tags()
+        if self._resolver is not None:
+            self._resolver.clear_remote()
+        if self._read_chan is not None:
+            self._read_chan.close()
+            self._read_chan = None
+        self._hub_sources = []
         if self._sync is not None:
             self._sync.stop()
             self._sync = None
