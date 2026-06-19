@@ -839,6 +839,7 @@ class EventsPanel(QWidget):
         self._on_export_plots = on_export_plots
         self._on_lens = on_lens
         self._projects_provider = projects_provider     # () -> [(id, name)]
+        self._collapsed: set = set()                    # folded sections
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
@@ -868,20 +869,37 @@ class EventsPanel(QWidget):
     def _rebuild(self):
         clear_layout(self._layout)
         ms = self.markers.visible()                 # the active project lens
+        # split by shape: a RECORDING is a slice (a span over the data), a TAG is
+        # a point in time. Show them as two distinct sections, not one flat list.
+        recs = [m for m in ms if m.is_region]
+        tags = [m for m in ms if not m.is_region]
         if not ms:
-            hint = ("No events here.\nUntick “All projects” is on the active one."
+            hint = ("No events here.\nUntick “All projects” to widen the lens."
                     if self.markers.lens is not None
-                    else "No events.\nDrop a tag with “＋ Tag”.")
+                    else "No events.\nDrop a tag with “＋ Tag”, or hit ● Record.")
             ph = QLabel(hint)
             ph.setStyleSheet("color:#7f8a99;")
             ph.setWordWrap(True)
             self._layout.addWidget(ph)
-        for m in ms:
-            self._layout.addWidget(self._row(m))
+        else:
+            if recs:
+                self._add_section("Recordings", recs)   # slices
+            if tags:
+                self._add_section("Tags", tags)         # points
         self._layout.addStretch(1)
         total = len(self.markers.all())
         self._label.setText(f"Events  ({len(ms)}/{total})" if len(ms) != total
                             else f"Events  ({len(ms)})")
+
+    def _add_section(self, title, markers):
+        grp = CollapsibleGroup(title, len(markers), title in self._collapsed,
+                               self._on_group_toggle)
+        for m in markers:
+            grp.add(self._row(m))
+        self._layout.addWidget(grp)
+
+    def _on_group_toggle(self, title, collapsed):
+        (self._collapsed.add if collapsed else self._collapsed.discard)(title)
 
     def _row(self, m):
         card = QFrame()

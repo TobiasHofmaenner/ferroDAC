@@ -199,6 +199,28 @@ def test_project_explorer_groups(qapp):
 
 
 @pytest.mark.ui
+def test_events_split_recordings_and_tags(qapp):
+    from ferrodac.ui.app import CollapsibleGroup, EventsPanel
+    from ferrodac.core.markers import MarkerModel
+    from ferrodac.core.tag import RECORDING
+    ms = MarkerModel()
+    r = ms.add(100.0, kind=RECORDING, label="REC")    # a slice (span)
+    ms.update(r, t_end=160.0)
+    ms.add(120.0, label="note")                       # a point in time
+    clock = types.SimpleNamespace(rel=lambda t: t)
+    panel = EventsPanel(ms, clock)
+    try:
+        titles = [panel._layout.itemAt(i).widget()._btn.text()
+                  for i in range(panel._layout.count())
+                  if isinstance(panel._layout.itemAt(i).widget(), CollapsibleGroup)]
+        # two distinct sections, not one flat list
+        assert any(t.startswith("Recordings") for t in titles)
+        assert any(t.startswith("Tags") for t in titles)
+    finally:
+        panel.deleteLater()
+
+
+@pytest.mark.ui
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"
