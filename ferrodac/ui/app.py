@@ -1592,14 +1592,16 @@ class MainWindow(QMainWindow):
         self.edit_action.setCheckable(True)
         self.edit_action.setChecked(False)          # start in locked layout
         self.edit_action.toggled.connect(self.dashboard.set_edit_mode)
+        self.edit_action.toggled.connect(self._lock_chrome)
+        self._lock_chrome(False)                    # Player/Log start locked too
 
         add = self.menuBar().addMenu("&Add")
         for kind, (label, _cls) in PANEL_TYPES.items():
             act = add.addAction(f"Add {label}")
             act.triggered.connect(lambda _=False, k=kind: self.dashboard.add_panel(k))
 
-        netmenu = self.menuBar().addMenu("&Hub")
-        self.hub_action = netmenu.addAction("Connect to hub…", self._open_hub)
+        netmenu = self.menuBar().addMenu("&Cloud")
+        self.hub_action = netmenu.addAction("ferroDAC Cloud…", self._open_hub)
 
         tb = self.addToolBar("Main")
         self.main_toolbar = tb
@@ -1640,13 +1642,25 @@ class MainWindow(QMainWindow):
         self._timeline_win.raise_()
         self._timeline_win.activateWindow()
 
+    def _lock_chrome(self, editable: bool) -> None:
+        """Player + Log docks follow the 'Edit layout' toggle, like the panel
+        docks: locked (can't be dragged/floated/closed) when off, freely movable
+        when on. Keeps their title bars/tabs so they stay usable while locked."""
+        feats = (QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+                 | QDockWidget.DockWidgetClosable) if editable \
+            else QDockWidget.NoDockWidgetFeatures
+        for name in ("player_dock", "log_dock"):
+            dock = getattr(self, name, None)
+            if dock is not None:
+                dock.setFeatures(feats)
+
     def _on_hub_status(self, msg: str) -> None:
         self.statusBar().showMessage(msg, 6000)
 
     def _on_hub_connection(self, connected: bool) -> None:
         """Recolour the Hub toolbar button to signal the live link, and seed the
         sync read-out (the SyncRunner then drives it from its background pass)."""
-        self.hub_action.setText("Hub ✓" if connected else "Connect to hub…")
+        self.hub_action.setText("ferroDAC Cloud ✓" if connected else "ferroDAC Cloud…")
         btn = self.main_toolbar.widgetForAction(self.hub_action)
         if btn is not None:
             btn.setStyleSheet(
@@ -1659,8 +1673,8 @@ class MainWindow(QMainWindow):
     def _open_hub(self):
         if not self.hub.available:
             self.statusBar().showMessage(
-                "Hub needs grpcio — install it in this Python environment "
-                "(pip install grpcio).", 8000)
+                "ferroDAC Cloud needs grpcio — install it in this Python "
+                "environment (pip install grpcio).", 8000)
             return
         s = QSettings("ferroDAC", "ferroDAC")
         agent, viewer = self.hub.roles

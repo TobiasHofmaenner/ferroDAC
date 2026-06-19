@@ -210,7 +210,8 @@ class Ribbon(pg.PlotWidget):
         for i, key in enumerate(self._rows):
             y = len(self._rows) - 1 - i
             lab = pg.TextItem(self._names.get(key) or _label(key),
-                              color=color_for(key), anchor=(0, 0.5))
+                              color=color_for(key), anchor=(0, 0.5),
+                              fill=pg.mkBrush(18, 20, 30, 220))  # readable over its bar
             self.addItem(lab)
             self._labels.append((lab, y + 0.4))
         self._draw_bars(cover)
@@ -271,7 +272,8 @@ class Ribbon(pg.PlotWidget):
         for i, key in enumerate(self._rows):
             y = len(self._rows) - 1 - i
             lab = pg.TextItem(self._names.get(key) or _label(key),
-                              color=color_for(key), anchor=(0, 0.5))
+                              color=color_for(key), anchor=(0, 0.5),
+                              fill=pg.mkBrush(18, 20, 30, 220))  # readable over its bar
             self.addItem(lab)
             self._labels.append((lab, y + 0.4))
         self.setYRange(-0.5, max(1, len(self._rows)), padding=0)
@@ -328,6 +330,15 @@ class Ribbon(pg.PlotWidget):
         x0, x1 = self.getPlotItem().getViewBox().viewRange()[0]
         for lab, y in self._labels:
             lab.setPos(x0 + (x1 - x0) * 0.006, y)
+
+
+class _PreviewPlot(pg.PlotWidget):
+    """A read-only Timeline preview chart: the finder/ribbon owns the data window,
+    so the plot itself never zooms/pans — and a wheel over it scrolls the preview
+    LIST (it bubbles to the enclosing QScrollArea) instead of zooming the curve."""
+
+    def wheelEvent(self, ev):
+        ev.ignore()                          # don't consume → QScrollArea scrolls
 
 
 class TimelineWindow(QtWidgets.QMainWindow):
@@ -511,11 +522,13 @@ class TimelineWindow(QtWidgets.QMainWindow):
         key = it.data(QtCore.Qt.UserRole)
         on = it.checkState() == QtCore.Qt.Checked
         if on and key not in self._charts:
-            p = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+            p = _PreviewPlot(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
             p.setBackground(_PANEL)
             p.setMinimumHeight(150)
             p.showGrid(x=True, y=True, alpha=0.15)
-            p.setMouseEnabled(y=False)
+            p.setMouseEnabled(x=False, y=False)      # read-only; finder owns the window
+            p.setMenuEnabled(False)
+            p.hideButtons()
             if self._charts:
                 p.setXLink(next(iter(self._charts.values())))   # shared time axis
             if self.resolver.source_dtype(key) == "trace":      # spectrogram track

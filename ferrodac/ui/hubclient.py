@@ -125,7 +125,7 @@ class HubController(QObject):
         self._wire_tags()
         for m in self.dashboard.markers.snapshot():   # push our current tags up
             self._tagsync.publish(m)
-        self.status.emit(f"hub: connecting to {addr} …")
+        self.status.emit(f"ferroDAC Cloud: connecting to {addr} …")
         self.connection_changed.emit(True)
 
     def disconnect(self) -> None:
@@ -157,7 +157,7 @@ class HubController(QObject):
             self._tagsync = None
         self.dashboard.clear_remote_devices()
         if self.addr:
-            self.status.emit("hub: disconnected")
+            self.status.emit("ferroDAC Cloud: disconnected")
             self.sync_status.emit("offline", "")
             self.connection_changed.emit(False)
         self.addr = ""
@@ -230,7 +230,7 @@ class HubController(QObject):
             self.dashboard.set_remote_offline(dev.uuid)
 
     def _state_cb(self, role):
-        return lambda connected, detail: self.status.emit(f"hub {role}: {detail}")
+        return lambda connected, detail: self.status.emit(f"Cloud {role}: {detail}")
 
 
 class ConnectHubDialog(QDialog):
@@ -240,14 +240,14 @@ class ConnectHubDialog(QDialog):
     def __init__(self, addr="localhost:50051", as_agent=True, as_viewer=True,
                  connected=False, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Connect to hub")
+        self.setWindowTitle("ferroDAC Cloud")
         self.setMinimumWidth(340)
         self.disconnect_requested = False
         lay = QVBoxLayout(self)
         form = QFormLayout()
         self._addr = QLineEdit(addr)
         self._addr.setPlaceholderText("host:port  (e.g. 10.0.0.5:50051)")
-        form.addRow("Hub address", self._addr)
+        form.addRow("Cloud address", self._addr)
         self._agent = QCheckBox("Publish my devices (agent)")
         self._agent.setChecked(as_agent)
         self._viewer = QCheckBox("Show the hub's devices (viewer)")
