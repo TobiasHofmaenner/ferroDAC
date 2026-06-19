@@ -97,24 +97,30 @@ def main() -> int:
     eng.pub([Reading("dev", "a", base + 300, 1.0)])
     assert any(r.value == 1.0 for r in out)                   # following → live on bus
     out.clear()
-    tc.park(base + 100)                                       # historic window
-    assert resets[0] >= 1 and len(out) > 0                    # reset + historic replay
+    tc.park(base + 100)                                       # scrub → render the window
+    assert resets[0] >= 1 and len(out) > 0                    # cleared + historic replay
     eng.pub([Reading("dev", "a", base + 300, 99.0)])
     assert not any(r.value == 99.0 for r in out)              # parked blocks live
-    out.clear(); r0 = resets[0]
-    tc.follow_now()                             # return to live: NO reload (panels hold
-    assert resets[0] == r0                      # the data) — just catch up + resume
+    # PAUSE while parked = freeze, no re-render
+    r0 = resets[0]
+    tc.pause()
+    assert resets[0] == r0, "pause must not re-render"
+    # every fresh scrub re-streams the EXACT window (the reliability guarantee)
+    out.clear()
+    tc.park(base + 80)
+    assert resets[0] == r0 + 1 and len(out) > 0
+    # return to live renders the live window, then live resumes on top
+    out.clear(); r1 = resets[0]
+    tc.follow_now()
+    assert resets[0] == r1 + 1
     eng.pub([Reading("dev", "a", base + 300, 2.0)])
-    assert tc.following and any(r.value == 2.0 for r in out)   # live resumes on top
-    print("✓ ReplayController: follow→live, park→reset+historic, parked blocks "
-          "live, follow→resumes WITHOUT reload")
-
-    # transport (pause/play) must NOT reload — only navigation does
-    r1 = resets[0]
-    tc.pause();  eng.pub([Reading("dev", "a", base + 300, 3.0)])
-    tc.play()
-    assert resets[0] == r1, "pause/play must not reload"
-    print("✓ ReplayController: pause/play are free (no reload); only nav reloads")
+    assert tc.following and any(r.value == 2.0 for r in out)
+    # a plain live tick (no navigation) must NOT re-render
+    r2 = resets[0]
+    tc.tick_live()
+    assert resets[0] == r2, "live tick must not re-render"
+    print("✓ ReplayController (simple+correct): scrub/go-live render the exact "
+          "window; pause & live-tick don't")
 
     print("\nREPLAY SELFTEST PASS")
     return 0
