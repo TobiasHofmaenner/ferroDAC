@@ -525,6 +525,34 @@ def test_hub_project_incoming_appears_and_clears(qapp):
 
 
 @pytest.mark.ui
+def test_hub_layout_live_sync(qapp):
+    """An OPEN named layout on a hub project syncs live (autosave republishes the
+    record); a working-layout-only autosave stays local (not in the shared record)."""
+    w = _mainwindow(qapp)
+    try:
+        mgr = w._project_mgr
+        w.hub._viewer = types.SimpleNamespace(stop=lambda: None)
+        pushed = []
+        w.hub.publish_project = lambda rec: pushed.append(rec)
+        hp = mgr.apply_hub_record({"id": "h1", "name": "H", "version": 1,
+                                   "sources": [], "windows": [], "layouts": {},
+                                   "deleted": False})
+        mgr.set_active("h1")
+        # no named layout open → working autosave does NOT push (working stays local)
+        w._active_layout_path = None
+        w._do_autosave()
+        assert pushed == []
+        # a named layout open → autosave writes it AND pushes a version-bumped record
+        w._active_layout_path = hp.layout_path("shared")
+        v = hp.version
+        w._do_autosave()
+        assert pushed and pushed[-1]["version"] == v + 1
+        assert "shared" in pushed[-1]["layouts"]      # the live layout blob went up
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_hub_project_share_and_republish(qapp):
     """Sharing a local project MOVES it to the hub (publishes its record, untracks
     the local entry); editing a hub project republishes a version-bumped record."""

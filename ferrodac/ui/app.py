@@ -2791,6 +2791,10 @@ class MainWindow(QMainWindow):
             # a named layout open → it tracks live edits too (layouts autosave)
             if self._active_layout_path:
                 self._write_session(self._active_layout_path)
+                # …and if it's a HUB project, push the layout live (the named layout
+                # IS in the shared record; the working layout stays local). Inherits
+                # the autosave debounce, so this is ~one push per edit-burst.
+                self._republish_active_if_hub()
         except Exception:
             pass
 
