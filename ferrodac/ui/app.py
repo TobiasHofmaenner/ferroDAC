@@ -1458,8 +1458,9 @@ class ProjectsPanel(QWidget):
         self._list.itemActivated.connect(self._activate)   # double-click or Enter
         root.addWidget(self._list, 1)
         row = QHBoxLayout()
-        new = QPushButton("＋ New project")
-        new.clicked.connect(self._new)
+        new = QPushButton("＋ Add project")
+        new.setToolTip("Pick a folder — adopt the project there, or create one")
+        new.clicked.connect(lambda: self._on_create())
         rev = QPushButton("Reveal")
         rev.clicked.connect(lambda: self._on_reveal())
         row.addWidget(new)
@@ -1488,11 +1489,6 @@ class ProjectsPanel(QWidget):
         pid = item.data(Qt.UserRole)
         if pid:
             self._on_activate(pid)
-
-    def _new(self):
-        name, ok = QInputDialog.getText(self, "New project", "Project name:")
-        if ok and name.strip():
-            self._on_create(name.strip())
 
 
 # --------------------------------------------------------------------------- #
@@ -1642,7 +1638,7 @@ class MainWindow(QMainWindow):
         self._setup_projects()
         self.projects_panel = ProjectsPanel(
             self._project_mgr, on_activate=self._switch_project,
-            on_create=self._create_project, on_reveal=self._reveal_project)
+            on_create=self._add_project, on_reveal=self._reveal_project)
         self.projects_dock = QDockWidget("Projects", self)
         self.projects_dock.setObjectName("ProjectsDock")
         self.projects_dock.setWidget(self.projects_panel)
@@ -1850,14 +1846,13 @@ class MainWindow(QMainWindow):
 
     # -- projects (curation overlay) ----------------------------------------
     def _setup_projects(self) -> None:
-        s = QSettings("ferroDAC", "ferroDAC")
-        root = s.value("project/root", "") or os.path.join(self._app_dir(), "projects")
-        self._project_mgr = ProjectManager(root)
-        self._project_mgr.ensure_default()
-        if not self._project_mgr.set_active(s.value("project/active", "")):
-            self._project_mgr.set_active(self._project_mgr.projects()[0].id)
-        s.setValue("project/root", root)
-        s.setValue("project/active", self._project_mgr.active.id)
+        # a REGISTRY of tracked project folders (anywhere on disk); the active id
+        # lives in it too. Migrates Phase-1 projects from the old scanned root.
+        reg = os.path.join(self._app_dir(), "projects.json")
+        self._project_mgr = ProjectManager(reg)
+        self._project_mgr.ensure_default(
+            default_dir=os.path.join(self._app_dir(), "projects", "Default"),
+            legacy_root=os.path.join(self._app_dir(), "projects"))
         self._migrate_legacy_session()
         # new tags file under the active project; tags themselves stay GLOBAL
         self.dashboard.markers.default_projects = [self._project_mgr.active.id]
@@ -1936,10 +1931,24 @@ class MainWindow(QMainWindow):
         if getattr(self, "projects_panel", None) is not None:
             self.projects_panel.refresh()
 
-    def _create_project(self, name: str) -> None:
-        p = self._project_mgr.create(name)
+    def _add_project(self) -> None:
+        """Pick a folder → ADOPT the project there if it already is one, else create
+        a new one in it. Either way the folder is tracked in the registry."""
+        from ..core.projects import is_project
+        folder = QFileDialog.getExistingDirectory(self, "Project folder")
+        if not folder:
+            return
+        if is_project(folder):
+            p = self._project_mgr.track(folder)           # adopt existing
+        else:
+            base = os.path.basename(folder.rstrip("/\\")) or "Project"
+            name, ok = QInputDialog.getText(self, "New project", "Project name:",
+                                            text=base)
+            if not ok or not name.strip():
+                return
+            p = self._project_mgr.track(folder, name.strip())   # create here
         self.projects_panel.refresh()
-        self._switch_project(p.id)              # jump into the new project
+        self._switch_project(p.id)
 
     def _reveal_project(self) -> None:
         from qtpy.QtCore import QUrl
@@ -1958,8 +1967,7 @@ class MainWindow(QMainWindow):
             self._write_session(mgr.active.working_path)   # save current
         except Exception:                          # noqa: BLE001
             pass
-        mgr.set_active(pid)
-        QSettings("ferroDAC", "ferroDAC").setValue("project/active", pid)
+        mgr.set_active(pid)                               # persists to the registry
         self.dashboard.markers.default_projects = [pid]   # new tags file here
         self._apply_tag_lens()                            # and the view filters to it
         wp = mgr.active.working_path

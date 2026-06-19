@@ -17,14 +17,12 @@ pytest.importorskip("pyqtgraph")
 
 def _mainwindow(qapp):
     import tempfile
-    from qtpy.QtCore import QSettings
-    s = QSettings("ferroDAC", "ferroDAC")          # redirect projects off real Documents
-    s.setValue("project/root", tempfile.mkdtemp())
-    s.setValue("project/active", "")
     from ferrodac.core.engine import Engine
     from ferrodac.core.manager import DeviceManager
     from ferrodac.core.registry import load_builtin_drivers
     from ferrodac.ui.app import MainWindow
+    d = tempfile.mkdtemp()
+    MainWindow._app_dir = lambda self, _d=d: _d     # isolate store/projects/tags/etc.
     engine = Engine()
     manager = DeviceManager(load_builtin_drivers(), engine=engine, registry=None)
     return MainWindow(manager, engine)
@@ -94,16 +92,20 @@ def test_waterfall_hold_vs_discrete(qapp):
 
 @pytest.mark.ui
 def test_projects_default_create_switch(qapp):
+    import tempfile
     w = _mainwindow(qapp)
     try:
         mgr = w._project_mgr
         assert mgr.active.name == "Default"               # built-in home
         assert w.windowTitle().endswith("Default")
-        w._create_project("Experiment 1")                  # create → auto-switch
+        # track a project in a chosen folder (what _add_project does post-dialog)
+        p = mgr.track(tempfile.mkdtemp(), "Experiment 1")
+        w.projects_panel.refresh()
+        w._switch_project(p.id)
         assert mgr.active.name == "Experiment 1"
         assert w.projects_panel._list.count() == 2
         assert w._runs_dir().startswith(mgr.active.path)   # recordings file under it
-        did = next(p.id for p in mgr.projects() if p.name == "Default")
+        did = next(pp.id for pp in mgr.projects() if pp.name == "Default")
         w._switch_project(did)
         assert mgr.active.name == "Default"
     finally:
@@ -137,7 +139,9 @@ def test_project_sets_tag_lens(qapp):
         w._set_tag_lens_all(True)
         assert w.dashboard.markers.lens is None                        # show all
         w._set_tag_lens_all(False)
-        w._create_project("Exp")
+        import tempfile
+        p = w._project_mgr.track(tempfile.mkdtemp(), "Exp")
+        w._switch_project(p.id)
         assert w.dashboard.markers.lens == {w._project_mgr.active.id}   # follows switch
     finally:
         w.close()

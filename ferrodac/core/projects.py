@@ -125,56 +125,59 @@ class Project:
 
 
 class ProjectManager:
-    """Discovers projects under a root folder and tracks the active one.
+    """Tracks a REGISTRY of project folders (each may live anywhere on disk) and
+    the active one. The registry — a list of folder paths + the active id — is the
+    local JSON `registry_path`; the project *contents* live in those folders.
 
-    Qt-free: the active id is in-memory; the app persists/restores it (QSettings)
-    and owns the root selection."""
+    Qt-free: the app drives the folder picker; this create-or-adopts a folder and
+    records it. (Earlier 'scan one root' is gone — projects aren't confined to a
+    single parent.)"""
 
     DEFAULT_NAME = "Default"
 
-    def __init__(self, root: str):
-        self.root = os.path.abspath(root)
+    def __init__(self, registry_path: str):
+        self.registry_path = os.path.abspath(registry_path)
         self._by_id: dict = {}        # id -> Project
         self._active: str = ""
+        self._load_registry()
 
-    def scan(self) -> list:
-        """(Re)discover projects: subfolders of root that contain a project.json."""
-        found: dict = {}
-        if os.path.isdir(self.root):
-            for name in sorted(os.listdir(self.root)):
-                d = os.path.join(self.root, name)
-                if is_project(d):
-                    p = Project(d)
-                    if p.id:
-                        found[p.id] = p
-        self._by_id = found
-        if self._active not in self._by_id:
-            self._active = ""
-        return self.projects()
+    # -- registry (the tracked-folder list) ----------------------------------
+    def _load_registry(self) -> None:
+        paths, active = [], ""
+        try:
+            with open(self.registry_path, encoding="utf-8") as fh:
+                reg = json.load(fh)
+            paths, active = reg.get("projects", []), reg.get("active", "")
+        except Exception:
+            pass
+        self._by_id = {}
+        for p in paths:
+            if is_project(p):                        # silently drop moved/deleted ones
+                proj = Project(p)
+                if proj.id:
+                    self._by_id[proj.id] = proj
+        self._active = active if active in self._by_id else ""
 
+    def _save_registry(self) -> None:
+        reg = {"projects": [p.path for p in self._by_id.values()],
+               "active": self._active}
+        try:
+            os.makedirs(os.path.dirname(self.registry_path) or ".", exist_ok=True)
+            tmp = self.registry_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(reg, fh, indent=2)
+            os.replace(tmp, self.registry_path)      # atomic
+        except Exception:
+            pass
+
+    reload = _load_registry                          # re-read the registry from disk
+
+    # -- queries -------------------------------------------------------------
     def projects(self) -> list:
         return sorted(self._by_id.values(), key=lambda p: p.name.lower())
 
     def get(self, pid: str):
         return self._by_id.get(pid)
-
-    def create(self, name: str, description: str = "") -> Project:
-        os.makedirs(self.root, exist_ok=True)
-        base = _safe(name)
-        path, n = os.path.join(self.root, base), 1
-        while os.path.exists(path):
-            n += 1
-            path = os.path.join(self.root, f"{base}_{n}")
-        p = Project.create(path, name, description)
-        self._by_id[p.id] = p
-        return p
-
-    def ensure_default(self) -> Project:
-        """Guarantee at least one project exists (so the app always has a home)."""
-        self.scan()
-        if self._by_id:
-            return self.active or self.projects()[0]
-        return self.create(self.DEFAULT_NAME)
 
     @property
     def active(self):
@@ -183,5 +186,36 @@ class ProjectManager:
     def set_active(self, pid: str) -> bool:
         if pid in self._by_id:
             self._active = pid
+            self._save_registry()
             return True
         return False
+
+    # -- mutations -----------------------------------------------------------
+    def track(self, path: str, name: str = None) -> Project:
+        """ADOPT the project in `path` if it already is one, else CREATE one there.
+        Registers the folder so it's tracked from now on. Returns the Project."""
+        path = os.path.abspath(path)
+        if is_project(path):
+            p = Project(path)
+        else:
+            p = Project.create(path, name or os.path.basename(path.rstrip("/\\")) or "project")
+        self._by_id[p.id] = p
+        if not self._active:
+            self._active = p.id
+        self._save_registry()
+        return p
+
+    def ensure_default(self, default_dir: str, legacy_root: str = None) -> Project:
+        """Guarantee at least one tracked project. Adopt any projects already in a
+        legacy root (migration from the old 'scan one root' model), else create a
+        built-in Default at `default_dir`."""
+        if not self._by_id and legacy_root and os.path.isdir(legacy_root):
+            for name in sorted(os.listdir(legacy_root)):
+                d = os.path.join(legacy_root, name)
+                if is_project(d):
+                    self.track(d)
+        if not self._by_id:
+            self.track(default_dir, self.DEFAULT_NAME)
+        if not self._active:
+            self.set_active(self.projects()[0].id)
+        return self.active

@@ -1,7 +1,8 @@
-"""Regression tests for the Project model (ferrodac.core.projects). Qt-free."""
+"""Regression tests for the Project model + registry (ferrodac.core.projects)."""
 
 import json
 import os
+import shutil
 import tempfile
 
 from ferrodac.core.projects import Project, ProjectManager, is_project
@@ -23,32 +24,45 @@ def test_create_and_layout_scan():
     assert p.layouts() == ["overview"]
 
 
-def test_manager_scan_default_and_active():
-    root = tempfile.mkdtemp()
-    mgr = ProjectManager(root)
+def test_registry_track_create_adopt_and_active():
+    d = tempfile.mkdtemp()
+    reg = os.path.join(d, "projects.json")
+    mgr = ProjectManager(reg)
     assert mgr.projects() == []
-    # ensure_default makes one so the app always has a home
-    d = mgr.ensure_default()
-    assert d.name == "Default"
-    assert [p.name for p in ProjectManager(root).scan()] == ["Default"]   # on disk
 
-    # create more + activate
-    e = mgr.create("Experiment 1")
-    assert {p.name for p in mgr.projects()} == {"Default", "Experiment 1"}
-    assert mgr.set_active(e.id) and mgr.active.id == e.id
-    assert not mgr.set_active("nonexistent-id")
+    # ensure_default creates a built-in Default + registers it as active
+    default = mgr.ensure_default(default_dir=os.path.join(d, "default_proj"))
+    assert default.name == "Default" and mgr.active.id == default.id
+    assert os.path.exists(reg)
 
-    # a fresh manager rediscovers them from disk; active resets until re-set
-    mgr2 = ProjectManager(root)
-    mgr2.scan()
-    assert {p.name for p in mgr2.projects()} == {"Default", "Experiment 1"}
-    assert mgr2.active is None and mgr2.set_active(e.id)
+    # track a NEW folder (create there) and an EXISTING project folder (adopt)
+    p1 = mgr.track(os.path.join(d, "exp1"), "Experiment 1")
+    existing = Project.create(os.path.join(d, "elsewhere"), "Adopted")
+    p2 = mgr.track(existing.path)                 # adopt — same id, no name needed
+    assert p2.id == existing.id and p2.name == "Adopted"
+    assert {p.name for p in mgr.projects()} == {"Default", "Experiment 1", "Adopted"}
+
+    # active persists in the registry; a fresh manager reloads paths + active
+    mgr.set_active(p1.id)
+    mgr2 = ProjectManager(reg)
+    assert {p.name for p in mgr2.projects()} == {"Default", "Experiment 1", "Adopted"}
+    assert mgr2.active.id == p1.id
 
 
-def test_unique_folder_names():
-    root = tempfile.mkdtemp()
-    mgr = ProjectManager(root)
-    a = mgr.create("My Run")
-    b = mgr.create("My Run")            # same display name → distinct folders + ids
-    assert a.path != b.path and a.id != b.id
-    assert len(ProjectManager(root).scan()) == 2
+def test_legacy_root_migration():
+    d = tempfile.mkdtemp()
+    legacy = os.path.join(d, "legacy")
+    Project.create(os.path.join(legacy, "old1"), "Old 1")
+    Project.create(os.path.join(legacy, "old2"), "Old 2")
+    mgr = ProjectManager(os.path.join(d, "projects.json"))
+    mgr.ensure_default(default_dir=os.path.join(d, "def"), legacy_root=legacy)
+    # adopts the projects already in the legacy root instead of making a Default
+    assert {p.name for p in mgr.projects()} == {"Old 1", "Old 2"}
+
+
+def test_missing_folder_is_dropped():
+    d = tempfile.mkdtemp()
+    reg = os.path.join(d, "projects.json")
+    p = ProjectManager(reg).track(os.path.join(d, "p1"), "P1")
+    shutil.rmtree(p.path)                          # folder removed out from under us
+    assert ProjectManager(reg).projects() == []    # reload silently drops it
