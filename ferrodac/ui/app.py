@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 
 from .. import __version__
@@ -43,6 +44,7 @@ from qtpy.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -1619,7 +1621,9 @@ class ProjectExplorer(QWidget):
     curating channels acts on what's already there; nothing here copies data."""
 
     def __init__(self, project_provider, on_open_layout, on_reveal_path,
-                 on_curate, on_add_layout=None, active_layout=None, parent=None):
+                 on_curate, on_add_layout=None, active_layout=None,
+                 on_add_doc=None, on_add_bookmark=None, on_jump_window=None,
+                 on_remove_bookmark=None, parent=None):
         super().__init__(parent)
         self._project = project_provider
         self._on_open_layout = on_open_layout
@@ -1627,6 +1631,10 @@ class ProjectExplorer(QWidget):
         self._on_curate = on_curate
         self._on_add_layout = on_add_layout
         self._active_layout = active_layout or (lambda: None)   # () -> active path
+        self._on_add_doc = on_add_doc
+        self._on_add_bookmark = on_add_bookmark
+        self._on_jump_window = on_jump_window                   # (t0, t1) -> jump
+        self._on_remove_bookmark = on_remove_bookmark           # (name) -> drop
         self._collapsed: set = set()
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1637,6 +1645,7 @@ class ProjectExplorer(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # cards wrap, don't scroll sideways
         host = QWidget()
         self._layout = QVBoxLayout(host)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -1666,6 +1675,12 @@ class ProjectExplorer(QWidget):
                         action=("✔ Curate", self._on_curate))
         self._add_group("Recordings", self._recording_cards(p),
                         "No recordings yet.\nHit ● Record to capture a span.")
+        self._add_group("Docs", self._doc_cards(p),
+                        "No docs yet.\n＋ Add reference files (notes, datasheets, plots).",
+                        action=("＋ Add", self._on_add_doc) if self._on_add_doc else None)
+        self._add_group("Bookmarks", self._window_cards(p),
+                        "No bookmarks yet.\n＋ Add saves the current timeline window.",
+                        action=("＋ Add", self._on_add_bookmark) if self._on_add_bookmark else None)
         self._layout.addStretch(1)
 
     # -- groups & cards ------------------------------------------------------
@@ -1698,8 +1713,11 @@ class ProjectExplorer(QWidget):
         t = QLabel(title)
         t.setStyleSheet("font-weight:700;")
         t.setToolTip(title)
-        top.addWidget(t)
-        top.addStretch(1)
+        # a long title (e.g. a doc filename) must give way to the action buttons,
+        # not push them off-screen — Ignored lets the row compress it (full name
+        # stays in the tooltip).
+        t.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        top.addWidget(t, 1)
         for text, cb in actions:
             b = QToolButton()
             b.setText(text)
@@ -1757,6 +1775,26 @@ class ProjectExplorer(QWidget):
         if r.get("tags"):
             bits.append(f"{r['tags']} tags")
         return "  ·  ".join(bits)
+
+    def _doc_cards(self, p):
+        return [self._card(d["name"], d["ext"] or "file",
+                           [("Open", lambda path=d["path"]: self._on_reveal(path))])
+                for d in p.docs()]
+
+    def _window_cards(self, p):
+        cards = []
+        for w in p.windows():
+            name, t0, t1 = w.get("name", "window"), w.get("t0"), w.get("t1")
+            sub = ""
+            if t0 and t1 and t1 >= t0:
+                sub = f"{time.strftime('%b %d, %H:%M', time.localtime(t0))}  ·  {_dur(t1 - t0)}"
+            actions = []
+            if self._on_jump_window is not None and t0 and t1:
+                actions.append(("⌖ Jump", lambda t0=t0, t1=t1: self._on_jump_window(t0, t1)))
+            if self._on_remove_bookmark is not None:
+                actions.append(("✕", lambda name=name: self._on_remove_bookmark(name)))
+            cards.append(self._card(name, sub, actions))
+        return cards
 
 
 # --------------------------------------------------------------------------- #
@@ -1924,7 +1962,10 @@ class MainWindow(QMainWindow):
             lambda: self._project_mgr.active, on_open_layout=self._open_layout,
             on_reveal_path=self._reveal_path, on_curate=self._curate_sources,
             on_add_layout=self._on_add_layout,
-            active_layout=lambda: self._active_layout_path)
+            active_layout=lambda: self._active_layout_path,
+            on_add_doc=self._add_doc, on_add_bookmark=self._add_bookmark,
+            on_jump_window=self._jump_to_window,
+            on_remove_bookmark=self._remove_bookmark)
         self.explorer_dock = QDockWidget("Project", self)
         self.explorer_dock.setObjectName("ProjectExplorerDock")
         self.explorer_dock.setWidget(self.project_explorer)
@@ -2233,7 +2274,6 @@ class MainWindow(QMainWindow):
         legacy = os.path.join(self._app_dir(), "session.json")
         p = self._project_mgr.active
         if p is not None and os.path.exists(legacy) and not os.path.exists(p.working_path):
-            import shutil
             try:
                 shutil.copy2(legacy, p.working_path)
             except Exception:                       # noqa: BLE001
@@ -2279,6 +2319,51 @@ class MainWindow(QMainWindow):
         ex = getattr(self, "project_explorer", None)
         if ex is not None:
             ex.refresh()
+
+    # -- docs (reference files filed under the project) ----------------------
+    def _add_doc(self) -> None:
+        """Pick file(s) and copy them into the project's docs/ — they then show as
+        cards. (The folder is the source of truth; you can also just drop files in.)"""
+        p = self._project_mgr.active
+        if p is None:
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add document(s) to project")
+        for src in paths:
+            try:
+                shutil.copy2(src, os.path.join(p.docs_dir, os.path.basename(src)))
+            except Exception as exc:                       # noqa: BLE001
+                self.statusBar().showMessage(f"Could not add {os.path.basename(src)}: {exc}", 6000)
+        if paths:
+            self._refresh_explorer()
+
+    # -- favourites: saved time-windows (bookmarks) --------------------------
+    def _add_bookmark(self) -> None:
+        """Bookmark the current timeline window under a name (a nav aid)."""
+        p = self._project_mgr.active
+        if p is None or self.time_context is None:
+            self.statusBar().showMessage("No timeline window to bookmark.", 5000)
+            return
+        t0, t1 = self.time_context.window
+        name, ok = QInputDialog.getText(
+            self, "Add bookmark", "Name this window:",
+            text=time.strftime("%b %d, %H:%M", time.localtime(t0)))
+        name = name.strip()
+        if ok and name:
+            p.add_window(name, t0, t1)
+            self._refresh_explorer()
+            self.statusBar().showMessage(f"Bookmarked “{name}”", 4000)
+
+    def _jump_to_window(self, t0, t1) -> None:
+        """Jump the timeline to a saved window (park + frame), like a recording."""
+        if self.time_context is not None:
+            self.time_context.park_window(t0, t1)
+        self.dashboard.zoom_to(t0, t1)
+
+    def _remove_bookmark(self, name) -> None:
+        p = self._project_mgr.active
+        if p is not None:
+            p.remove_window(name)
+            self._refresh_explorer()
 
     def _switch_project(self, pid: str) -> None:
         """Make `pid` active: persist the current project's working layout, then

@@ -172,6 +172,45 @@ class Project:
         out.sort(key=lambda r: r.get("exported_at") or r["name"], reverse=True)
         return out
 
+    # -- docs (reference files dropped in docs/) -----------------------------
+    @property
+    def docs_dir(self) -> str:
+        return self.subdir("docs")
+
+    def docs(self) -> list:
+        """Reference files in docs/ (datasheets, notes, protocols, plots) — shown
+        as cards so you can reopen them. Scanned fresh; the folder IS the list."""
+        out = []
+        docs = os.path.join(self.path, "docs")           # don't create on a read
+        try:
+            names = sorted(os.listdir(docs))
+        except FileNotFoundError:
+            return out
+        for name in names:
+            p = os.path.join(docs, name)
+            if os.path.isfile(p):
+                out.append({"name": name, "path": p,
+                            "ext": os.path.splitext(name)[1].lstrip(".").lower()})
+        return out
+
+    # -- favourites: saved time-windows (bookmarks) — a nav aid, in the meta --
+    def windows(self) -> list:
+        """Saved time-windows: [{name, t0, t1}, …]. A bookmark for an interesting
+        span so you can jump back to it without re-finding it on the timeline."""
+        return list((self.meta.get("favorites") or {}).get("windows") or [])
+
+    def add_window(self, name: str, t0: float, t1: float) -> None:
+        fav = self.meta.setdefault("favorites", {})
+        wins = [w for w in (fav.get("windows") or []) if w.get("name") != name]
+        wins.append({"name": name, "t0": float(t0), "t1": float(t1)})
+        fav["windows"] = wins
+        self.save()
+
+    def remove_window(self, name: str) -> None:
+        fav = self.meta.setdefault("favorites", {})
+        fav["windows"] = [w for w in (fav.get("windows") or []) if w.get("name") != name]
+        self.save()
+
     # -- creation ------------------------------------------------------------
     @classmethod
     def create(cls, path: str, name: str, description: str = "") -> "Project":

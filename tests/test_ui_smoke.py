@@ -228,6 +228,34 @@ def test_project_explorer_groups(qapp):
 
 
 @pytest.mark.ui
+def test_project_docs_and_bookmarks(qapp):
+    import os
+    w = _mainwindow(qapp)
+    try:
+        ex = w.project_explorer
+        p = w._project_mgr.active
+        assert ex._doc_cards(p) == [] and ex._window_cards(p) == []
+        # a reference file dropped in docs/ shows up as a card
+        open(os.path.join(p.docs_dir, "notes.txt"), "w").write("hi")
+        ex.refresh()
+        assert len(ex._doc_cards(p)) == 1
+        # bookmark a window (model path; the UI prompts for the name) → card appears
+        p.add_window("bakeout", 1000.0, 1600.0)
+        ex.refresh()
+        assert len(ex._window_cards(p)) == 1
+        # jumping a bookmark parks the timeline on it (re-streams that slice)
+        tc = w.time_context
+        nav0 = tc.nav
+        w._jump_to_window(1000.0, 1600.0)
+        assert abs(tc.window[0] - 1000.0) < 1 and abs(tc.window[1] - 1600.0) < 1
+        assert tc.following is False and tc.nav == nav0 + 1
+        w._remove_bookmark("bakeout")
+        assert ex._window_cards(p) == []
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_events_split_recordings_and_tags(qapp):
     from ferrodac.ui.app import CollapsibleGroup, EventsPanel
     from ferrodac.core.markers import MarkerModel

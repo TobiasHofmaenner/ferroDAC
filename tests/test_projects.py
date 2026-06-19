@@ -42,6 +42,34 @@ def test_curated_sources_round_trip():
     assert Project(p.path).source_keys() == {"dev/p1", "dev/temp"}
 
 
+def test_docs_scan():
+    d = tempfile.mkdtemp()
+    p = Project.create(os.path.join(d, "exp1"), "Experiment 1")
+    assert p.docs() == []                                    # nothing dropped yet
+    open(os.path.join(p.docs_dir, "protocol.md"), "w").write("# notes")
+    open(os.path.join(p.docs_dir, "datasheet.pdf"), "w").write("%PDF")
+    os.makedirs(os.path.join(p.docs_dir, "subdir"))         # dirs are ignored
+    docs = p.docs()
+    assert [x["name"] for x in docs] == ["datasheet.pdf", "protocol.md"]   # sorted, files only
+    assert {x["ext"] for x in docs} == {"pdf", "md"}
+
+
+def test_saved_windows_round_trip():
+    d = tempfile.mkdtemp()
+    p = Project.create(os.path.join(d, "exp1"), "Experiment 1")
+    assert p.windows() == []
+    p.add_window("bakeout", 1000.0, 1600.0)
+    p.add_window("pumpdown", 2000.0, 2300.0)
+    assert [w["name"] for w in p.windows()] == ["bakeout", "pumpdown"]
+    # same name replaces (no dupes); persists to project.json meta
+    p.add_window("bakeout", 1100.0, 1700.0)
+    assert len(p.windows()) == 2
+    assert next(w for w in p.windows() if w["name"] == "bakeout")["t0"] == 1100.0
+    assert Project(p.path).windows() == p.windows()         # reloads from disk
+    p.remove_window("bakeout")
+    assert [w["name"] for w in p.windows()] == ["pumpdown"]
+
+
 def test_recordings_scan_and_parse():
     d = tempfile.mkdtemp()
     p = Project.create(os.path.join(d, "exp1"), "Experiment 1")
