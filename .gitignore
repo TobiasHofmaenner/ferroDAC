@@ -12,3 +12,4 @@ dist/
 *.h5
 *.parquet
 /scratch/
+/projects/
