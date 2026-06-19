@@ -130,6 +130,17 @@ class Resolver:
                 out.extend(rr(series, a, b))
         return out
 
+    def query_trace(self, series, t0, t1, max_scans=400) -> list:
+        """Display-decimated trace blocks stitched across tiers (the waterfall
+        preview path) — full-res read then ~max_scans representative scans/block."""
+        out = []
+        for (t, Y, x) in self.read_raw_trace(series, t0, t1):
+            if len(t) > max_scans:
+                idx = np.linspace(0, len(t) - 1, max_scans).astype(int)
+                t, Y = t[idx], Y[idx]
+            out.append((t, Y, x))
+        return out
+
     def source_dtype(self, series) -> str:
         """First tier that actually knows the source's dtype ('trace'|'scalar');
         lets the replay pick read_raw vs read_raw_trace for hub-only sources too."""

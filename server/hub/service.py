@@ -210,3 +210,19 @@ class StoreServicer(rpc.StoreServicer):
             except Exception:                       # noqa: BLE001
                 pass
         return pb.RawScalar(t=t, v=v)
+
+    async def ReadRawTrace(self, request, context):  # noqa: N802
+        blocks = []
+        if self.store is not None:
+            try:
+                for times, Y, x in self.store.read_raw_trace(
+                        request.source, request.t0, request.t1):
+                    Y = np.asarray(Y)
+                    m = int(Y.shape[1]) if Y.ndim == 2 else 0
+                    blocks.append(pb.TraceBlock(
+                        t=[float(v) for v in times],
+                        y=[float(v) for v in Y.reshape(-1)],
+                        x=[float(v) for v in np.asarray(x)], m=m))
+            except Exception:                       # noqa: BLE001
+                pass
+        return pb.RawTrace(blocks=blocks)

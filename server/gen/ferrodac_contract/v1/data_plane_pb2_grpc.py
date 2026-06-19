@@ -497,6 +497,11 @@ class StoreStub:
                 request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.SerializeToString,
                 response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawScalar.FromString,
                 _registered_method=True)
+        self.ReadRawTrace = channel.unary_unary(
+                '/ferrodac_contract.v1.Store/ReadRawTrace',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawTrace.FromString,
+                _registered_method=True)
 
 
 class StoreServicer:
@@ -538,6 +543,13 @@ class StoreServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReadRawTrace(self, request, context):
+        """full-res trace scans
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StoreServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -570,6 +582,11 @@ def add_StoreServicer_to_server(servicer, server):
                     servicer.ReadRaw,
                     request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.FromString,
                     response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawScalar.SerializeToString,
+            ),
+            'ReadRawTrace': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReadRawTrace,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawTrace.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -734,6 +751,33 @@ class Store:
             '/ferrodac_contract.v1.Store/ReadRaw',
             ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.SerializeToString,
             ferrodac__contract_dot_v1_dot_data__plane__pb2.RawScalar.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReadRawTrace(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Store/ReadRawTrace',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.RawTrace.FromString,
             options,
             channel_credentials,
             insecure,

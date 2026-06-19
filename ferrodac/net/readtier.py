@@ -73,6 +73,26 @@ class HubReadTier:
             log.debug("hub read_raw(%s) failed: %s", series, exc)
             return np.array([]), np.array([])
 
+    def read_raw_trace(self, series, t0, t1) -> list:
+        """Full-resolution trace scans over the wire: list of (times[k], Y[k,m],
+        x[m]) blocks (the swept axis differs per epoch)."""
+        try:
+            resp = self.stub.ReadRawTrace(
+                pb.RawRequest(source=str(series), t0=float(t0), t1=float(t1),
+                              token=self.token),
+                timeout=self.timeout)
+        except Exception as exc:                     # noqa: BLE001
+            log.debug("hub read_raw_trace(%s) failed: %s", series, exc)
+            return []
+        out = []
+        for b in resp.blocks:
+            m = int(b.m)
+            t = np.asarray(b.t, dtype="f8")
+            y = (np.asarray(b.y, dtype="f8").reshape(len(t), m)
+                 if m and len(t) else np.zeros((len(t), m)))
+            out.append((t, y, np.asarray(b.x, dtype="f8")))
+        return out
+
     def sources(self) -> list:
         """[(key, name, unit, dtype)] the hub holds — for the historic catalog."""
         try:

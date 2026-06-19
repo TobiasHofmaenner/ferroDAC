@@ -518,7 +518,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
             p.setMouseEnabled(y=False)
             if self._charts:
                 p.setXLink(next(iter(self._charts.values())))   # shared time axis
-            if self.store.source_dtype(key) == "trace":         # spectrogram track
+            if self.resolver.source_dtype(key) == "trace":      # spectrogram track
                 p.setLabel("left", "m/z")
                 img = pg.ImageItem()
                 img.setLookupTable(_wf_cmap().getLookupTable())
@@ -716,7 +716,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         """Render a trace source as a spectrogram over the window: X = time,
         Y = swept axis (m/z), colour = log intensity, via the display-decimated
         query_trace (never the analysis path)."""
-        blocks = [b for b in self.store.query_trace(key, self.t0, self.t1, max_scans=320)
+        blocks = [b for b in self.resolver.query_trace(key, self.t0, self.t1,
+                                                        max_scans=320)
                   if len(b[0])]
         if not blocks:
             p._img.clear()

@@ -393,6 +393,14 @@ message QueryRequest {
 message Series { repeated double x = 1; repeated double y = 2; }  // decimated envelope
 message RawRequest { string source = 1; double t0 = 2; double t1 = 3; string token = 4; }
 message RawScalar { repeated double t = 1; repeated double v = 2; }
+// full-res TRACE read: per-epoch blocks (the swept axis differs per epoch)
+message TraceBlock {
+  repeated double t = 1;         // scan timestamps (length k)
+  repeated double y = 2;         // flattened [k x m] row-major intensities
+  repeated double x = 3;         // swept axis for this block (length m)
+  int32 m = 4;                   // bins per scan
+}
+message RawTrace { repeated TraceBlock blocks = 1; }
 
 message SourcesRequest { string token = 1; }
 message SourceInfo { string key = 1; string name = 2; string unit = 3; string dtype = 4; }
@@ -405,4 +413,5 @@ service Store {
   rpc GetCoverage(CoverageRequest) returns (Coverage);
   rpc Query(QueryRequest) returns (Series);
   rpc ReadRaw(RawRequest) returns (RawScalar);
+  rpc ReadRawTrace(RawRequest) returns (RawTrace);   // full-res trace scans
 }

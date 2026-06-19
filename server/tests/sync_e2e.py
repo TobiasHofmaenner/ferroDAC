@@ -99,6 +99,16 @@ async def main() -> int:
     rx, _ = await asyncio.to_thread(
         lambda: resolver.query("dev/g1", BASE, BASE + 60, max_points=200))
     assert rcov and len(rx) > 0, (rcov, len(rx))
+    # full-res TRACE read-back over the wire (the waterfall/replay path)
+    resolver.set_remote(HubReadTier(channel))
+    tblocks = await asyncio.to_thread(
+        lambda: resolver.read_raw_trace("rga/spec", BASE, BASE + 100))
+    nscan = sum(len(t) for t, _Y, _x in tblocks)
+    assert tblocks and nscan == 12 and tblocks[0][1].shape[1] == 64, (nscan, tblocks[0][1].shape)
+    dtv = await asyncio.to_thread(lambda: resolver.source_dtype("rga/spec"))
+    assert dtv == "trace", dtv
+    print(f"✓ hub TRACE read tier: ReadRawTrace → {nscan} full-res scans "
+          f"(m={tblocks[0][1].shape[1]} bins), dtype classified")
     resolver.clear_remote()
     assert resolver.coverage("dev/g1") == []                  # detaches cleanly
     print(f"✓ hub as resolver tier: empty local → reads hub history "
