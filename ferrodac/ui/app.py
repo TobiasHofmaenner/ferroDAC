@@ -1918,9 +1918,14 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     def _tc_live_tick(self) -> None:
-        """Advance the head to now while following (live)."""
-        if self.time_context is not None:
-            self.time_context.tick_live()
+        """Advance the head to now while following (live), and slide the live
+        window — trim panels to the window start so live honours slide/grow."""
+        tc = self.time_context
+        if tc is None:
+            return
+        tc.tick_live()
+        if tc.following:
+            self.dashboard.trim_live(tc.window[0])
 
     def _tc_play_tick(self) -> None:
         """Walk the parked head forward while playing — a FIXED sim-step per frame

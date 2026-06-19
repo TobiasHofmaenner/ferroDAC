@@ -244,6 +244,16 @@ class Dashboard(QObject):
         names as the dashboard (not the raw source IDs)."""
         return {k: p.name for k, p in self._sources.items() if p.name}
 
+    def trim_live(self, t0: float) -> None:
+        """Drop live-accumulated data older than t0 (absolute) so the live window
+        slides (slide) / is bounded at the anchor (grow). Auto-range follows."""
+        x_min = self.clock.rel(t0)
+        for panel in self._panels.values():
+            try:
+                panel.trim_to(x_min)
+            except Exception:
+                pass
+
     def panels(self) -> list:
         """The live panels (display + input), for the replay reset hook."""
         return list(self._panels.values())

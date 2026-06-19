@@ -67,6 +67,10 @@ class Panel(QWidget):
         slice from scratch — called by the replay reset when the head jumps
         (park / scrub / return to live). Default: nothing to clear."""
 
+    def trim_to(self, x_min: float) -> None:
+        """Drop accumulated data older than x_min (relative-time coords) so the
+        live window slides instead of growing. Time-axis panels override."""
+
     def state(self) -> dict:
         """Per-panel state to persist in a saved session (override as needed)."""
         return {}
@@ -338,6 +342,17 @@ class ChartPanel(Panel):
         self._sync_markers()                  # reposition tags at the new time base
         self.plot.enableAutoRange()           # a freshly-loaded slice auto-fits once;
         #                                       then the user's zoom/pan is respected
+
+    def trim_to(self, x_min):
+        """Drop buffered points older than x_min so the live window slides instead
+        of growing. xs is time-ordered (live append) → bisect; auto-range follows."""
+        import bisect
+        for key, (xs, ys) in self._buf.items():
+            if xs and xs[0] < x_min:
+                i = bisect.bisect_left(xs, x_min)
+                if i:
+                    del xs[:i]; del ys[:i]
+                    self._curves[key].setData(xs, ys, connect="finite")
 
 
 class _Readout(QFrame):
