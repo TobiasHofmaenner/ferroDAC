@@ -31,6 +31,7 @@ from qtpy.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -50,6 +51,7 @@ from ..core.engine import Engine
 from ..core.history import HistoryBuffer
 from ..core.manager import DeviceManager
 from ..core.markers import RECORDING
+from ..core.projects import ProjectManager
 from ..core.registry import load_builtin_drivers
 from ..core.device import DeviceDescriptor, RateMode, SinkKind
 from ..vision.detector import FAIL_LABELS, PARSE_LABELS, WHITELIST_PRESETS, Detector
@@ -1390,6 +1392,62 @@ class CursorDialog(QDialog):
                 self._list.addItem(item)
 
 
+class ProjectsPanel(QWidget):
+    """Lists local projects; pick one to make it active (it owns the working
+    layout + — Phase 2 — the tag lens). Create new + reveal the folder."""
+
+    def __init__(self, manager, on_activate, on_create, on_reveal, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self._on_activate = on_activate
+        self._on_create = on_create
+        self._on_reveal = on_reveal
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self._label = QLabel("Projects")
+        self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
+        root.addWidget(self._label)
+        self._list = QListWidget()
+        self._list.itemActivated.connect(self._activate)
+        self._list.itemDoubleClicked.connect(self._activate)
+        root.addWidget(self._list, 1)
+        row = QHBoxLayout()
+        new = QPushButton("＋ New project")
+        new.clicked.connect(self._new)
+        rev = QPushButton("Reveal")
+        rev.clicked.connect(lambda: self._on_reveal())
+        row.addWidget(new)
+        row.addWidget(rev)
+        root.addLayout(row)
+        self.refresh()
+
+    def refresh(self):
+        self._list.clear()
+        active = self.manager.active
+        projs = self.manager.projects()
+        self._label.setText(f"Projects  ({len(projs)})")
+        for p in projs:
+            on = active is not None and p.id == active.id
+            it = QListWidgetItem(("●  " if on else "○  ") + p.name)
+            it.setData(Qt.UserRole, p.id)
+            if on:
+                f = it.font(); f.setBold(True); it.setFont(f)
+            if p.description:
+                it.setToolTip(p.description)
+            self._list.addItem(it)
+
+    def _activate(self, item):
+        pid = item.data(Qt.UserRole)
+        if pid:
+            self._on_activate(pid)
+
+    def _new(self):
+        name, ok = QInputDialog.getText(self, "New project", "Project name:")
+        if ok and name.strip():
+            self._on_create(name.strip())
+
+
 # --------------------------------------------------------------------------- #
 #  Main window — dockable shell
 # --------------------------------------------------------------------------- #
@@ -1523,6 +1581,18 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, self.devices_dock)
         self.devices_dock.setVisible(False)
 
+        # projects: a curation overlay over the global catalog (the active project
+        # owns the working layout; Phase 2 adds the tag lens).
+        self._setup_projects()
+        self.projects_panel = ProjectsPanel(
+            self._project_mgr, on_activate=self._switch_project,
+            on_create=self._create_project, on_reveal=self._reveal_project)
+        self.projects_dock = QDockWidget("Projects", self)
+        self.projects_dock.setObjectName("ProjectsDock")
+        self.projects_dock.setWidget(self.projects_panel)
+        self.projects_dock.setMinimumWidth(220)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.projects_dock)
+
         # transport player: control the shared replay head from the main window
         # (without opening the Timeline). The app owns the clock heartbeat below
         # so the Timeline and the player never double-drive it.
@@ -1585,6 +1655,7 @@ class MainWindow(QMainWindow):
         filemenu.addAction("Open Layout…", self._on_open)
 
         view = self.menuBar().addMenu("&View")
+        view.addAction(self.projects_dock.toggleViewAction())
         view.addAction(self.devices_dock.toggleViewAction())
         view.addAction(self.sources_dock.toggleViewAction())
         view.addAction(self.sinks_dock.toggleViewAction())
@@ -1717,7 +1788,79 @@ class MainWindow(QMainWindow):
         return os.path.join(docs, "ferroDAC")
 
     def _runs_dir(self) -> str:
-        return os.path.join(self._app_dir(), "runs")
+        """Where recordings/exports are filed — the ACTIVE project's reports/."""
+        p = self._project_mgr.active if getattr(self, "_project_mgr", None) else None
+        return p.reports_dir if p is not None else os.path.join(self._app_dir(), "runs")
+
+    # -- projects (curation overlay) ----------------------------------------
+    def _setup_projects(self) -> None:
+        s = QSettings("ferroDAC", "ferroDAC")
+        root = s.value("project/root", "") or os.path.join(self._app_dir(), "projects")
+        self._project_mgr = ProjectManager(root)
+        self._project_mgr.ensure_default()
+        if not self._project_mgr.set_active(s.value("project/active", "")):
+            self._project_mgr.set_active(self._project_mgr.projects()[0].id)
+        s.setValue("project/root", root)
+        s.setValue("project/active", self._project_mgr.active.id)
+        self._migrate_legacy_session()
+        self._update_project_title()
+
+    def _migrate_legacy_session(self) -> None:
+        """Carry an existing global session.json into the Default project's
+        working layout, so upgrading users keep their dashboard (zero migration)."""
+        legacy = os.path.join(self._app_dir(), "session.json")
+        p = self._project_mgr.active
+        if p is not None and os.path.exists(legacy) and not os.path.exists(p.working_path):
+            import shutil
+            try:
+                shutil.copy2(legacy, p.working_path)
+            except Exception:                       # noqa: BLE001
+                pass
+
+    def _update_project_title(self) -> None:
+        p = self._project_mgr.active
+        self.setWindowTitle(f"ferroDAC — {p.name}" if p else "ferroDAC")
+        if getattr(self, "projects_panel", None) is not None:
+            self.projects_panel.refresh()
+
+    def _create_project(self, name: str) -> None:
+        p = self._project_mgr.create(name)
+        self.projects_panel.refresh()
+        self._switch_project(p.id)              # jump into the new project
+
+    def _reveal_project(self) -> None:
+        from qtpy.QtCore import QUrl
+        from qtpy.QtGui import QDesktopServices
+        p = self._project_mgr.active
+        if p is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(p.path))
+
+    def _switch_project(self, pid: str) -> None:
+        """Make `pid` active: persist the current project's working layout, then
+        swap the dashboard to the target's (devices stay — they're global)."""
+        mgr = self._project_mgr
+        if mgr.active is None or mgr.active.id == pid or mgr.get(pid) is None:
+            return
+        try:
+            self._write_session(mgr.active.working_path)   # save current
+        except Exception:                          # noqa: BLE001
+            pass
+        mgr.set_active(pid)
+        QSettings("ferroDAC", "ferroDAC").setValue("project/active", pid)
+        wp = mgr.active.working_path
+        layout = {}
+        existed = os.path.exists(wp)
+        if existed:
+            try:
+                with open(wp, encoding="utf-8") as fh:
+                    layout = json.load(fh).get("layout", {})
+            except Exception:                      # noqa: BLE001
+                layout = {}
+        self.dashboard.import_layout(layout)       # swap panels/routes/markers only
+        if not existed and not self.dashboard.panels():
+            self.dashboard.add_panel("chart")      # fresh project → a default chart
+        self._update_project_title()
+        self.statusBar().showMessage(f"Project: {mgr.active.name}", 5000)
 
     def _on_export(self):
         """File ▸ Export CSV — materialise the current TIMELINE WINDOW for ALL
@@ -1984,20 +2127,24 @@ class MainWindow(QMainWindow):
         if getattr(self, "_autosave_on", False):
             self._autosave_timer.start()
 
+    def _working_path(self) -> str:
+        """The active project's autosaved working layout."""
+        return self._project_mgr.active.working_path
+
     def _do_autosave(self):
         try:
-            self._write_session(os.path.join(self._app_dir(), "session.json"))
+            self._write_session(self._working_path())
         except Exception:
             pass
 
     def _init_session_persistence(self):
-        if os.path.exists(os.path.join(self._app_dir(), "session.json")):
+        if os.path.exists(self._working_path()):
             QTimer.singleShot(300, self._restore_and_enable_autosave)
         else:
             self._autosave_on = True
 
     def _restore_and_enable_autosave(self):
-        self.open_session(os.path.join(self._app_dir(), "session.json"))
+        self.open_session(self._working_path())
         self._autosave_on = True
         self._recover_open_recordings()         # finalise any crash-interrupted REC
 
@@ -2022,16 +2169,20 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded {os.path.basename(path)}", 4000)
 
     def _on_save(self):
+        # default into the active project's layouts/ — the Layout Explorer (Phase 3)
+        # just scans that folder.
+        start = self._project_mgr.active.layouts_dir if self._project_mgr.active else ""
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Layout", "", "ferroDAC layout (*.json)")
+            self, "Save Layout", start, "ferroDAC layout (*.json)")
         if path:
             if not path.endswith(".json"):
                 path += ".json"
             self.save_session(path)
 
     def _on_open(self):
+        start = self._project_mgr.active.layouts_dir if self._project_mgr.active else ""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Layout", "", "ferroDAC layout (*.json)")
+            self, "Open Layout", start, "ferroDAC layout (*.json)")
         if path:
             self.open_session(path)
 

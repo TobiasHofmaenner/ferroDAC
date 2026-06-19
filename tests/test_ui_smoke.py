@@ -16,6 +16,11 @@ pytest.importorskip("pyqtgraph")
 
 
 def _mainwindow(qapp):
+    import tempfile
+    from qtpy.QtCore import QSettings
+    s = QSettings("ferroDAC", "ferroDAC")          # redirect projects off real Documents
+    s.setValue("project/root", tempfile.mkdtemp())
+    s.setValue("project/active", "")
     from ferrodac.core.engine import Engine
     from ferrodac.core.manager import DeviceManager
     from ferrodac.core.registry import load_builtin_drivers
@@ -85,6 +90,24 @@ def test_waterfall_hold_vs_discrete(qapp):
     scans2 = [(1000.0 + i * 10, y) for i in range(5)] + [(1700.0 + i * 10, y) for i in range(5)]
     img2, _ = _time_binned(scans2, 1000, 1800, 400, hold=True)
     assert np.all(np.isnan(img2[int((1350 - 1000) / 800 * 400)]))
+
+
+@pytest.mark.ui
+def test_projects_default_create_switch(qapp):
+    w = _mainwindow(qapp)
+    try:
+        mgr = w._project_mgr
+        assert mgr.active.name == "Default"               # built-in home
+        assert w.windowTitle().endswith("Default")
+        w._create_project("Experiment 1")                  # create → auto-switch
+        assert mgr.active.name == "Experiment 1"
+        assert w.projects_panel._list.count() == 2
+        assert w._runs_dir().startswith(mgr.active.path)   # recordings file under it
+        did = next(p.id for p in mgr.projects() if p.name == "Default")
+        w._switch_project(did)
+        assert mgr.active.name == "Default"
+    finally:
+        w.close()
 
 
 @pytest.mark.ui
