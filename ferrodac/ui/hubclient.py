@@ -29,14 +29,16 @@ class HubController(QObject):
     _tag = Signal(object)                 # an incoming Marker from the hub
     status = Signal(str)                  # human status line
 
-    def __init__(self, dashboard, engine, manager, parent=None):
+    def __init__(self, dashboard, engine, manager, parent=None, store=None):
         super().__init__(parent)
         self.dashboard = dashboard
         self.engine = engine
         self.manager = manager
+        self._store = store              # local durable ZarrStore (for hub sync)
         self._agent = None
         self._viewer = None
         self._tagsync = None
+        self._sync = None                # store-and-forward SyncRunner (agent role)
         self._agent_unsub = None
         self._tags_wired = False
         self._local: set = set()
@@ -72,6 +74,13 @@ class HubController(QObject):
             self._agent.set_devices(self.manager.active_descriptors())
             self._agent_unsub = self.engine.subscribe(self._feed_agent)
             self.manager.active_changed.connect(self._on_active_changed)
+            # store-and-forward: upload the local durable store to the hub (live
+            # tails + backfill of anything recorded while offline). Headless —
+            # a background thread, never blocks acquisition (DESIGN §12.1).
+            if self._store is not None:
+                from ..net.sync import SyncRunner
+                self._sync = SyncRunner(self._store, addr)
+                self._sync.start()
         if as_viewer:
             self._viewer = HubViewer(
                 addr,
@@ -99,6 +108,9 @@ class HubController(QObject):
         except (TypeError, RuntimeError):
             pass
         self._unwire_tags()
+        if self._sync is not None:
+            self._sync.stop()
+            self._sync = None
         if self._agent is not None:
             self._agent.stop()
             self._agent = None

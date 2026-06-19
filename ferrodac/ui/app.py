@@ -1454,7 +1454,9 @@ class MainWindow(QMainWindow):
         self.dashboard.add_panel("chart")
 
         # networking: publish to / consume from a hub (optional, needs grpcio)
-        self.hub = HubController(self.dashboard, engine, manager, self)
+        self.hub = HubController(
+            self.dashboard, engine, manager, self,
+            store=self.store_writer.store if self.store_writer is not None else None)
         self.hub.status.connect(lambda msg: self.statusBar().showMessage(msg, 6000))
 
         # working-session autosave (tags/layout survive restart & crashes)
