@@ -72,6 +72,15 @@ class ZarrStore:
         except KeyError:
             return "scalar"
 
+    def source_meta(self, uuid):
+        """(name, unit, dtype) for a recorded source — so the dashboard can show
+        historic channels as routable ports even with no live device."""
+        try:
+            a = self._source(uuid).attrs
+            return a.get("name", ""), a.get("unit", ""), a.get("dtype", "scalar")
+        except KeyError:
+            return "", "", "scalar"
+
     def _source(self, uuid):
         return self.root[self._gname(uuid)]
 

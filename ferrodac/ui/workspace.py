@@ -194,10 +194,13 @@ class Dashboard(QObject):
     ports_changed = Signal()     # ports or routes changed (docks refresh)
 
     def __init__(self, area: WorkspaceArea, engine, manager, parent=None,
-                 data_bus=None):
+                 data_bus=None, historic_sources=None):
         super().__init__(parent)
         self.area = area
         self.engine = engine
+        # callable → [(key, name, unit, dtype)] of RECORDED channels, so historic
+        # data has routable ports for replay even with no live device.
+        self._historic_sources = historic_sources
         # Display + analysis read from the replay playback bus (so they can
         # re-experience history); control writes stay on the live engine. While
         # following-now the bus is a pass-through of the engine, so this is
@@ -639,6 +642,16 @@ class Dashboard(QObject):
             if key not in self._sources or not self._sources[key].online:
                 returning_src.append(key)
             self._sources[key] = port
+
+        # HISTORIC: recorded channels with no live device (and not already a
+        # placeholder) become offline, routable ports — so you can route stored
+        # data into displays/processors for replay after a restart.
+        if self._historic_sources:
+            for key, name, unit, dtype in self._historic_sources():
+                if key not in self._sources:
+                    self._sources[key] = SourcePort(
+                        key, name or key.rsplit("/", 1)[-1], dtype, unit,
+                        "recorded", "historic", online=False)
 
         # SINKS: same — a routed-into device sink that vanished stays as an
         # offline placeholder; a live port replaces it.

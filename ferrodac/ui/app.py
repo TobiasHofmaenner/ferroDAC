@@ -1449,7 +1449,8 @@ class MainWindow(QMainWindow):
         # the dashboard renders through the replay playback bus when available,
         # else straight off the engine (data plane disabled) — identical live.
         data_bus = self.replay.bus if self.replay is not None else engine
-        self.dashboard = Dashboard(self.workspace, engine, manager, data_bus=data_bus)
+        self.dashboard = Dashboard(self.workspace, engine, manager, data_bus=data_bus,
+                                   historic_sources=self._historic_sources)
         self.dashboard.add_panel("chart")
 
         # networking: publish to / consume from a hub (optional, needs grpcio)
@@ -1916,6 +1917,21 @@ class MainWindow(QMainWindow):
             bar.setVisible(True)
         bar.setValue(max(0, min(100, int(frac * 100))))
         QApplication.processEvents()
+
+    def _historic_sources(self):
+        """Recorded channels (key, name, unit, dtype) from the durable store, so
+        the dashboard can offer them as routable ports for replay after a restart
+        — even when no device is connected."""
+        if self.store_writer is None:
+            return []
+        st = self.store_writer.store
+        dtmap = {"scalar": "float", "trace": "trace", "bool": "bool"}
+        out = []
+        for key in st.sources():
+            name, unit, dtype = st.source_meta(key)
+            label = name if (name and name != key) else key.rsplit("/", 1)[-1]
+            out.append((key, label, unit, dtmap.get(dtype, "float")))
+        return out
 
     def _tc_live_tick(self) -> None:
         """Advance the head to now while following (live), and slide the live
