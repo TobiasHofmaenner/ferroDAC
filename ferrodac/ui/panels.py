@@ -170,7 +170,10 @@ class ChartPanel(Panel):
         self.plot.setLogMode(x=False, y=True)
         self.plot.addLegend(offset=(-10, 10))
         item = self.plot.getPlotItem()
-        item.setDownsampling(auto=True, mode="peak")
+        # Full-res data is kept; pyqtgraph only downsamples for DISPLAY (zoom in →
+        # full detail returns). 'mean' draws a clean averaged line zoomed out
+        # (vs 'peak' min/max which looks rough on noisy/oscillating signals).
+        item.setDownsampling(auto=True, mode="mean")
         item.setClipToView(True)
         lay.addWidget(self.plot)
         self._curves: dict = {}

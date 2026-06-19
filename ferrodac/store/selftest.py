@@ -67,6 +67,21 @@ def main() -> int:
     assert len(st2.query(uid, t0 - 10, tb[-1] + 10, max_points=500)[0]) > 0
     print("✓ persists: reopened read-only and re-queried")
 
+    # cross-platform group names: real device ids carry ':' (e.g. 'sim:gauge:A')
+    # which is ILLEGAL in Windows paths. The on-disk group dir must contain no
+    # reserved char, and write/read_raw/query must round-trip the colon key.
+    ck = "sim:gauge:A/p"
+    st.add_source(ck, name="Pirani", unit="mbar")
+    ct = time.time() + np.arange(200) * 0.2
+    st.append(ck, ct, 1e-6 * (1 + 0.1 * np.sin(ct)), epoch="c0")
+    gdir = ZarrStore._gname(ck)
+    assert not any(c in gdir for c in ':*?"<>|\\/'), gdir
+    assert gdir in os.listdir(root), (gdir, os.listdir(root))
+    rt, rv = st.read_raw(ck, ct[0] - 1, ct[-1] + 1)
+    assert len(rt) == 200 and len(st.query(ck, ct[0] - 1, ct[-1] + 1)[0]) > 0
+    assert st.read_raw("absent:dev/x", 0, 1)[0].size == 0   # missing → empty, no raise
+    print(f"✓ Windows-safe group names: ':' key → dir '{gdir}', read_raw round-trips")
+
     print("\nSTORE SELFTEST PASS")
     return 0
 

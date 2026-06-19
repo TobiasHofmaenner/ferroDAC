@@ -244,9 +244,10 @@ class ReplayController:
         if self.tc.following:
             # entering live, or the window changed by navigation (tail-drag) while live
             # → render the window once; a plain live tick just appends via _on_live.
-            if not self._was_following or navigated:
-                self._render(t0, t1)
-            self._was_following = True
+            need = (not self._was_following) or navigated
+            self._was_following = True               # set BEFORE render: if a render
+            if need:                                 # raises, we must NOT re-fire it
+                self._render(t0, t1)                 # every tick (that's a load loop)
             return
         self._was_following = False
         # parked: re-stream on a navigation, or each play-step (window moved); a plain

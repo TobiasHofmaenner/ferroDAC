@@ -19,6 +19,7 @@ The config/state stream is sparse, so it lives in the source's attrs as
 from __future__ import annotations
 
 import math
+from urllib.parse import quote
 
 import numpy as np
 import zarr
@@ -48,9 +49,14 @@ class ZarrStore:
     # -- sources -------------------------------------------------------------
     @staticmethod
     def _gname(key) -> str:
-        # Source keys can contain '/' (device/source); Zarr reads '/' as a group
-        # separator, so encode it (and '%') into one flat, reversible group name.
-        return str(key).replace("%", "%25").replace("/", "%2F")
+        # Zarr maps each group name to a directory, so the group name must be a
+        # valid filename on EVERY platform. Source keys carry '/' (device/source)
+        # and device ids like 'sim:gauge:A' carry ':' — and ':*?"<>|\\ are ILLEGAL
+        # in Windows paths. Percent-encode every non-safe char into one flat,
+        # reversible, cross-platform name (the original key is kept in attrs['key']).
+        # `quote(safe="")` leaves only [A-Za-z0-9_.-~] and maps '/'→%2F, '%'→%25
+        # exactly as the old scheme did, so colon-free keys keep the same group.
+        return quote(str(key), safe="")
 
     def add_source(self, uuid, name="", unit="", dtype="scalar"):
         g = self.root.require_group(self._gname(uuid))
@@ -195,7 +201,10 @@ class ZarrStore:
 
     # -- read (the resolver tier protocol) -----------------------------------
     def coverage(self, uuid) -> list:
-        g = self._source(uuid)
+        try:
+            g = self._source(uuid)
+        except KeyError:                             # source not in this store yet
+            return []
         out = []
         for key in g.attrs.get("epochs", []):
             a = g[key].attrs
@@ -207,7 +216,10 @@ class ZarrStore:
         """FULL-RESOLUTION raw samples in [t0,t1] across epochs — **no rollup,
         no downsampling** (the analysis path: downsampling would low-pass-filter
         the physics). Returns (t, v) in time order. The window bounds memory."""
-        g = self._source(uuid)
+        try:
+            g = self._source(uuid)
+        except KeyError:                             # source not in this store yet
+            return np.array([]), np.array([])
         ts, vs = [], []
         for key in g.attrs.get("epochs", []):
             eg = g[key]
@@ -264,7 +276,10 @@ class ZarrStore:
     def read_raw_trace(self, uuid, t0, t1) -> list:
         """FULL-RES trace scans in [t0,t1] as per-epoch blocks (the axis differs
         per epoch): list of (times[k], Y[k, m], x[m]). For analysis/replay."""
-        g = self._source(uuid)
+        try:
+            g = self._source(uuid)
+        except KeyError:                             # source not in this store yet
+            return []
         out = []
         for key in g.attrs.get("epochs", []):
             eg = g[key]; a = eg.attrs
@@ -297,7 +312,10 @@ class ZarrStore:
         Picks the coarsest pyramid level that still yields >= the requested
         points in the window, so a wide query reads a tiny tier rather than raw.
         Returns (x, y) with NaN gaps between epochs."""
-        g = self._source(uuid)
+        try:
+            g = self._source(uuid)
+        except KeyError:                             # source not in this store yet
+            return np.array([]), np.array([])
         epochs = [k for k in g.attrs.get("epochs", [])
                   if g[k].attrs.get("n", 0)
                   and g[k].attrs.get("modality") != "trace"   # scalar reader only
