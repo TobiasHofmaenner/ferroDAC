@@ -81,6 +81,45 @@ class ZarrStore:
         except KeyError:
             return "", "", "scalar"
 
+    # -- store-and-forward sync (epoch-incremental copy, DESIGN §12.1) --------
+    def epoch_lengths(self) -> dict:
+        """{(source_key, epoch): n} — per-epoch sample counts. The hub reports
+        these as the sync truth; the agent uploads any epoch tail the hub lacks."""
+        out = {}
+        for n in self.root.group_keys():
+            g = self.root[n]
+            key = g.attrs.get("key", n)
+            for ep in g.attrs.get("epochs", []):
+                out[(key, ep)] = int(g[ep].attrs.get("n", 0))
+        return out
+
+    def read_epoch(self, uuid, epoch, start, end) -> dict:
+        """Raw samples [start:end] of one epoch BY INDEX — the unsynced tail to
+        upload. Self-describing so the hub can apply it verbatim."""
+        eg = self._source(uuid)[epoch]
+        a = eg.attrs
+        if a.get("modality") == "trace":
+            return {"dtype": "trace", "t": np.asarray(eg["t"][start:end]),
+                    "y": np.asarray(eg["y"][start:end]), "x": np.asarray(eg["x"][:])}
+        return {"dtype": "scalar", "t": np.asarray(eg["t"][start:end]),
+                "v": np.asarray(eg["v"][start:end])}
+
+    def apply_chunk(self, uuid, epoch, chunk) -> int:
+        """Append a synced chunk (from read_epoch) at the same source/epoch — the
+        hub side of store-and-forward. Idempotent-friendly: returns the new n."""
+        if chunk["dtype"] == "trace":
+            self.add_source(uuid, dtype="trace")
+            t, Y, x = chunk["t"], chunk["y"], chunk["x"]
+            for i in range(len(t)):
+                self.append_trace(uuid, float(t[i]), x, Y[i], epoch=epoch)
+        else:
+            self.add_source(uuid)
+            self.append(uuid, chunk["t"], chunk["v"], epoch=epoch)
+        try:
+            return int(self._source(uuid)[epoch].attrs.get("n", 0))
+        except KeyError:
+            return 0
+
     def _source(self, uuid):
         return self.root[self._gname(uuid)]
 
