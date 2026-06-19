@@ -163,9 +163,9 @@ class ChartPanel(Panel):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.plot = pg.PlotWidget()
+        self.plot = pg.PlotWidget(
+            axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})  # absolute time
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.setLabel("bottom", "Time", units="s")
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot.setLogMode(x=False, y=True)
         self.plot.addLegend(offset=(-10, 10))
@@ -217,11 +217,10 @@ class ChartPanel(Panel):
         self._sync_markers()
 
     def _x(self, t):
-        if self.clock is not None:
-            return self.clock.rel(t)
-        if self._t0 is None:
-            self._t0 = t
-        return t - self._t0
+        # ABSOLUTE epoch seconds — plotted on a DateAxis (so a parked window shows
+        # real timestamps, identical to the Timeline preview, and there's no
+        # origin-rebasing to drift between platforms / live↔replay).
+        return t
 
     def _sync_markers(self):
         if self.markers is None:
@@ -296,17 +295,14 @@ class ChartPanel(Panel):
         entry = self._marker_lines.get(mid)
         if entry is None or self.markers is None:
             return
-        t = self.clock.abs(entry[0].value()) if self.clock else entry[0].value()
-        self.markers.move(mid, t)
+        self.markers.move(mid, entry[0].value())      # x is the absolute timestamp
 
     def _on_region_drag(self, mid):
         entry = self._marker_lines.get(mid)
         if entry is None or self.markers is None:
             return
-        x0, x1 = entry[0].getRegion()
-        t0 = self.clock.abs(x0) if self.clock else x0
-        t1 = self.clock.abs(x1) if self.clock else x1
-        self.markers.update(mid, t=min(t0, t1), t_end=max(t0, t1))
+        x0, x1 = entry[0].getRegion()                  # absolute timestamps
+        self.markers.update(mid, t=min(x0, x1), t_end=max(x0, x1))
 
     def add_source(self, key, source):
         if key in self._curves:

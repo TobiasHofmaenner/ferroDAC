@@ -250,10 +250,9 @@ class Dashboard(QObject):
     def trim_live(self, t0: float) -> None:
         """Drop live-accumulated data older than t0 (absolute) so the live window
         slides (slide) / is bounded at the anchor (grow). Auto-range follows."""
-        x_min = self.clock.rel(t0)
         for panel in self._panels.values():
             try:
-                panel.trim_to(x_min)
+                panel.trim_to(t0)                 # charts plot absolute time now
             except Exception:
                 pass
 
@@ -403,7 +402,7 @@ class Dashboard(QObject):
 
     def zoom_to(self, t0: float, t1: float) -> None:
         """Set every chart's x-range to a time window (for a recording region)."""
-        x0, x1 = self.clock.rel(t0), self.clock.rel(t1)
+        x0, x1 = t0, t1                            # charts plot absolute time now
         if x1 <= x0:
             x1 = x0 + 1.0
         for p in self._panels.values():
