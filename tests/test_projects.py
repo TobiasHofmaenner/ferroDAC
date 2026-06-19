@@ -5,7 +5,12 @@ import os
 import shutil
 import tempfile
 
-from ferrodac.core.projects import Project, ProjectManager, is_project
+from ferrodac.core.projects import (
+    HubProject,
+    Project,
+    ProjectManager,
+    is_project,
+)
 
 
 def test_create_and_layout_scan():
@@ -135,3 +140,59 @@ def test_missing_folder_is_dropped():
     p = ProjectManager(reg).track(os.path.join(d, "p1"), "P1")
     shutil.rmtree(p.path)                          # folder removed out from under us
     assert ProjectManager(reg).projects() == []    # reload silently drops it
+
+
+# -- hub projects (client side: synced records cached as mountable folders) --
+def _rec(pid, name, version=1, sources=None, windows=None, deleted=False):
+    return {"id": pid, "name": name, "version": version, "deleted": deleted,
+            "sources": sources or [], "windows": windows or [], "layouts": {}}
+
+
+def test_apply_hub_record_materialises_mountable_cache():
+    d = tempfile.mkdtemp()
+    mgr = ProjectManager(os.path.join(d, "projects.json"),
+                         hub_cache_dir=os.path.join(d, "hub_cache"))
+    p = mgr.apply_hub_record(_rec("h1", "Shared exp", sources=["mg/ch1"],
+                                  windows=[{"name": "bk", "t0": 1.0, "t1": 2.0}]))
+    assert isinstance(p, HubProject) and p.is_hub is True
+    assert mgr.get("h1") is p and p in mgr.projects()      # merged with local
+    # the cache is a REAL project folder (mountable / openable as local)
+    assert is_project(p.path) and Project(p.path).source_keys() == {"mg/ch1"}
+    assert [w["name"] for w in p.windows()] == ["bk"]
+
+
+def test_apply_hub_record_lww():
+    d = tempfile.mkdtemp()
+    mgr = ProjectManager(os.path.join(d, "projects.json"))
+    mgr.apply_hub_record(_rec("h1", "v1", version=1))
+    mgr.apply_hub_record(_rec("h1", "v3", version=3))         # newer wins
+    mgr.apply_hub_record(_rec("h1", "stale", version=2))      # older ignored
+    assert mgr.get("h1").name == "v3"
+    # a tombstone drops it
+    assert mgr.apply_hub_record(_rec("h1", "", version=4, deleted=True)) is None
+    assert mgr.get("h1") is None
+
+
+def test_clear_hub_falls_back_to_local_active():
+    d = tempfile.mkdtemp()
+    mgr = ProjectManager(os.path.join(d, "projects.json"))
+    local = mgr.track(os.path.join(d, "loc"), "Local")
+    mgr.apply_hub_record(_rec("h1", "Hub one"))
+    mgr.set_active("h1")
+    assert mgr.active.id == "h1"
+    mgr.clear_hub()                                  # disconnect → hub projects vanish
+    assert mgr.get("h1") is None and mgr.active.id == local.id   # fell back to local
+
+
+def test_hubproject_bump_and_share_to_hub():
+    d = tempfile.mkdtemp()
+    mgr = ProjectManager(os.path.join(d, "projects.json"))
+    h = mgr.apply_hub_record(_rec("h1", "Exp", version=2))
+    h.set_sources([{"key": "a/b"}])
+    rec = h.bump()                                   # a local edit → publish this
+    assert rec["version"] == 3 and rec["sources"] == ["a/b"]
+    # promote a local project: share_to_hub yields its record (same id)
+    local = mgr.track(os.path.join(d, "loc"), "Local")
+    local.add_window("w", 1.0, 5.0)
+    shared = mgr.share_to_hub(local.id)
+    assert shared["id"] == local.id and shared["windows"][0]["name"] == "w"

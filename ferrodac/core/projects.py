@@ -39,6 +39,8 @@ def is_project(path: str) -> bool:
 class Project:
     """One project folder: `project.json` (meta) + layouts/ docs/ reports/."""
 
+    is_hub = False                    # a LOCAL folder project (vs HubProject)
+
     def __init__(self, path: str):
         self.path = os.path.abspath(path)
         self.meta: dict = {}
@@ -298,6 +300,23 @@ class Project:
         return p
 
 
+class HubProject(Project):
+    """A project that lives on the HUB. The folder here is a local CACHE — a
+    one-way render of the hub's authoritative record (written by apply_record;
+    the hub wins). Edits publish a new RECORD (LWW by version); we never two-way
+    sync the folder. `is_hub` lets the UI badge it and the app republish on change.
+
+    `bump()` raises the version and returns the record to publish — the app calls
+    it after a local edit (curate/bookmark/layout) to push the change up."""
+
+    is_hub = True
+
+    def bump(self) -> dict:
+        self.meta["version"] = self.version + 1
+        self.save()
+        return self.to_record()
+
+
 class ProjectManager:
     """Tracks a REGISTRY of project folders (each may live anywhere on disk) and
     the active one. The registry — a list of folder paths + the active id — is the
@@ -309,9 +328,12 @@ class ProjectManager:
 
     DEFAULT_NAME = "Default"
 
-    def __init__(self, registry_path: str):
+    def __init__(self, registry_path: str, hub_cache_dir: str = None):
         self.registry_path = os.path.abspath(registry_path)
-        self._by_id: dict = {}        # id -> Project
+        self._by_id: dict = {}        # id -> Project (LOCAL folder projects)
+        self._hub_by_id: dict = {}    # id -> HubProject (synced from the hub, cached)
+        self._hub_cache = os.path.abspath(hub_cache_dir) if hub_cache_dir else \
+            os.path.join(os.path.dirname(self.registry_path) or ".", "hub_cache")
         self._active: str = ""
         self._load_registry()
 
@@ -346,23 +368,65 @@ class ProjectManager:
 
     reload = _load_registry                          # re-read the registry from disk
 
-    # -- queries -------------------------------------------------------------
+    # -- queries (LOCAL + HUB merged) ----------------------------------------
     def projects(self) -> list:
-        return sorted(self._by_id.values(), key=lambda p: p.name.lower())
+        return sorted(list(self._by_id.values()) + list(self._hub_by_id.values()),
+                      key=lambda p: p.name.lower())
 
     def get(self, pid: str):
-        return self._by_id.get(pid)
+        return self._by_id.get(pid) or self._hub_by_id.get(pid)
 
     @property
     def active(self):
-        return self._by_id.get(self._active)
+        return self.get(self._active)
 
     def set_active(self, pid: str) -> bool:
-        if pid in self._by_id:
+        if pid in self._by_id or pid in self._hub_by_id:
             self._active = pid
-            self._save_registry()
-            return True
+            self._save_registry()                    # hub ids are persisted too, but
+            return True                              # resolve to local on a cold start
         return False
+
+    # -- hub projects (synced records, cached as folders; the hub is truth) --
+    def apply_hub_record(self, rec: dict):
+        """Materialise/update a hub project from a wire record (LWW by version),
+        rendered into the local cache folder. Returns the HubProject, or None if it
+        was a tombstone (dropped). The caller refreshes the UI."""
+        pid = rec.get("id")
+        if not pid:
+            return None
+        if rec.get("deleted"):
+            self.drop_hub(pid)
+            return None
+        cur = self._hub_by_id.get(pid)
+        if cur is not None and int(rec.get("version") or 1) < cur.version:
+            return cur                               # stale — keep what we have
+        p = cur or HubProject(os.path.join(self._hub_cache, pid))
+        p.apply_record(rec)
+        self._hub_by_id[pid] = p
+        return p
+
+    def drop_hub(self, pid: str) -> None:
+        self._hub_by_id.pop(pid, None)
+        if self._active == pid:
+            self._active = ""                        # caller picks a local fallback
+
+    def clear_hub(self) -> None:
+        """Forget all hub projects (e.g. on disconnect — they're not offline). Fall
+        back to a local project if the active one was on the hub."""
+        self._hub_by_id.clear()
+        if self.active is None and self._by_id:
+            self.set_active(self.projects()[0].id)
+
+    def share_to_hub(self, pid: str) -> dict:
+        """Promote a LOCAL project to a hub project: returns the record to publish.
+        The local folder stays; once the hub echoes it back it appears as a hub
+        project too (same id), so the caller typically drops the local copy after."""
+        p = self._by_id.get(pid)
+        if p is None:
+            return {}
+        p.meta.setdefault("origin_id", "")
+        return p.to_record()
 
     # -- mutations -----------------------------------------------------------
     def track(self, path: str, name: str = None) -> Project:
