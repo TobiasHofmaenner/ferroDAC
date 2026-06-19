@@ -75,6 +75,11 @@ class Panel(QWidget):
         """The shared time window [t0,t1] moved (live growth / scrub). Time-axis
         panels (waterfall) override to map their Y range to it. Default: ignore."""
 
+    def zoom_time(self, t0: float, t1: float) -> None:
+        """Frame the view on the time window [t0,t1] (Zoom-to-recording / jump-to-
+        tag). Each panel knows which axis is time — charts set X, waterfalls set Y.
+        Default: no-op (panels without a time axis, e.g. a spectrum, ignore it)."""
+
     def state(self) -> dict:
         """Per-panel state to persist in a saved session (override as needed)."""
         return {}
@@ -350,6 +355,9 @@ class ChartPanel(Panel):
         self._sync_markers()                  # reposition tags at the new time base
         self.plot.enableAutoRange()           # a freshly-loaded slice auto-fits once;
         #                                       then the user's zoom/pan is respected
+
+    def zoom_time(self, t0, t1):
+        self.plot.setXRange(t0, t1, padding=0.05)     # time is the X axis here
 
     def trim_to(self, x_min):
         """Drop buffered points older than x_min so the live window slides instead
@@ -732,6 +740,9 @@ class WaterfallPanel(Panel):
             self._win = win
             self._render()                # grow/scrub → Y follows the timeline window
 
+    def zoom_time(self, t0, t1):
+        self.plot.setYRange(t0, t1, padding=0.05)     # time is the Y axis here (m/z is X)
+
     def trim_to(self, x_min):
         self._scans = [(t, y) for (t, y) in self._scans if t >= x_min]
 
@@ -965,6 +976,11 @@ class SpectrumWaterfallPanel(Panel):
         if win != self._win:
             self._win = win
             self._render_wf()
+
+    def zoom_time(self, t0, t1):
+        # time is the waterfall's Y axis; X (m/z) is shared/linked with the spectrum
+        # and must be left alone, so frame only the waterfall subplot's Y.
+        self.p_wf.setYRange(t0, t1, padding=0.05)
 
     def trim_to(self, x_min):
         self._scans = [(t, y) for (t, y) in self._scans if t >= x_min]

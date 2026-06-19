@@ -424,14 +424,14 @@ class Dashboard(QObject):
             self.ports_changed.emit()
 
     def zoom_to(self, t0: float, t1: float) -> None:
-        """Set every chart's x-range to a time window (for a recording region)."""
-        x0, x1 = t0, t1                            # charts plot absolute time now
-        if x1 <= x0:
-            x1 = x0 + 1.0
+        """Frame every panel on the time window [t0,t1] (Zoom-to-recording /
+        jump-to-tag). Each panel maps it to its OWN time axis — a chart sets X, a
+        waterfall sets Y (its X is m/z) — so we dispatch through zoom_time rather
+        than blindly setting X (which jammed epoch time onto the waterfall's m/z)."""
+        if t1 <= t0:
+            t1 = t0 + 1.0
         for p in self._panels.values():
-            plot = getattr(p, "plot", None)
-            if plot is not None:
-                plot.setXRange(x0, x1, padding=0.05)
+            p.zoom_time(t0, t1)
 
     def export_sources(self) -> dict:
         """ALL data-bearing sources (scalar + trace), routed or not — live,

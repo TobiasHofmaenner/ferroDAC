@@ -344,6 +344,32 @@ def test_autorange_ignores_markers(qapp):
 
 
 @pytest.mark.ui
+def test_zoom_time_uses_correct_axis(qapp):
+    """Zoom-to-recording / jump-to-tag frames each panel's OWN time axis: a chart's
+    X, a waterfall's Y (its X is m/z) — not blindly X everywhere (which jammed
+    epoch time onto the waterfall's m/z axis and missed the target)."""
+    from ferrodac.ui.panels import ChartPanel, WaterfallPanel
+    c = ChartPanel()
+    c.add_source("k", types.SimpleNamespace(name="p", label="p", unit="", dtype="float"))
+    c.feed([types.SimpleNamespace(key="k", t=1000.0 + i, value=1.0 + i, status=0)
+            for i in range(11)])
+    c.zoom_time(1002.0, 1006.0)
+    (cx0, cx1), _ = c.plot.getViewBox().viewRange()
+    assert cx0 <= 1002.5 and cx1 >= 1005.5            # chart: X framed to the time window
+    wf = WaterfallPanel()
+    wf.add_source("k", types.SimpleNamespace(name="spec", unit="", dtype="trace"))
+    wf._src_key = "k"
+    x = np.linspace(1, 50, 64)
+    t0 = 1_000_000.0
+    wf.set_window(t0, t0 + 600)
+    wf.feed([_scan(t0 + i * 30, x) for i in range(11)])
+    wf.zoom_time(t0 + 100, t0 + 300)
+    (wx0, wx1), (wy0, wy1) = wf.plot.getViewBox().viewRange()
+    assert wx1 < 1000                                 # m/z axis untouched (NOT epoch time)
+    assert abs(wy0 - (t0 + 100)) < 30 and abs(wy1 - (t0 + 300)) < 30   # Y framed to the window
+
+
+@pytest.mark.ui
 def test_waterfall_autorange_ignores_markers(qapp):
     """Same as the chart, but the waterfall carries markers on its TIME (Y) axis —
     a far tag/recording must not drag that axis open on "A"."""

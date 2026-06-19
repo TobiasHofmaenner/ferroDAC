@@ -2356,6 +2356,10 @@ class MainWindow(QMainWindow):
         if self.time_context is not None:
             w = max(1.0, self.time_context.width)
             self.time_context.park_window(m.t - w / 2, m.t + w / 2)
+            self.dashboard.zoom_to(*self.time_context.window)   # frame charts + waterfalls
+        else:
+            w = 60.0
+            self.dashboard.zoom_to(m.t - w / 2, m.t + w / 2)
 
     def _zoom_recording(self, mid):
         m = self.dashboard.markers.get(mid)
