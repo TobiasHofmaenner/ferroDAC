@@ -1,13 +1,24 @@
-# Milestone 1: just the hub. Storage (VictoriaMetrics / MinIO / Postgres) and the
-# FastAPI control plane are added as later milestones. Config is via env so the
-# same image lifts cleanly into k8s.
+# Milestone 1: the hub + its durable Zarr store. Remote object storage
+# (MinIO/S3) and the FastAPI control plane are later milestones. Config is via
+# env so the same image lifts cleanly into k8s.
+#
+# Build context is the repo root (..) so the image can COPY the shared `ferrodac`
+# store engine; the Dockerfile lives here under server/.
 services:
   hub:
-    build: .
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
     image: ferrodac-hub:dev
     container_name: ferrodac-hub
     ports:
-      - "50051:50051"          # gRPC (Ingest + Viewer)
+      - "50051:50051"          # gRPC (Ingest + Viewer + Store sync/read)
     environment:
       HUB_GRPC_ADDR: "0.0.0.0:50051"
+      HUB_STORE_DIR: "/data/hub.zarr"   # sync target + read tier (§12.1)
+    volumes:
+      - hub-data:/data         # persist the hub's store across restarts
     restart: unless-stopped
+
+volumes:
+  hub-data:

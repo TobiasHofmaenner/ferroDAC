@@ -1,6 +1,14 @@
 # ferroDAC hub — runtime dependencies (installed inside the hub container).
-# Milestone 1: just the gRPC data plane. FastAPI/REST + storage clients
-# (victoriametrics via HTTP, minio, asyncpg/psycopg) arrive in later milestones.
+# Milestone 1: the gRPC data plane + the durable Zarr store (sync target + read
+# tier, DESIGN §12.1). FastAPI/REST + remote object storage arrive later.
 
 grpcio>=1.60
-protobuf>=4.25
+# Match the generated contract stubs (gencode requires runtime >= 6.33.5).
+protobuf>=6.33.5
+
+# The shared store engine (ferrodac.store, copied into the image) runs the SAME
+# ZarrStore server-side, so local↔hub sync is a chunk copy. Keep these in step
+# with the app's top-level requirements.txt.
+numpy>=1.24
+zarr>=3.0
+numcodecs>=0.13

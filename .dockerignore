@@ -1,0 +1,26 @@
+# Build context for the hub image is the repo root (server/docker-compose.yml).
+# Keep the context lean: the Dockerfile only COPYs server/{gen,hub,tests,
+# requirements.txt} and the ferrodac/ package — everything else is noise.
+.git/
+.github/
+**/__pycache__/
+**/*.pyc
+*.egg-info/
+.venv/
+venv/
+node_modules/
+dist/
+build/
+*.zarr/
+*.zarr
+# the desktop app's packaging, docs, prototypes and GUI entry point aren't part
+# of the hub image
+packaging/
+docs/
+prototypes/
+main.py
+README.md
+server/README.md
+server/docker-compose.yml
+server/proto/
+server/.dockerignore
