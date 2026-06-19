@@ -39,6 +39,7 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -1611,12 +1612,14 @@ class ProjectExplorer(QWidget):
     curating channels acts on what's already there; nothing here copies data."""
 
     def __init__(self, project_provider, on_open_layout, on_reveal_path,
-                 on_curate, parent=None):
+                 on_curate, on_add_layout=None, active_layout=None, parent=None):
         super().__init__(parent)
         self._project = project_provider
         self._on_open_layout = on_open_layout
         self._on_reveal = on_reveal_path
         self._on_curate = on_curate
+        self._on_add_layout = on_add_layout
+        self._active_layout = active_layout or (lambda: None)   # () -> active path
         self._collapsed: set = set()
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1648,7 +1651,8 @@ class ProjectExplorer(QWidget):
             return
         self._label.setText(p.name)
         self._add_group("Layouts", self._layout_cards(p),
-                        "No saved layouts yet.\nFile ▸ Save Layout files one here.")
+                        "No layouts yet.\n＋ Add one — it then autosaves as you work.",
+                        action=("＋ Add", self._on_add_layout) if self._on_add_layout else None)
         self._add_group("Channels", self._channel_cards(p),
                         "No channels curated — the Sources panel shows them all.\n"
                         "Curate to focus this project.",
@@ -1703,12 +1707,18 @@ class ProjectExplorer(QWidget):
 
     def _layout_cards(self, p):
         cards = []
+        active = self._active_layout()
         for name in p.layouts():
+            path = p.layout_path(name)
             n = p.layout_panels(name)
             sub = f"{n} panel{'' if n == 1 else 's'}" if n else "layout"
-            cards.append(self._card(
-                name, sub,
-                [("Open", lambda path=p.layout_path(name): self._on_open_layout(path))]))
+            is_active = active is not None and os.path.abspath(path) == os.path.abspath(active)
+            if is_active:
+                sub += "  ·  autosaving"             # this one tracks live edits
+                actions = []                          # already the live layout
+            else:
+                actions = [("Open", lambda path=path: self._on_open_layout(path))]
+            cards.append(self._card(("● " if is_active else "") + name, sub, actions))
         return cards
 
     def _channel_cards(self, p):
@@ -1831,6 +1841,7 @@ class MainWindow(QMainWindow):
                                             Qt.QueuedConnection)
 
         # working-LAYOUT autosave (per-project working.json) — layout only now
+        self._active_layout_path = None    # a named layout open → autosave to it too
         self._autosave_on = False
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
@@ -1902,8 +1913,10 @@ class MainWindow(QMainWindow):
         # the active project's contents — layouts, curated channels, recordings —
         # scanned from disk and shown as format-aware cards (Phase 3b).
         self.project_explorer = ProjectExplorer(
-            lambda: self._project_mgr.active, on_open_layout=self.open_session,
-            on_reveal_path=self._reveal_path, on_curate=self._curate_sources)
+            lambda: self._project_mgr.active, on_open_layout=self._open_layout,
+            on_reveal_path=self._reveal_path, on_curate=self._curate_sources,
+            on_add_layout=self._on_add_layout,
+            active_layout=lambda: self._active_layout_path)
         self.explorer_dock = QDockWidget("Project", self)
         self.explorer_dock.setObjectName("ProjectExplorerDock")
         self.explorer_dock.setWidget(self.project_explorer)
@@ -1970,7 +1983,7 @@ class MainWindow(QMainWindow):
         filemenu = self.menuBar().addMenu("&File")
         filemenu.addAction("Export CSV…", self._on_export)
         filemenu.addSeparator()
-        filemenu.addAction("Save Layout…", self._on_save)
+        filemenu.addAction("Add Layout…", self._on_add_layout)
         filemenu.addAction("Open Layout…", self._on_open)
 
         view = self.menuBar().addMenu("&View")
@@ -2270,6 +2283,7 @@ class MainWindow(QMainWindow):
         except Exception:                          # noqa: BLE001
             pass
         mgr.set_active(pid)                               # persists to the registry
+        self._active_layout_path = None                   # not in a named layout yet
         self.dashboard.markers.default_projects = [pid]   # new tags file here
         self._apply_tag_lens()                            # and the view filters to it
         self._apply_source_lens()                         # follow the channel lens too
@@ -2566,6 +2580,9 @@ class MainWindow(QMainWindow):
     def _do_autosave(self):
         try:
             self._write_session(self._working_path())
+            # a named layout open → it tracks live edits too (layouts autosave)
+            if self._active_layout_path:
+                self._write_session(self._active_layout_path)
         except Exception:
             pass
 
@@ -2600,23 +2617,41 @@ class MainWindow(QMainWindow):
         self._remember(path)
         self.statusBar().showMessage(f"Loaded {os.path.basename(path)}", 4000)
 
-    def _on_save(self):
-        # default into the active project's layouts/ — the Layout Explorer (Phase 3)
-        # just scans that folder.
-        start = self._project_mgr.active.layouts_dir if self._project_mgr.active else ""
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Layout", start, "ferroDAC layout (*.json)")
-        if path:
-            if not path.endswith(".json"):
-                path += ".json"
-            self.save_session(path)
+    def _open_layout(self, path: str) -> None:
+        """Make `path` the active named layout: load it AND autosave edits back to
+        it from now on (a layout behaves like a live document, not a snapshot)."""
+        self._active_layout_path = path
+        self.open_session(path)
+        self._refresh_explorer()                   # mark the active layout
+
+    def _on_add_layout(self):
+        """Create a new named layout in the project's layouts/ — name it, the file
+        is made for you (no file picker), and it becomes the live, autosaving one."""
+        p = self._project_mgr.active
+        if p is None:
+            return
+        name, ok = QInputDialog.getText(self, "Add layout", "Layout name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        path = p.layout_path(name)
+        if os.path.exists(path) and QMessageBox.question(
+                self, "Replace layout?",
+                f"A layout named “{name}” already exists. Replace it?") \
+                != QMessageBox.Yes:
+            return
+        self._write_session(path)                  # snapshot the current dashboard
+        self._active_layout_path = path            # …then keep it live (autosaves)
+        self._remember(path)
+        self._refresh_explorer()
+        self.statusBar().showMessage(f"Added layout “{name}” — it now autosaves", 5000)
 
     def _on_open(self):
         start = self._project_mgr.active.layouts_dir if self._project_mgr.active else ""
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Layout", start, "ferroDAC layout (*.json)")
         if path:
-            self.open_session(path)
+            self._open_layout(path)
 
     @staticmethod
     def _remember(path: str) -> None:

@@ -172,6 +172,35 @@ def test_project_sets_source_lens(qapp):
 
 
 @pytest.mark.ui
+def test_layout_add_and_autosave(qapp):
+    import os
+    import tempfile
+    w = _mainwindow(qapp)
+    try:
+        p = w._project_mgr.active
+        # _on_add_layout writes a named file (no picker) + makes it the live one
+        path = p.layout_path("Overview")
+        w._write_session(path)
+        w._active_layout_path = path
+        assert "Overview" in p.layouts()
+        # a named layout open → autosave writes IT too, not just working.json
+        os.remove(path)
+        w._do_autosave()
+        assert os.path.exists(path) and os.path.exists(p.working_path)
+        # opening another layout re-binds the live, autosaving target
+        other = p.layout_path("Other")
+        w._write_session(other)
+        w._open_layout(other)
+        assert w._active_layout_path == other
+        # switching projects drops the binding (the new one isn't in a layout yet)
+        q = w._project_mgr.track(tempfile.mkdtemp(), "Q")
+        w._switch_project(q.id)
+        assert w._active_layout_path is None
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_project_explorer_groups(qapp):
     import json
     import os
