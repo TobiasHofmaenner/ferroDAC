@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import random
+import socket
 import time
 
 import numpy as np
@@ -24,6 +25,11 @@ from ..core.device import (
     Source,
 )
 from ..core.trace import Trace
+
+# These dev/test devices exist on every bench, so their names collide in a shared
+# hub. Suffix the host so several agents' sim devices stay tellable apart. (Data
+# is already host-safe — the per-host registry gives each a unique UUID.)
+_HOST = socket.gethostname().split(".")[0] or "host"
 
 
 class FakeGaugeController(BaseDevice):
@@ -58,7 +64,7 @@ class FakeGaugeController(BaseDevice):
             ]
             out.append(cls(
                 instance_id=f"sim:gauge:{tag}",
-                name=f"Sim Gauge Ctrl {tag}",
+                name=f"Sim Gauge Ctrl {tag} ({_HOST})",
                 interface=Interface(kind="sim", params={"port": f"SIM{tag}"}),
                 sources=sources,
                 sinks=sinks,
@@ -98,7 +104,7 @@ class FakeThermometer(BaseDevice):
         for tag in cls._UNITS:
             out.append(cls(
                 instance_id=f"sim:temp:{tag}",
-                name=f"Sim Thermometer {tag}",
+                name=f"Sim Thermometer {tag} ({_HOST})",
                 interface=Interface(kind="sim", params={"slave": tag}),
                 sources=[Source(id="temp", name="Temperature", unit="°C")],
                 rate=RateControl(mode=RateMode.FIXED, native_hz=1.0),
@@ -147,7 +153,7 @@ class FakePowerSupply(BaseDevice):
         ]
         return [cls(
             instance_id="sim:psu:1",
-            name="Sim Power Supply",
+            name=f"Sim Power Supply ({_HOST})",
             interface=Interface(kind="sim", params={"addr": "PSU1"}),
             sources=sources,
             sinks=sinks,
@@ -198,7 +204,7 @@ class FakeRGA(BaseDevice):
     def discover(cls):
         return [cls(
             instance_id="sim:rga:1",
-            name="Sim RGA",
+            name=f"Sim RGA ({_HOST})",
             interface=Interface(kind="sim", params={"addr": "RGA1"}),
             sources=[Source(id="spectrum", name="Mass spectrum", unit="mbar",
                             modality=Modality.WAVEFORM, dtype="trace",
