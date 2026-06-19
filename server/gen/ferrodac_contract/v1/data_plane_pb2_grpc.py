@@ -458,6 +458,164 @@ class Tags:
             _registered_method=True)
 
 
+class ProjectsStub:
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.PublishProject = channel.unary_unary(
+                '/ferrodac_contract.v1.Projects/PublishProject',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.PublishProjectRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectAck.FromString,
+                _registered_method=True)
+        self.DeleteProject = channel.unary_unary(
+                '/ferrodac_contract.v1.Projects/DeleteProject',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DeleteProjectRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectAck.FromString,
+                _registered_method=True)
+        self.WatchProjects = channel.unary_stream(
+                '/ferrodac_contract.v1.Projects/WatchProjects',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchProjectsRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectEvent.FromString,
+                _registered_method=True)
+
+
+class ProjectsServicer:
+    """Missing associated documentation comment in .proto file."""
+
+    def PublishProject(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteProject(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WatchProjects(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_ProjectsServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'PublishProject': grpc.unary_unary_rpc_method_handler(
+                    servicer.PublishProject,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.PublishProjectRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectAck.SerializeToString,
+            ),
+            'DeleteProject': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteProject,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DeleteProjectRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectAck.SerializeToString,
+            ),
+            'WatchProjects': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchProjects,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchProjectsRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectEvent.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'ferrodac_contract.v1.Projects', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('ferrodac_contract.v1.Projects', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class Projects:
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def PublishProject(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Projects/PublishProject',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.PublishProjectRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteProject(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Projects/DeleteProject',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.DeleteProjectRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchProjects(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ferrodac_contract.v1.Projects/WatchProjects',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchProjectsRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class StoreStub:
     """Missing associated documentation comment in .proto file."""
 

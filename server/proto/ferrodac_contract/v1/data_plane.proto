@@ -355,6 +355,76 @@ service Tags {
 }
 
 // --------------------------------------------------------------------------- //
+//  Projects — a SHARED EXPERIMENT INDEX (DESIGN §8.1), NOT a file store.
+// --------------------------------------------------------------------------- //
+// A hub project is the same weight class as a Tag: a small, structured, reliable,
+// EDITABLE record — meta + the curated channel lens + bookmarks + named-layout
+// blobs — merged last-write-wins by (id, version) with tombstones. The hub is
+// authoritative and persists them (JSON in M1; SQLite/Postgres later, behind the
+// same seam). It is OPT-IN: a client deliberately shares a project — projects do
+// NOT auto-sync like tags. The heavy data is NOT here — recordings ride the Store
+// data plane and the project only *references* them (never a folder to sync). Same
+// role-independence (any client may publish/watch) and ADDITIVE-ness as Tags.
+
+message SavedWindow {            // a bookmark: a named time span
+  string name = 1;
+  double t0 = 2;
+  double t1 = 3;
+}
+
+message Project {
+  string id = 1;                 // UUID — merge/edit/delete across instances by id
+  string name = 2;
+  string description = 3;
+  string created = 4;            // ISO-8601 UTC
+  string modified = 5;           // ISO-8601 UTC
+  string origin_id = 6;          // who created/owns it (audit)
+  uint32 version = 7;            // LWW: higher wins on merge by id
+  bool deleted = 8;              // tombstone — propagates a delete across peers
+  repeated string sources = 9;   // curated channel lens (source keys)
+  repeated SavedWindow windows = 10;   // bookmarks (saved time-windows)
+  map<string, string> layouts = 11;    // named layout -> its session JSON (a blob)
+}
+
+message PublishProjectRequest {
+  string token = 1;              // reserved auth seam (allow-all in M1)
+  Project project = 2;
+}
+
+message DeleteProjectRequest {
+  string token = 1;
+  string id = 2;
+  uint32 version = 3;            // the tombstone's version (must beat the live one)
+  string origin_id = 4;          // who deleted it (audit)
+}
+
+message ProjectAck {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message WatchProjectsRequest {
+  string token = 1;              // reserved auth seam
+}
+
+message ProjectEvent {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    ADDED = 1;
+    UPDATED = 2;
+    REMOVED = 3;                 // project.deleted = true (carries the tombstone)
+  }
+  Type type = 1;
+  Project project = 2;
+}
+
+service Projects {
+  rpc PublishProject(PublishProjectRequest) returns (ProjectAck);
+  rpc DeleteProject(DeleteProjectRequest) returns (ProjectAck);
+  rpc WatchProjects(WatchProjectsRequest) returns (stream ProjectEvent);
+}
+
+// --------------------------------------------------------------------------- //
 //  Store service — durable historic data (DESIGN §7.4 / §12.1).
 //
 //  One contract, two directions, both thin wrappers over the hub's ZarrStore:

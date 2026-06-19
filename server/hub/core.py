@@ -55,7 +55,8 @@ class Subscriber:
 
 
 class Hub:
-    def __init__(self, tags_path: "str | None" = None) -> None:
+    def __init__(self, tags_path: "str | None" = None,
+                 projects_dir: "str | None" = None) -> None:
         self._devices: dict[str, pb.DeviceDescriptor] = {}
         self._subs: set[Subscriber] = set()
         self._watchers: set[asyncio.Queue] = set()
@@ -68,6 +69,17 @@ class Hub:
         self._tags_path = tags_path
         self._save_pending = False
         self._load_tags()
+        # Projects (DESIGN §8.1): a SHARED EXPERIMENT INDEX — same reliable, LWW,
+        # tombstoned model as tags (NOT a file store). But the hub stores each one
+        # as a REAL project FOLDER (the same layout as a local project, written by
+        # ferrodac.core.projects.Project) under `projects_dir`, so the dir is
+        # mountable and a project opens as-if-local. The wire record is just the
+        # transport; the folder is the source of truth. `_projects` is the RAM
+        # fan-out cache (id -> record), rebuilt by scanning the folders on load.
+        self._projects: dict[str, pb.Project] = {}
+        self._project_watchers: set[asyncio.Queue] = set()
+        self._projects_dir = projects_dir
+        self._load_projects()
 
     # -- catalog -------------------------------------------------------------
     def snapshot(self) -> list:
@@ -206,3 +218,94 @@ class Hub:
     def _emit_tag(self, event: pb.TagEvent) -> None:
         for q in self._tag_watchers:
             q.put_nowait(event)                  # unbounded queue — tags are reliable
+
+    # -- project storage (FOLDERS, via ferrodac.core.projects — mountable) ---
+    def _load_projects(self) -> None:
+        if not self._projects_dir or not os.path.isdir(self._projects_dir):
+            return
+        try:
+            from ferrodac.core.projects import Project, is_project
+        except Exception as exc:                     # noqa: BLE001
+            log.warning("projects disabled (no ferrodac.core.projects): %s", exc)
+            return
+        for name in sorted(os.listdir(self._projects_dir)):
+            d = os.path.join(self._projects_dir, name)
+            if not is_project(d):
+                continue
+            try:
+                rec = json_format.ParseDict(Project(d).to_record(), pb.Project())
+                if rec.id:
+                    self._projects[rec.id] = rec
+            except Exception as exc:                 # noqa: BLE001
+                log.warning("could not load project %s: %s", d, exc)
+        log.info("loaded %d hub project(s) from %s",
+                 len(self._projects), self._projects_dir)
+
+    def _write_project_folder(self, project: pb.Project) -> None:
+        if not self._projects_dir:
+            return
+        try:
+            from ferrodac.core.projects import Project
+            rec = json_format.MessageToDict(project, preserving_proto_field_name=True)
+            Project(os.path.join(self._projects_dir, project.id)).apply_record(rec)
+        except Exception as exc:                     # noqa: BLE001
+            log.warning("could not write project folder %s: %s", project.id, exc)
+
+    def _remove_project_folder(self, project_id: str) -> None:
+        if not self._projects_dir:
+            return
+        import shutil
+        try:
+            shutil.rmtree(os.path.join(self._projects_dir, project_id))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:                     # noqa: BLE001
+            log.warning("could not remove project folder %s: %s", project_id, exc)
+
+    # -- projects (shared index; LWW by id+version, tombstoned) --------------
+    def project_snapshot(self) -> list:
+        """Every project the hub holds, plus any session tombstones, so a peer
+        converging mid-session sees deletes it missed. (Tombstones aren't durable —
+        a deleted project is just an absent folder after a restart.)"""
+        return list(self._projects.values())
+
+    def add_project_watcher(self, q: "asyncio.Queue") -> None:
+        self._project_watchers.add(q)
+
+    def remove_project_watcher(self, q: "asyncio.Queue") -> None:
+        self._project_watchers.discard(q)
+
+    def publish_project(self, project: pb.Project) -> bool:
+        """Merge a project, last-write-wins on version, persisting it as a real
+        project FOLDER. Returns True if it changed our state (and was fanned out)."""
+        cur = self._projects.get(project.id)
+        if cur is not None and project.version < cur.version:
+            return False                         # stale
+        if cur is not None and project.version == cur.version \
+                and not project.deleted and not cur.deleted:
+            return False                         # idempotent same-version upsert
+        self._projects[project.id] = project
+        if project.deleted:
+            self._remove_project_folder(project.id)
+            etype = pb.ProjectEvent.REMOVED
+        else:
+            self._write_project_folder(project)
+            etype = pb.ProjectEvent.ADDED if cur is None else pb.ProjectEvent.UPDATED
+        self._emit_project(pb.ProjectEvent(type=etype, project=project))
+        return True
+
+    def delete_project(self, project_id: str, version: int, origin_id: str = "") -> bool:
+        """Tombstone a project (removes its folder). The tombstone's version must
+        beat the live one to win LWW; bump it if the caller's is too low."""
+        cur = self._projects.get(project_id)
+        if cur is not None and version <= cur.version:
+            version = cur.version + 1
+        tomb = pb.Project(id=project_id, version=version, deleted=True,
+                          origin_id=origin_id)
+        if cur is not None:
+            tomb.name = cur.name                 # carry context into the audit event
+        return self.publish_project(tomb)
+
+    def _emit_project(self, event: pb.ProjectEvent) -> None:
+        for q in self._project_watchers:
+            q.put_nowait(event)                  # unbounded — projects are reliable

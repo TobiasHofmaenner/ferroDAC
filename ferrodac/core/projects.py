@@ -211,6 +211,73 @@ class Project:
         fav["windows"] = [w for w in (fav.get("windows") or []) if w.get("name") != name]
         self.save()
 
+    @property
+    def version(self) -> int:
+        return int(self.meta.get("version", 1))
+
+    # -- portable record (folder <-> wire, for hub sync) ---------------------
+    # A plain proto-shaped dict of the SHAREABLE content (meta + lens + bookmarks
+    # + named-layout blobs). Proto-free on purpose: the hub/client convert
+    # dict<->pb.Project, but the FOLDER stays the source of truth either side — so
+    # a hub project is the same mountable layout as a local one (DESIGN §8.1).
+    def to_record(self) -> dict:
+        layouts = {}
+        for name in self.layouts():
+            try:
+                with open(self.layout_path(name), encoding="utf-8") as fh:
+                    layouts[name] = fh.read()
+            except Exception:                        # noqa: BLE001  unreadable → skip
+                pass
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "created": self.meta.get("created", ""),
+            "modified": self.meta.get("modified", ""),
+            "origin_id": self.meta.get("origin_id", ""),
+            "version": self.version,
+            "deleted": False,
+            "sources": list(self.source_keys()),
+            "windows": [{"name": w.get("name", ""),
+                         "t0": float(w.get("t0") or 0.0),
+                         "t1": float(w.get("t1") or 0.0)} for w in self.windows()],
+            "layouts": layouts,
+        }
+
+    def apply_record(self, rec: dict) -> None:
+        """Materialise a record into THIS folder (creating it) — meta, the channel
+        lens, bookmarks and the named-layout files. Used by the hub to write a
+        published project as a real, mountable project folder."""
+        os.makedirs(self.path, exist_ok=True)
+        self.meta.setdefault("ferrodac_project", PROJECT_VERSION)
+        self.meta["id"] = rec.get("id") or self.meta.get("id") or str(uuid.uuid4())
+        self.meta["name"] = rec.get("name") or self.meta.get("name") or "project"
+        self.meta["description"] = rec.get("description", "")
+        self.meta["origin_id"] = rec.get("origin_id", "")
+        self.meta["version"] = int(rec.get("version", 1))
+        if rec.get("created"):
+            self.meta["created"] = rec["created"]
+        self.meta.setdefault("favorites", {})["windows"] = [
+            {"name": w.get("name", ""), "t0": w.get("t0"), "t1": w.get("t1")}
+            for w in (rec.get("windows") or [])]
+        self.set_sources([{"key": k} for k in (rec.get("sources") or [])])
+        self.save()                                  # project.json (meta)
+        # named layouts → layouts/*.json; drop any the record no longer carries
+        wanted = rec.get("layouts") or {}
+        keep = {_safe(n) for n in wanted}
+        for stale in self.layouts():
+            if _safe(stale) not in keep:
+                try:
+                    os.remove(self.layout_path(stale))
+                except OSError:
+                    pass
+        for name, blob in wanted.items():
+            try:
+                with open(self.layout_path(name), "w", encoding="utf-8") as fh:
+                    fh.write(blob)
+            except Exception:                        # noqa: BLE001
+                pass
+
     # -- creation ------------------------------------------------------------
     @classmethod
     def create(cls, path: str, name: str, description: str = "") -> "Project":

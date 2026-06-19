@@ -136,6 +136,38 @@ class TagsServicer(rpc.TagsServicer):
             self.hub.remove_tag_watcher(q)
 
 
+class ProjectsServicer(rpc.ProjectsServicer):
+    """Projects — a shared experiment index (DESIGN §8.1). Role-independent and
+    structured exactly like Tags: reliable own channel, LWW merge, tombstones,
+    snapshot-then-live watch. NOT a file store (recordings stay in the data plane)."""
+
+    def __init__(self, hub: Hub):
+        self.hub = hub
+
+    async def PublishProject(self, request, context):  # noqa: N802
+        changed = self.hub.publish_project(request.project)
+        return pb.ProjectAck(ok=True, detail="" if changed else "stale/duplicate")
+
+    async def DeleteProject(self, request, context):  # noqa: N802
+        self.hub.delete_project(request.id, request.version, request.origin_id)
+        return pb.ProjectAck(ok=True)
+
+    async def WatchProjects(self, request, context):  # noqa: N802
+        q: asyncio.Queue = asyncio.Queue()       # unbounded — projects are reliable
+        self.hub.add_project_watcher(q)          # register BEFORE snapshot (no gap)
+        try:
+            for project in self.hub.project_snapshot():
+                etype = (pb.ProjectEvent.REMOVED if project.deleted
+                         else pb.ProjectEvent.ADDED)
+                yield pb.ProjectEvent(type=etype, project=project)
+            while True:
+                yield await q.get()
+        except asyncio.CancelledError:      # client/stream went away — clean end
+            pass
+        finally:
+            self.hub.remove_project_watcher(q)
+
+
 # --------------------------------------------------------------------------- #
 #  Store (DESIGN §7.4 / §12.1) — durable historic data, both directions:
 #  sync (agent→hub: GetSyncState + PushChunk) and read (client→hub: as a

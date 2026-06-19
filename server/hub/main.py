@@ -15,7 +15,13 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
 from .core import HUB_VERSION, Hub
-from .service import IngestServicer, StoreServicer, TagsServicer, ViewerServicer
+from .service import (
+    IngestServicer,
+    ProjectsServicer,
+    StoreServicer,
+    TagsServicer,
+    ViewerServicer,
+)
 
 log = logging.getLogger("hub")
 
@@ -42,6 +48,7 @@ def build_server(hub: "Hub | None" = None, store=None
     rpc.add_IngestServicer_to_server(IngestServicer(hub), server)
     rpc.add_ViewerServicer_to_server(ViewerServicer(hub), server)
     rpc.add_TagsServicer_to_server(TagsServicer(hub), server)
+    rpc.add_ProjectsServicer_to_server(ProjectsServicer(hub), server)
     rpc.add_StoreServicer_to_server(StoreServicer(store), server)
     return server, hub
 
@@ -56,8 +63,19 @@ def _tags_path():
         if store_dir else None
 
 
+def _projects_dir():
+    """Where the hub stores project FOLDERS (mountable, same layout as local).
+    Beside the Zarr store by default."""
+    p = os.environ.get("HUB_PROJECTS_DIR")
+    if p:
+        return p
+    store_dir = os.environ.get("HUB_STORE_DIR")
+    return os.path.join(os.path.dirname(store_dir.rstrip("/")), "projects") \
+        if store_dir else None
+
+
 async def serve() -> None:
-    hub = Hub(tags_path=_tags_path())
+    hub = Hub(tags_path=_tags_path(), projects_dir=_projects_dir())
     server, _ = build_server(hub=hub, store=_open_store(os.environ.get("HUB_STORE_DIR")))
     addr = os.environ.get("HUB_GRPC_ADDR", "0.0.0.0:50051")
     server.add_insecure_port(addr)
