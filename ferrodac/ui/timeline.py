@@ -191,7 +191,7 @@ class Ribbon(pg.PlotWidget):
     """Per-source coverage tracks + a draggable window region + playhead."""
 
     windowPreview = QtCore.Signal(float, float)         # live, during a drag (cheap)
-    windowChanged = QtCore.Signal(float, float, bool)   # committed on release (heavy)
+    windowChanged = QtCore.Signal(float, float, str)    # release: mode front|back|move
     recenter = QtCore.Signal(float)
 
     # the window can't be dragged narrower than this fraction of the VISIBLE span,
@@ -329,12 +329,21 @@ class Ribbon(pg.PlotWidget):
         self.windowPreview.emit(a, b)
 
     def _on_region_done(self):
-        # released: commit (which side moved decides park-head vs resize-tail)
+        # released: classify the drag so the commit is right. Dragging the WHOLE
+        # region keeps its width (both edges move together) → "move" the window;
+        # dragging one edge changes the width → "front" (head) or "back" (tail).
         a, b = self.region.getRegion()
         pa, pb = self._region_ref
-        front_moved = abs(b - pb) >= abs(a - pa)
+        tol = 1e-6 * max(1.0, abs(pb - pa))
+        moved = abs(a - pa) > tol or abs(b - pb) > tol
+        if moved and abs((b - a) - (pb - pa)) <= tol:
+            mode = "move"
+        elif abs(b - pb) >= abs(a - pa):
+            mode = "front"
+        else:
+            mode = "back"
         self._region_ref = (a, b)
-        self.windowChanged.emit(a, b, front_moved)
+        self.windowChanged.emit(a, b, mode)
 
     def set_window(self, a, b):
         self.region.blockSignals(True)
@@ -652,16 +661,20 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.t0, self.t1 = self._preview_win
         self._refresh()                       # downsampled query — cheap
 
-    def _on_window(self, a, b, front_moved):
-        """Drag RELEASED → commit to the shared clock. Back-edge → resize the tail
-        (stay live/playing); front-edge → park the head. This is the one heavy
-        step: the main analysis re-streams the full-res slice (with progress)."""
+    def _on_window(self, a, b, mode):
+        """Drag RELEASED → commit to the shared clock. Tail edge → resize the back
+        (stay live/playing); head edge → park the head; whole window → translate it
+        to [a,b]. The one heavy step: the main analysis re-streams the slice."""
         self._dragging = False
         if self._syncing:
             return
-        if not front_moved:
+        if mode == "move":
+            self.tc.park_window(a, b)         # translate: pin BOTH edges to [a,b]
+            #                                   (park alone would keep the old anchor
+            #                                   in grow mode → window collapses)
+        elif mode == "back":
             self.tc.resize_back(a)            # tail resize
-        else:
+        else:                                 # "front"
             self.tc.width = max(1e-3, b - a)
             self.tc.park(b)                   # head jump → full-res re-stream
 

@@ -326,6 +326,34 @@ def test_jump_to_tag_parks_centered(qapp):
 
 
 @pytest.mark.ui
+def test_ribbon_whole_window_drag_translates(qapp):
+    """Dragging the WHOLE region commits as a translation ("move"), not a head
+    park — so the window keeps its width instead of collapsing onto one line."""
+    from ferrodac.ui.timeline import Ribbon
+    r = Ribbon(["k"], {"k": []}, 0.0, 1000.0)
+    r.getPlotItem().getViewBox().setXRange(0, 1000, padding=0)
+    seen = []
+    r.windowChanged.connect(lambda a, b, mode: seen.append((a, b, mode)))
+
+    def drag_to(a, b):                                # emulate a release at (a,b)
+        r.region.blockSignals(True)
+        r.region.setRegion((a, b))
+        r.region.blockSignals(False)
+        r._on_region_done()
+
+    r.set_window(400.0, 700.0)
+    drag_to(200.0, 500.0)                             # both edges −200 → translate
+    a, b, mode = seen[-1]
+    assert mode == "move" and abs((b - a) - 300.0) < 1e-6   # width preserved, no collapse
+    r.set_window(200.0, 500.0)
+    drag_to(200.0, 350.0)                             # head in → front
+    assert seen[-1][2] == "front"
+    r.set_window(200.0, 500.0)
+    drag_to(300.0, 500.0)                             # tail in → back
+    assert seen[-1][2] == "back"
+
+
+@pytest.mark.ui
 def test_ribbon_min_window_is_zoom_relative(qapp):
     """The timeline window can't be dragged shut (head onto tail), but the floor is
     a fraction of the VISIBLE span — zoom in and you can make a finer window."""
