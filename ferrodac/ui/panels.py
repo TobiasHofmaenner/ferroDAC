@@ -311,7 +311,8 @@ class ChartPanel(Panel):
         if key in self._curves:
             return
         self._curves[key] = self.plot.plot(
-            [], [], pen=pg.mkPen(color_for(key), width=2), name=source.name
+            [], [], pen=pg.mkPen(color_for(key), width=2),
+            name=getattr(source, 'label', source.name)
         )
         self._buf[key] = ([], [])
 
@@ -361,7 +362,7 @@ class _Readout(QFrame):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(2)
-        name = QLabel(source.name)
+        name = QLabel(getattr(source, 'label', source.name))
         name.setStyleSheet(f"color:{color}; font-weight:700;")
         lay.addWidget(name)
         self.lcd = QLCDNumber()
@@ -501,7 +502,8 @@ class SpectrumPanel(Panel):
         self._prev_curves[key] = self.plot.plot(
             [], [], pen=pg.mkPen((120, 130, 145), width=1.0), name="previous")
         self._curves[key] = self.plot.plot(
-            [], [], pen=pg.mkPen(color_for(key), width=1.5), name=source.name)
+            [], [], pen=pg.mkPen(color_for(key), width=1.5),
+            name=getattr(source, 'label', source.name))
 
     def remove_source(self, key):
         for store in (self._curves, self._prev_curves):
@@ -612,6 +614,7 @@ class WaterfallPanel(Panel):
         lay.addWidget(self.plot)
         self._src_key = None
         self._buf = None
+        self._n = 0                       # scans actually filled (≤ _rows) → image height
         self._rows = 240
         self._x0, self._x1 = 0.0, 1.0
 
@@ -651,6 +654,7 @@ class WaterfallPanel(Panel):
 
     def clear_history(self):
         self._buf = None                  # rebuilt blank on the next replayed scan
+        self._n = 0                       # ← so a fresh slice starts empty, not padded
         self.img.clear()
 
     def _push(self, tr):
@@ -658,10 +662,12 @@ class WaterfallPanel(Panel):
         y = np.log10(np.clip(tr.y, 1e-12, None)).astype(np.float32)
         if self._buf is None or self._buf.shape[1] != len(y):
             self._buf = np.full((self._rows, len(y)), float(y.min()), np.float32)
+            self._n = 0
             self._x0, self._x1 = float(tr.x[0]), float(tr.x[-1])
             self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
         self._buf = np.roll(self._buf, -1, axis=0)
         self._buf[-1] = y
+        self._n = min(self._n + 1, self._rows)
 
     def feed(self, batch):
         # EVERY complete scan in the batch (a replay batch carries many) — not
@@ -673,16 +679,19 @@ class WaterfallPanel(Panel):
             return
         for tr in scans:
             self._push(tr)
+        # render ONLY the rows actually filled — so a replayed slice fills the view
+        # with its own scans (not the last few over a blank-padded buffer).
+        view = self._buf[self._rows - self._n:]
         # levels span baseline → peak so the narrow peaks stay visible
-        lo = float(np.percentile(self._buf, 50))
-        hi = float(self._buf.max())
+        lo = float(np.percentile(view, 50))
+        hi = float(view.max())
         if hi <= lo:
             hi = lo + 1.0
-        self.img.setImage(self._buf.T, autoLevels=False, levels=[lo, hi])
+        self.img.setImage(view.T, autoLevels=False, levels=[lo, hi])
         # setImage resets the rect — re-apply the m/z × scan mapping each frame
-        self.img.setRect(QRectF(self._x0, 0.0, self._x1 - self._x0, float(self._rows)))
+        self.img.setRect(QRectF(self._x0, 0.0, self._x1 - self._x0, float(self._n)))
         self.plot.setXRange(self._x0, self._x1, padding=0)
-        self.plot.setYRange(0, self._rows, padding=0)
+        self.plot.setYRange(0, self._n, padding=0)
         if self._bar is not None:
             self._bar.setLevels((lo, hi))
 
@@ -748,6 +757,7 @@ class SpectrumWaterfallPanel(Panel):
         self.on_cursor_move = None          # set by the Dashboard
         self._src_key = None
         self._buf = None
+        self._n = 0                        # scans filled (≤ _rows) → waterfall height
         self._rows = 240
         self._x0, self._x1, self._xr = 0.0, 1.0, None
 
@@ -790,7 +800,8 @@ class SpectrumWaterfallPanel(Panel):
         self._prev_curve = self.p_spec.plot(
             [], [], pen=pg.mkPen((120, 130, 145), width=1.0), name="previous")
         self._curves[key] = self.p_spec.plot(
-            [], [], pen=pg.mkPen(color_for(key), width=1.5), name=source.name)
+            [], [], pen=pg.mkPen(color_for(key), width=1.5),
+            name=getattr(source, 'label', source.name))
         self._buf = None
 
     def remove_source(self, key):
@@ -806,6 +817,7 @@ class SpectrumWaterfallPanel(Panel):
 
     def clear_history(self):
         self._buf = None
+        self._n = 0                       # fresh slice starts empty, not blank-padded
         self.img.clear()
         if self._prev_curve is not None:
             self._prev_curve.setData([], [])
@@ -843,16 +855,19 @@ class SpectrumWaterfallPanel(Panel):
             wy = np.log10(np.clip(cscan.y, 1e-12, None)).astype(np.float32)
             if self._buf is None or self._buf.shape[1] != len(wy):
                 self._buf = np.full((self._rows, len(wy)), float(wy.min()), np.float32)
+                self._n = 0
                 self._x0, self._x1 = lo, hi
             self._buf = np.roll(self._buf, -1, axis=0)
             self._buf[-1] = wy
-        loL = float(np.percentile(self._buf, 50))
-        hiL = float(self._buf.max())
+            self._n = min(self._n + 1, self._rows)
+        view = self._buf[self._rows - self._n:]   # only the filled rows → fills the slice
+        loL = float(np.percentile(view, 50))
+        hiL = float(view.max())
         if hiL <= loL:
             hiL = loL + 1.0
-        self.img.setImage(self._buf.T, autoLevels=False, levels=[loL, hiL])
-        self.img.setRect(QRectF(self._x0, 0.0, self._x1 - self._x0, float(self._rows)))
-        self.p_wf.setYRange(0, self._rows, padding=0)
+        self.img.setImage(view.T, autoLevels=False, levels=[loL, hiL])
+        self.img.setRect(QRectF(self._x0, 0.0, self._x1 - self._x0, float(self._n)))
+        self.p_wf.setYRange(0, self._n, padding=0)
         if self._bar is not None:
             self._bar.setLevels((loL, hiL))
 

@@ -57,6 +57,18 @@ class SourcePort:
     panel: object = None
     online: bool = True   # False = referenced-but-absent placeholder
 
+    @property
+    def label(self) -> str:
+        """Device-qualified name for FLAT displays — chart legends, the Timeline,
+        readouts — where the device isn't shown separately (so two devices' bare
+        'Voltage' channels are told apart): 'Voltage · PSU 1'. The Sources panel
+        groups by device, so it keeps the bare `name`."""
+        dev = (self.origin or "").strip()
+        if (dev and self.kind in ("device", "remote")
+                and dev.lower() not in self.name.lower()):
+            return f"{self.name} · {dev}"
+        return self.name
+
 
 @dataclass
 class SinkPort:
@@ -243,9 +255,9 @@ class Dashboard(QObject):
         return list(self._sources)
 
     def source_names(self) -> dict:
-        """key -> human display name, so the Timeline shows the same channel
-        names as the dashboard (not the raw source IDs)."""
-        return {k: p.name for k, p in self._sources.items() if p.name}
+        """key -> device-qualified display name, so the Timeline shows the same
+        disambiguated channel names as the chart legends (not the raw IDs)."""
+        return {k: p.label for k, p in self._sources.items() if p.name}
 
     def trim_live(self, t0: float) -> None:
         """Drop live-accumulated data older than t0 (absolute) so the live window

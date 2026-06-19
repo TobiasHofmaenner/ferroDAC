@@ -213,6 +213,7 @@ class Ribbon(pg.PlotWidget):
                               color=color_for(key), anchor=(0, 0.5),
                               fill=pg.mkBrush(18, 20, 30, 220))  # readable over its bar
             self.addItem(lab)
+            lab.setZValue(25)             # keep labels above the coverage bars
             self._labels.append((lab, y + 0.4))
         self._draw_bars(cover)
         self.setYRange(-0.5, max(1, len(self._rows)), padding=0)
@@ -275,6 +276,7 @@ class Ribbon(pg.PlotWidget):
                               color=color_for(key), anchor=(0, 0.5),
                               fill=pg.mkBrush(18, 20, 30, 220))  # readable over its bar
             self.addItem(lab)
+            lab.setZValue(25)             # keep labels above the coverage bars
             self._labels.append((lab, y + 0.4))
         self.setYRange(-0.5, max(1, len(self._rows)), padding=0)
         self._draw_bars(cover)
