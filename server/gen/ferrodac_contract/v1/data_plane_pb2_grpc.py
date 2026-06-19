@@ -456,3 +456,290 @@ class Tags:
             timeout,
             metadata,
             _registered_method=True)
+
+
+class StoreStub:
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.GetSyncState = channel.unary_unary(
+                '/ferrodac_contract.v1.Store/GetSyncState',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SyncStateRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SyncState.FromString,
+                _registered_method=True)
+        self.PushChunk = channel.unary_unary(
+                '/ferrodac_contract.v1.Store/PushChunk',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Chunk.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ChunkAck.FromString,
+                _registered_method=True)
+        self.ListSources = channel.unary_unary(
+                '/ferrodac_contract.v1.Store/ListSources',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SourcesRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Sources.FromString,
+                _registered_method=True)
+        self.GetCoverage = channel.unary_unary(
+                '/ferrodac_contract.v1.Store/GetCoverage',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CoverageRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Coverage.FromString,
+                _registered_method=True)
+        self.Query = channel.unary_unary(
+                '/ferrodac_contract.v1.Store/Query',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.QueryRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Series.FromString,
+                _registered_method=True)
+        self.ReadRaw = channel.unary_unary(
+                '/ferrodac_contract.v1.Store/ReadRaw',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawScalar.FromString,
+                _registered_method=True)
+
+
+class StoreServicer:
+    """Missing associated documentation comment in .proto file."""
+
+    def GetSyncState(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PushChunk(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListSources(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCoverage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Query(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReadRaw(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_StoreServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'GetSyncState': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSyncState,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SyncStateRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SyncState.SerializeToString,
+            ),
+            'PushChunk': grpc.unary_unary_rpc_method_handler(
+                    servicer.PushChunk,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Chunk.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ChunkAck.SerializeToString,
+            ),
+            'ListSources': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListSources,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SourcesRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Sources.SerializeToString,
+            ),
+            'GetCoverage': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCoverage,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CoverageRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Coverage.SerializeToString,
+            ),
+            'Query': grpc.unary_unary_rpc_method_handler(
+                    servicer.Query,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.QueryRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Series.SerializeToString,
+            ),
+            'ReadRaw': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReadRaw,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RawScalar.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'ferrodac_contract.v1.Store', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('ferrodac_contract.v1.Store', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class Store:
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def GetSyncState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Store/GetSyncState',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.SyncStateRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.SyncState.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PushChunk(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Store/PushChunk',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.Chunk.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.ChunkAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListSources(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Store/ListSources',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.SourcesRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.Sources.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCoverage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Store/GetCoverage',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.CoverageRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.Coverage.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Query(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Store/Query',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.QueryRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.Series.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReadRaw(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Store/ReadRaw',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.RawRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.RawScalar.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

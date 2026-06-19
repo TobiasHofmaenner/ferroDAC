@@ -134,3 +134,79 @@ class TagsServicer(rpc.TagsServicer):
             pass
         finally:
             self.hub.remove_tag_watcher(q)
+
+
+# --------------------------------------------------------------------------- #
+#  Store (DESIGN §7.4 / §12.1) — durable historic data, both directions:
+#  sync (agent→hub: GetSyncState + PushChunk) and read (client→hub: as a
+#  resolver tier). Thin wrappers over a ZarrStore (the same store the app runs).
+# --------------------------------------------------------------------------- #
+import numpy as np
+
+
+def _chunk_from_pb(req) -> dict:
+    if req.dtype == "trace":
+        t = np.asarray(req.t, dtype="f8")
+        m = int(req.m) or (len(req.y) // len(t) if len(t) else 0)
+        y = np.asarray(req.y, dtype="f8").reshape(len(t), m) if m else np.zeros((0, 0))
+        return {"dtype": "trace", "t": t, "y": y, "x": np.asarray(req.x, dtype="f8")}
+    return {"dtype": "scalar", "t": np.asarray(req.t, dtype="f8"),
+            "v": np.asarray(req.v, dtype="f8")}
+
+
+class StoreServicer(rpc.StoreServicer):
+    def __init__(self, store):
+        self.store = store
+
+    async def GetSyncState(self, request, context):  # noqa: N802
+        if self.store is None:
+            return pb.SyncState()
+        epochs = [pb.EpochLen(source=s, epoch=e, n=n)
+                  for (s, e), n in self.store.epoch_lengths().items()]
+        return pb.SyncState(epochs=epochs)
+
+    async def PushChunk(self, request, context):  # noqa: N802
+        if self.store is None:
+            return pb.ChunkAck(n=0)
+        n = self.store.apply_chunk(request.source, request.epoch, _chunk_from_pb(request))
+        return pb.ChunkAck(n=n)
+
+    async def ListSources(self, request, context):  # noqa: N802
+        if self.store is None:
+            return pb.Sources()
+        out = []
+        for key in self.store.sources():
+            name, unit, dtype = self.store.source_meta(key)
+            out.append(pb.SourceInfo(key=key, name=name, unit=unit, dtype=dtype))
+        return pb.Sources(sources=out)
+
+    async def GetCoverage(self, request, context):  # noqa: N802
+        ivs = []
+        if self.store is not None:
+            try:
+                ivs = [pb.Interval(t0=a, t1=b)
+                       for (a, b) in self.store.coverage(request.source)]
+            except Exception:                       # noqa: BLE001  unknown source
+                pass
+        return pb.Coverage(intervals=ivs)
+
+    async def Query(self, request, context):  # noqa: N802
+        x = y = []
+        if self.store is not None:
+            try:
+                qx, qy = self.store.query(request.source, request.t0, request.t1,
+                                          request.max_points or 2000)
+                x, y = [float(v) for v in qx], [float(v) for v in qy]
+            except Exception:                       # noqa: BLE001
+                pass
+        return pb.Series(x=x, y=y)
+
+    async def ReadRaw(self, request, context):  # noqa: N802
+        t = v = []
+        if self.store is not None:
+            try:
+                rt, rv = self.store.read_raw(request.source, request.t0, request.t1)
+                t, v = [float(x) for x in rt], [float(x) for x in rv]
+            except Exception:                       # noqa: BLE001
+                pass
+        return pb.RawScalar(t=t, v=v)

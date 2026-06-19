@@ -352,3 +352,57 @@ service Tags {
   rpc DeleteTag(DeleteTagRequest) returns (TagAck);
   rpc WatchTags(WatchTagsRequest) returns (stream TagEvent);   // snapshot, then live
 }
+
+// --------------------------------------------------------------------------- //
+//  Store service — durable historic data (DESIGN §7.4 / §12.1).
+//
+//  One contract, two directions, both thin wrappers over the hub's ZarrStore:
+//    * SYNC (agent -> hub): store-and-forward, epoch-incremental copy.
+//        GetSyncState = the hub's per-epoch sample counts (the reconciliation
+//        truth); PushChunk = append an epoch's unsynced tail.
+//    * READ (client -> hub): the hub as a resolver TIER — GetCoverage / Query
+//        (decimated, display) / ReadRaw (full-res, replay & analysis).
+// --------------------------------------------------------------------------- //
+
+// -- sync (write) --
+message EpochLen { string source = 1; string epoch = 2; int64 n = 3; }
+message SyncStateRequest { string token = 1; }
+message SyncState { repeated EpochLen epochs = 1; }
+
+message Chunk {
+  string source = 1;
+  string epoch = 2;
+  string dtype = 3;              // "scalar" | "trace"
+  repeated double t = 4;         // timestamps (length k)
+  repeated double v = 5;         // scalar values (length k)
+  repeated double y = 6;         // trace: flattened [k x m] row-major
+  repeated double x = 7;         // trace: swept axis (length m)
+  int32 m = 8;                   // trace bins (0 = scalar)
+  string token = 9;
+}
+message ChunkAck { int64 n = 1; } // the epoch's new length on the hub
+
+// -- read (the hub as a resolver tier) --
+message Interval { double t0 = 1; double t1 = 2; }
+message CoverageRequest { string source = 1; string token = 2; }
+message Coverage { repeated Interval intervals = 1; }
+message QueryRequest {
+  string source = 1; double t0 = 2; double t1 = 3; int32 max_points = 4;
+  string token = 5;
+}
+message Series { repeated double x = 1; repeated double y = 2; }  // decimated envelope
+message RawRequest { string source = 1; double t0 = 2; double t1 = 3; string token = 4; }
+message RawScalar { repeated double t = 1; repeated double v = 2; }
+
+message SourcesRequest { string token = 1; }
+message SourceInfo { string key = 1; string name = 2; string unit = 3; string dtype = 4; }
+message Sources { repeated SourceInfo sources = 1; }
+
+service Store {
+  rpc GetSyncState(SyncStateRequest) returns (SyncState);
+  rpc PushChunk(Chunk) returns (ChunkAck);
+  rpc ListSources(SourcesRequest) returns (Sources);
+  rpc GetCoverage(CoverageRequest) returns (Coverage);
+  rpc Query(QueryRequest) returns (Series);
+  rpc ReadRaw(RawRequest) returns (RawScalar);
+}
