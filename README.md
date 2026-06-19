@@ -118,6 +118,25 @@ ferrodac/
    (the networked hub, a historic-replay timeline, waveforms, video) is designed
    now and implemented in phases.
 
+## Testing
+
+`pytest` runs the whole suite (also gated in CI on every push — see
+`.github/workflows/tests.yml`):
+
+```bash
+pip install pytest            # plus the runtime deps (requirements.txt)
+make test                     # everything (offscreen Qt)
+make test-core                # fast gate: Qt-free data plane + in-process gRPC e2e
+make test-ui                  # PySide6 smoke tests only
+```
+
+- **data plane** (`tests/test_dataplane.py`) — the Qt-free store / resolver /
+  replay / sync / dataflow-graph self-tests, wrapped as real pass/fail.
+- **gRPC e2e** (`tests/test_grpc_e2e.py`, marker `integration`) — real grpc.aio,
+  in-process hub: store-and-forward sync + the hub-as-resolver-tier read path.
+- **UI smoke** (`tests/test_ui_smoke.py`, marker `ui`) — offscreen widget build
+  + the paths that have actually regressed (replay, time-axis waterfall, labels).
+
 ## Design docs
 
 - [docs/DESIGN.md](docs/DESIGN.md) — the full architecture (the ideal we aim at).

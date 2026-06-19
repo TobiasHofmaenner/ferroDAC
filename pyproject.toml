@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "integration: real-gRPC end-to-end against an in-process hub (needs grpcio)",
+    "ui: needs PySide6 / offscreen Qt",
+]
+# the in-process gRPC servers emit teardown noise at GC — not a test failure
+filterwarnings = [
+    "ignore::RuntimeWarning:asyncio",
+]
