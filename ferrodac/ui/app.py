@@ -831,11 +831,12 @@ class EventsPanel(QWidget):
 
     def __init__(self, markers, clock, on_zoom=None, on_export_csv=None,
                  on_export_plots=None, on_lens=None, projects_provider=None,
-                 parent=None):
+                 on_jump=None, parent=None):
         super().__init__(parent)
         self.markers = markers
         self.clock = clock
         self._on_zoom = on_zoom
+        self._on_jump = on_jump                          # jump the timeline to a tag
         self._on_export_csv = on_export_csv
         self._on_export_plots = on_export_plots
         self._on_lens = on_lens
@@ -929,6 +930,12 @@ class EventsPanel(QWidget):
         top.addWidget(name)
         top.addStretch(1)
         top.addWidget(info)
+        if not is_rec and self._on_jump is not None:     # points: jump the timeline here
+            jump = QToolButton()
+            jump.setText("⌖")
+            jump.setToolTip("Jump the timeline to this tag")
+            jump.clicked.connect(lambda _=False, mid=m.id: self._on_jump(mid))
+            top.addWidget(jump)
         if self._projects_provider is not None:
             proj = QToolButton()
             proj.setText("🏷")
@@ -1878,6 +1885,7 @@ class MainWindow(QMainWindow):
             self.dashboard.markers, self.dashboard.clock,
             on_zoom=self._zoom_recording, on_export_csv=self._export_recording_csv,
             on_export_plots=self._export_plots, on_lens=self._set_tag_lens_all,
+            on_jump=self._jump_to_tag,
             projects_provider=lambda: [(p.id, p.name)
                                        for p in self._project_mgr.projects()]
             if getattr(self, "_project_mgr", None) else [])
@@ -2338,6 +2346,17 @@ class MainWindow(QMainWindow):
             f"Exported {n} source(s) over {dur} s → {dest}", 8000)
 
     # -- recording-region actions (from the Events dock) ---------------------
+    def _jump_to_tag(self, mid):
+        """Jump the timeline to a tag (a point in time): park a window of the
+        current width centred on it, which re-streams that slice so you actually
+        land on the data around the tag — the point analogue of Zoom-to-recording."""
+        m = self.dashboard.markers.get(mid)
+        if m is None:
+            return
+        if self.time_context is not None:
+            w = max(1.0, self.time_context.width)
+            self.time_context.park_window(m.t - w / 2, m.t + w / 2)
+
     def _zoom_recording(self, mid):
         m = self.dashboard.markers.get(mid)
         if m is None or m.t_end is None:

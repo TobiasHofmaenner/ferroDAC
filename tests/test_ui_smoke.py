@@ -274,6 +274,30 @@ def test_zoom_recording_parks_window(qapp):
 
 
 @pytest.mark.ui
+def test_jump_to_tag_parks_centered(qapp):
+    """The tag card's ⌖ jump parks a window of the current width centred on the
+    point (and flags navigation) so the controller re-streams that slice."""
+    import time as _time
+    w = _mainwindow(qapp)
+    try:
+        tc = w.time_context
+        tc.set_width(300.0)
+        now = _time.time()
+        ms = w.dashboard.markers
+        t = now - 1000
+        mid = ms.add(t, label="anomaly")              # a point in time
+        nav0 = tc.nav
+        w._jump_to_tag(mid)
+        t0, t1 = tc.window
+        assert t0 <= t <= t1                          # the tag is inside the window
+        assert abs((t0 + t1) / 2 - t) < 2             # …centred on it
+        assert abs((t1 - t0) - 300.0) < 2             # current width preserved
+        assert tc.following is False and tc.nav == nav0 + 1   # parked + navigated
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_timeline_opens_on_parked_window(qapp):
     """Opening the Timeline while parked (e.g. after Zoom-to-recording) keeps that
     window and frames the ribbon on it — it must not snap back to the live edge."""
@@ -317,6 +341,31 @@ def test_autorange_ignores_markers(qapp):
     (xlo, xhi), _ = vb.viewRange()
     assert xhi < 2000, "marker dragged the time axis open"   # ~1010, not 50000/60000
     assert xlo > 500
+
+
+@pytest.mark.ui
+def test_waterfall_autorange_ignores_markers(qapp):
+    """Same as the chart, but the waterfall carries markers on its TIME (Y) axis —
+    a far tag/recording must not drag that axis open on "A"."""
+    from ferrodac.ui.panels import WaterfallPanel
+    from ferrodac.core.markers import MarkerModel
+    from ferrodac.core.tag import RECORDING
+    p = WaterfallPanel()
+    p.add_source("k", types.SimpleNamespace(name="spec", unit="", dtype="trace"))
+    p._src_key = "k"
+    x = np.linspace(1, 50, 64)
+    t0 = 1_000_000.0
+    p.feed([_scan(t0 + i * 30, x) for i in range(11)])   # scans over t ∈ [t0, t0+300]
+    ms = MarkerModel()
+    ms.add(t0 + 100_000.0, label="far tag")              # ~28 h later
+    r = ms.add(t0 + 200_000.0, kind=RECORDING, label="REC")
+    ms.update(r, t_end=t0 + 201_000.0)
+    p.attach_session(types.SimpleNamespace(), ms)
+    vb = p.plot.getViewBox()
+    vb.autoRange()
+    _, (ylo, yhi) = vb.viewRange()
+    assert yhi < t0 + 5000, "marker dragged the time (Y) axis open"   # ~t0+300, not +200000
+    assert ylo > t0 - 5000
 
 
 @pytest.mark.ui

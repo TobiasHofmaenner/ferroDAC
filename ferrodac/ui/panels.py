@@ -797,7 +797,9 @@ class WaterfallPanel(Panel):
                         brush=pg.mkBrush(m.color[0], m.color[1], m.color[2], 40)
                         if isinstance(m.color, (tuple, list)) else pg.mkBrush(77, 171, 247, 40))
                     item.setZValue(10)
-                    self.plot.addItem(item)
+                    # ignoreBounds: annotation, not data — keep it out of "A"
+                    # auto-range (else a far recording forces the time axis open).
+                    self.plot.addItem(item, ignoreBounds=True)
                     self._marker_lines[mid] = item
                 item.setRegion((m.t, m.t_end))
             else:
@@ -810,7 +812,7 @@ class WaterfallPanel(Panel):
                         label=m.label, labelOpts={"color": m.color,
                                                   "fill": (10, 14, 19, 180)})
                     item.setZValue(11)
-                    self.plot.addItem(item)
+                    self.plot.addItem(item, ignoreBounds=True)   # annotation, not data
                     self._marker_lines[mid] = item
                 item.setPos(m.t)
 
@@ -1044,7 +1046,9 @@ class SpectrumWaterfallPanel(Panel):
                         orientation="horizontal", movable=False,
                         brush=pg.mkBrush(br[0], br[1], br[2], 40))
                     item.setZValue(10)
-                    self.p_wf.addItem(item)
+                    # ignoreBounds: annotation, not data — keep it out of "A"
+                    # auto-range (else a far recording forces the time axis open).
+                    self.p_wf.addItem(item, ignoreBounds=True)
                     self._marker_lines[mid] = item
                 item.setRegion((m.t, m.t_end))
             else:
@@ -1057,7 +1061,7 @@ class SpectrumWaterfallPanel(Panel):
                         label=m.label, labelOpts={"color": m.color,
                                                   "fill": (10, 14, 19, 180)})
                     item.setZValue(11)
-                    self.p_wf.addItem(item)
+                    self.p_wf.addItem(item, ignoreBounds=True)    # annotation, not data
                     self._marker_lines[mid] = item
                 item.setPos(m.t)
 
