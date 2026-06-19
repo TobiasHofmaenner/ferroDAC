@@ -389,8 +389,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._view0 = lo - 0.04 * max(60.0, now - lo)   # session start, with margin
 
         self._build_ui()
-        for i in range(min(3, self._src_list.count())):     # show the first few by default
-            self._src_list.item(i).setCheckState(QtCore.Qt.Checked)
+        self._restore_state()                  # reopen as it was left (checked + speed)
         self._refresh()
 
         self._cov_ticks = 0
@@ -700,9 +699,45 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._clock.setText(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.t1))
                             + f"   {tag}")
 
+    # -- persistence (reopen as left) ----------------------------------------
+    def _restore_state(self) -> None:
+        """Reopen the Timeline the way it was left — which sources are shown +
+        the playback speed. (The data window, slide/grow and head live on the
+        shared TimeContext, so they already persist across open/close.)"""
+        import json
+        raw = QtCore.QSettings("ferroDAC", "ferroDAC").value("timeline/state", "")
+        st = {}
+        if raw:
+            try:
+                st = json.loads(raw)
+            except Exception:
+                st = {}
+        checked = set(st.get("checked", []))
+        restored = 0
+        for i in range(self._src_list.count()):
+            it = self._src_list.item(i)
+            if it.data(QtCore.Qt.UserRole) in checked:
+                it.setCheckState(QtCore.Qt.Checked)      # fires _toggle → builds chart
+                restored += 1
+        if restored == 0:                                # nothing saved/present → defaults
+            for i in range(min(3, self._src_list.count())):
+                self._src_list.item(i).setCheckState(QtCore.Qt.Checked)
+        sp = st.get("speed")
+        if sp and self._speed.findText(f"{int(sp)}×") >= 0:
+            self._speed.setCurrentText(f"{int(sp)}×")    # fires → sets tc.speed
+
+    def _save_state(self) -> None:
+        import json
+        checked = [self._src_list.item(i).data(QtCore.Qt.UserRole)
+                   for i in range(self._src_list.count())
+                   if self._src_list.item(i).checkState() == QtCore.Qt.Checked]
+        QtCore.QSettings("ferroDAC", "ferroDAC").setValue(
+            "timeline/state", json.dumps({"checked": checked, "speed": self.tc.speed}))
+
     def closeEvent(self, ev):
         # leave the head/view exactly as-is — the dockable Player controls the
         # head independently, so closing the scrubber changes nothing.
+        self._save_state()                     # remember checked sources + speed
         self._live_timer.stop(); self._preview_timer.stop()
         try:
             self._tc_unsub()
