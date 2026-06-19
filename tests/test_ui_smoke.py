@@ -472,6 +472,40 @@ def test_zoom_time_uses_correct_axis(qapp):
 
 
 @pytest.mark.ui
+def test_waterfall_markers_draggable_and_levels_lock(qapp):
+    """On a waterfall the time axis is Y: tag/recording markers are draggable there
+    (drag retimes them), and a user-set colour range isn't reset by every tick."""
+    from ferrodac.ui.panels import WaterfallPanel
+    from ferrodac.core.markers import MarkerModel
+    from ferrodac.core.tag import RECORDING
+    p = WaterfallPanel()
+    p.add_source("k", types.SimpleNamespace(name="spec", unit="", dtype="trace"))
+    p._src_key = "k"
+    x = np.linspace(1, 50, 32)
+    t0 = 1_000_000.0
+    p.set_window(t0, t0 + 600)
+    p.feed([_scan(t0 + i * 30, x) for i in range(11)])
+    ms = MarkerModel()
+    tag = ms.add(t0 + 100, label="note")
+    rec = ms.add(t0 + 200, kind=RECORDING, label="REC")
+    ms.update(rec, t_end=t0 + 400)
+    p.attach_session(types.SimpleNamespace(), ms)
+    line, region = p._marker_lines[tag], p._marker_lines[rec]
+    assert line.movable and region.movable                # draggable on the time (Y) axis
+    line.setValue(t0 + 150); p._on_marker_drag(tag)       # drag the tag → retime it
+    assert abs(ms.get(tag).t - (t0 + 150)) < 1e-6
+    region.setRegion((t0 + 250, t0 + 500)); p._on_region_drag(rec)   # drag the span edges
+    assert abs(ms.get(rec).t - (t0 + 250)) < 1e-6 and abs(ms.get(rec).t_end - (t0 + 500)) < 1e-6
+    # a data tick must NOT snap the markers back (they sync on change, not per tick)
+    p.feed([_scan(t0 + 330, x)])
+    assert abs(line.value() - (t0 + 150)) < 1e-6
+    # the colour range, once the user sets it, survives data ticks (no reset)
+    p._bar.setLevels((0.2, 0.8)); p._on_levels_changed()
+    p.feed([_scan(t0 + 360, x)])
+    assert p._levels_locked and tuple(round(v, 2) for v in p.img.levels) == (0.2, 0.8)
+
+
+@pytest.mark.ui
 def test_waterfall_autorange_ignores_markers(qapp):
     """Same as the chart, but the waterfall carries markers on its TIME (Y) axis —
     a far tag/recording must not drag that axis open on "A"."""

@@ -669,9 +669,14 @@ class WaterfallPanel(Panel):
         if cmap is not None:
             self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
         self._bar = None
+        # colour-range lock: auto-fit the levels per slice, but once the user drags
+        # the colour bar, HONOUR their range instead of snapping back every tick.
+        self._levels_locked = False
+        self._levels_user = None
         try:
             self._bar = pg.ColorBarItem(colorMap=cmap)
             self._bar.setImageItem(self.img, insert_in=self.plot.getPlotItem())
+            self._bar.sigLevelsChanged.connect(self._on_levels_changed)
         except Exception:
             self._bar = None
         lay.addWidget(self.plot)
@@ -728,8 +733,16 @@ class WaterfallPanel(Panel):
             self._scans = []
             self.img.clear()
 
+    def _on_levels_changed(self):
+        """The user dragged the colour bar → lock to their range (until a new slice
+        via clear_history re-autos). Programmatic setLevels blocks this signal."""
+        if self._bar is not None:
+            self._levels_user = tuple(self._bar.levels())
+            self._levels_locked = True
+
     def clear_history(self):
         self._scans = []                  # a fresh slice re-bins from scratch
+        self._levels_locked = False       # a new slice deserves fresh auto-levels
         self.img.clear()
         self.plot.enableAutoRange()       # auto-fit the new slice ONCE; then the
         #                                   user's zoom/pan is respected (not forced)
@@ -775,18 +788,24 @@ class WaterfallPanel(Panel):
         if img is None:                              # no scan in the window → blank
             self.img.clear()
         else:
-            finite = img[np.isfinite(img)]
-            lo = float(np.percentile(finite, 50)) if finite.size else 0.0
-            hi = float(finite.max()) if finite.size else lo + 1.0
-            if hi <= lo:
-                hi = lo + 1.0
+            if self._levels_locked and self._levels_user is not None:
+                lo, hi = self._levels_user           # honour the user's colour range
+            else:
+                finite = img[np.isfinite(img)]
+                lo = float(np.percentile(finite, 50)) if finite.size else 0.0
+                hi = float(finite.max()) if finite.size else lo + 1.0
+                if hi <= lo:
+                    hi = lo + 1.0
             self.img.setImage(img.T, autoLevels=False, levels=[lo, hi])
             # place the image at its real time/x; the VIEW is the user's (auto-range
             # fits the slice once, then their zoom is kept) — never force it per tick.
             self.img.setRect(QRectF(self._x0, t0, self._x1 - self._x0, t1 - t0))
-            if self._bar is not None:
+            if self._bar is not None and not self._levels_locked:
+                self._bar.blockSignals(True)         # auto-set must not look like a user drag
                 self._bar.setLevels((lo, hi))
-        self._sync_markers()
+                self._bar.blockSignals(False)
+        # markers are at absolute time on the Y axis (independent of the image) — they
+        # update on markers.changed, NOT every data tick, so a drag isn't fought.
 
     def _sync_markers(self):
         """Draw markers as HORIZONTAL lines / a shaded region on the time (Y)
@@ -804,28 +823,50 @@ class WaterfallPanel(Panel):
                     if item is not None:
                         self.plot.removeItem(item)
                     item = pg.LinearRegionItem(
-                        orientation="horizontal", movable=False,
+                        orientation="horizontal", movable=True,   # drag to retime the span
                         brush=pg.mkBrush(m.color[0], m.color[1], m.color[2], 40)
                         if isinstance(m.color, (tuple, list)) else pg.mkBrush(77, 171, 247, 40))
                     item.setZValue(10)
+                    item.sigRegionChangeFinished.connect(
+                        lambda _=None, mid=mid: self._on_region_drag(mid))
                     # ignoreBounds: annotation, not data — keep it out of "A"
                     # auto-range (else a far recording forces the time axis open).
                     self.plot.addItem(item, ignoreBounds=True)
                     self._marker_lines[mid] = item
-                item.setRegion((m.t, m.t_end))
+                if item.getRegion() != (m.t, m.t_end):     # don't fight a live drag
+                    item.blockSignals(True)
+                    item.setRegion((m.t, m.t_end))
+                    item.blockSignals(False)
             else:
                 if not isinstance(item, pg.InfiniteLine):
                     if item is not None:
                         self.plot.removeItem(item)
                     item = pg.InfiniteLine(
-                        angle=0, movable=False,
+                        angle=0, movable=True,                 # drag to retime the tag
                         pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
                         label=m.label, labelOpts={"color": m.color,
                                                   "fill": (10, 14, 19, 180)})
                     item.setZValue(11)
+                    item.sigPositionChangeFinished.connect(
+                        lambda _=None, mid=mid: self._on_marker_drag(mid))
                     self.plot.addItem(item, ignoreBounds=True)   # annotation, not data
                     self._marker_lines[mid] = item
-                item.setPos(m.t)
+                if abs(item.value() - m.t) > 1e-9:
+                    item.blockSignals(True)
+                    item.setPos(m.t)
+                    item.blockSignals(False)
+
+    def _on_marker_drag(self, mid):
+        item = self._marker_lines.get(mid)
+        if item is not None and self.markers is not None:
+            self.markers.move(mid, float(item.value()))   # Y value IS the absolute time
+
+    def _on_region_drag(self, mid):
+        item = self._marker_lines.get(mid)
+        if item is None or self.markers is None:
+            return
+        a, b = item.getRegion()
+        self.markers.update(mid, t=min(a, b), t_end=max(a, b))
 
 
 class SpectrumWaterfallPanel(Panel):
@@ -873,10 +914,13 @@ class SpectrumWaterfallPanel(Panel):
         cmap = _trace_colormap()
         if cmap is not None:
             self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
+        self._levels_locked = False         # honour a user-dragged colour range (see WaterfallPanel)
+        self._levels_user = None
         try:
             self._bar = pg.ColorBarItem(colorMap=cmap)
             self._bar.setImageItem(self.img)
             self.glw.addItem(self._bar, row=1, col=1)   # own column → x stays aligned
+            self._bar.sigLevelsChanged.connect(self._on_levels_changed)
         except Exception:
             self._bar = None
 
@@ -961,8 +1005,14 @@ class SpectrumWaterfallPanel(Panel):
         self.img.clear()
         self._scans = []
 
+    def _on_levels_changed(self):
+        if self._bar is not None:
+            self._levels_user = tuple(self._bar.levels())
+            self._levels_locked = True
+
     def clear_history(self):
         self._scans = []                  # a fresh slice re-bins from scratch
+        self._levels_locked = False       # a new slice deserves fresh auto-levels
         self.img.clear()
         self.p_wf.enableAutoRange(y=True)  # auto-fit the slice's time span ONCE; the
         #                                    user's zoom is then kept (X is m/z-linked)
@@ -1030,16 +1080,21 @@ class SpectrumWaterfallPanel(Panel):
         if img is None:
             self.img.clear()
         else:
-            finite = img[np.isfinite(img)]
-            loL = float(np.percentile(finite, 50)) if finite.size else 0.0
-            hiL = float(finite.max()) if finite.size else loL + 1.0
-            if hiL <= loL:
-                hiL = loL + 1.0
+            if self._levels_locked and self._levels_user is not None:
+                loL, hiL = self._levels_user            # honour the user's colour range
+            else:
+                finite = img[np.isfinite(img)]
+                loL = float(np.percentile(finite, 50)) if finite.size else 0.0
+                hiL = float(finite.max()) if finite.size else loL + 1.0
+                if hiL <= loL:
+                    hiL = loL + 1.0
             self.img.setImage(img.T, autoLevels=False, levels=[loL, hiL])
             self.img.setRect(QRectF(self._x0, t0, self._x1 - self._x0, t1 - t0))
-            if self._bar is not None:
+            if self._bar is not None and not self._levels_locked:
+                self._bar.blockSignals(True)
                 self._bar.setLevels((loL, hiL))
-        self._sync_markers()                # Y range is the user's (auto-range, not forced)
+                self._bar.blockSignals(False)
+        # markers update on markers.changed (Y = absolute time), not every data tick
 
     def _sync_markers(self):
         """Record spans / tags as horizontal lines or a shaded band on the time
@@ -1059,27 +1114,49 @@ class SpectrumWaterfallPanel(Panel):
                     br = (m.color if isinstance(m.color, (tuple, list))
                           else (77, 171, 247))
                     item = pg.LinearRegionItem(
-                        orientation="horizontal", movable=False,
+                        orientation="horizontal", movable=True,   # drag to retime the span
                         brush=pg.mkBrush(br[0], br[1], br[2], 40))
                     item.setZValue(10)
+                    item.sigRegionChangeFinished.connect(
+                        lambda _=None, mid=mid: self._on_region_drag(mid))
                     # ignoreBounds: annotation, not data — keep it out of "A"
                     # auto-range (else a far recording forces the time axis open).
                     self.p_wf.addItem(item, ignoreBounds=True)
                     self._marker_lines[mid] = item
-                item.setRegion((m.t, m.t_end))
+                if item.getRegion() != (m.t, m.t_end):     # don't fight a live drag
+                    item.blockSignals(True)
+                    item.setRegion((m.t, m.t_end))
+                    item.blockSignals(False)
             else:
                 if not isinstance(item, pg.InfiniteLine):
                     if item is not None:
                         self.p_wf.removeItem(item)
                     item = pg.InfiniteLine(
-                        angle=0, movable=False,
+                        angle=0, movable=True,                 # drag to retime the tag
                         pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
                         label=m.label, labelOpts={"color": m.color,
                                                   "fill": (10, 14, 19, 180)})
                     item.setZValue(11)
+                    item.sigPositionChangeFinished.connect(
+                        lambda _=None, mid=mid: self._on_marker_drag(mid))
                     self.p_wf.addItem(item, ignoreBounds=True)    # annotation, not data
                     self._marker_lines[mid] = item
-                item.setPos(m.t)
+                if abs(item.value() - m.t) > 1e-9:
+                    item.blockSignals(True)
+                    item.setPos(m.t)
+                    item.blockSignals(False)
+
+    def _on_marker_drag(self, mid):
+        item = self._marker_lines.get(mid)
+        if item is not None and self.markers is not None:
+            self.markers.move(mid, float(item.value()))
+
+    def _on_region_drag(self, mid):
+        item = self._marker_lines.get(mid)
+        if item is None or self.markers is None:
+            return
+        a, b = item.getRegion()
+        self.markers.update(mid, t=min(a, b), t_end=max(a, b))
 
     # -- trend cursors (mirrors SpectrumPanel, on the spectrum subplot) ------
     def set_cursors(self, cursors):
