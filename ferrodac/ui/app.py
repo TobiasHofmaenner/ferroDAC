@@ -1653,6 +1653,8 @@ class MainWindow(QMainWindow):
                 "QToolButton{color:#0b0f16;background:#3fb950;border-radius:3px;"
                 "padding:2px 8px;font-weight:700;}" if connected else "")
         self.sync_status.set_state("connecting" if connected else "offline")
+        # surface (or retire) the hub's historic catalog as routable ports
+        self.dashboard.refresh_ports()
 
     def _open_hub(self):
         if not self.hub.available:
@@ -1976,19 +1978,25 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     def _historic_sources(self):
-        """Recorded channels (key, name, unit, dtype) from the durable store, so
-        the dashboard can offer them as routable ports for replay after a restart
-        — even when no device is connected."""
-        if self.store_writer is None:
-            return []
-        st = self.store_writer.store
+        """Recorded channels (key, name, unit, dtype) routable for replay even
+        with no live device: the local durable store UNIONED with the hub catalog
+        when connected — so a pure viewer can route purely-historic HUB sources
+        onto a chart (served via the resolver's hub read tier). Local wins on key
+        collision; the hub fills what's only remote."""
         dtmap = {"scalar": "float", "trace": "trace", "bool": "bool"}
-        out = []
-        for key in st.sources():
-            name, unit, dtype = st.source_meta(key)
-            label = name if (name and name != key) else key.rsplit("/", 1)[-1]
-            out.append((key, label, unit, dtmap.get(dtype, "float")))
-        return out
+        out = {}                                    # key -> (label, unit, dtype)
+        if self.store_writer is not None:
+            st = self.store_writer.store
+            for key in st.sources():
+                name, unit, dtype = st.source_meta(key)
+                label = name if (name and name != key) else key.rsplit("/", 1)[-1]
+                out[key] = (label, unit, dtmap.get(dtype, "float"))
+        if getattr(self, "hub", None) is not None:
+            for key, name, unit, dtype in self.hub.hub_sources():
+                if key not in out:
+                    label = name if (name and name != key) else key.rsplit("/", 1)[-1]
+                    out[key] = (label, unit, dtmap.get(dtype, "float"))
+        return [(k, lbl, u, dt) for k, (lbl, u, dt) in out.items()]
 
     def _tc_live_tick(self) -> None:
         """Advance the head to now while following (live), and slide the live

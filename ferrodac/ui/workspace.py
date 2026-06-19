@@ -604,6 +604,11 @@ class Dashboard(QObject):
         self.ports_changed.emit()
 
     # -- device ports --------------------------------------------------------
+    def refresh_ports(self, *_):
+        """Re-evaluate the port set (devices + historic). Public hook so e.g. a
+        hub connect/disconnect can surface/retire its historic catalog ports."""
+        self._rebuild_device_ports()
+
     def _rebuild_device_ports(self):
         new_src, new_snk = {}, {}
         for d in self.manager.active_descriptors():
@@ -642,15 +647,25 @@ class Dashboard(QObject):
                 returning_src.append(key)
             self._sources[key] = port
 
-        # HISTORIC: recorded channels with no live device (and not already a
-        # placeholder) become offline, routable ports — so you can route stored
-        # data into displays/processors for replay after a restart.
-        if self._historic_sources:
-            for key, name, unit, dtype in self._historic_sources():
-                if key not in self._sources:
-                    self._sources[key] = SourcePort(
-                        key, name or key.rsplit("/", 1)[-1], dtype, unit,
-                        "recorded", "historic", online=False)
+        # HISTORIC: recorded/remote channels with no live device become offline,
+        # routable ports — route stored data into displays/processors for replay
+        # (local store after a restart; the hub catalog when connected). A
+        # historic port that's gone (e.g. hub disconnected) is dropped unless
+        # still routed, in which case it survives as an offline placeholder.
+        hist = ({k: (n, u, dt) for k, n, u, dt in self._historic_sources()}
+                if self._historic_sources else {})
+        for key in [k for k, p in self._sources.items()
+                    if p.kind == "historic" and k not in hist]:
+            if self._routes.get(key):
+                self._sources[key].online = False
+            else:
+                del self._sources[key]
+                self._routes.pop(key, None)
+        for key, (name, unit, dtype) in hist.items():
+            if key not in self._sources:
+                self._sources[key] = SourcePort(
+                    key, name or key.rsplit("/", 1)[-1], dtype, unit,
+                    "recorded", "historic", online=False)
 
         # SINKS: same — a routed-into device sink that vanished stays as an
         # offline placeholder; a live port replaces it.
