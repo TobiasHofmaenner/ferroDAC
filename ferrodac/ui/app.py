@@ -1552,15 +1552,20 @@ class CursorDialog(QDialog):
 
 
 class ProjectsPanel(QWidget):
-    """Lists local projects; pick one to make it active (it owns the working
-    layout + — Phase 2 — the tag lens). Create new + reveal the folder."""
+    """Lists projects — LOCAL folders and (☁) HUB projects — pick one to make it
+    active. Add a project (a local folder, or a new one on the hub); a local one
+    can be Shared to the hub from its right-click menu. Reveal the folder."""
 
-    def __init__(self, manager, on_activate, on_create, on_reveal, parent=None):
+    def __init__(self, manager, on_activate, on_create_local, on_create_hub,
+                 on_reveal, on_share=None, hub_enabled=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self._on_activate = on_activate
-        self._on_create = on_create
+        self._on_create_local = on_create_local
+        self._on_create_hub = on_create_hub
         self._on_reveal = on_reveal
+        self._on_share = on_share
+        self._hub_enabled = hub_enabled or (lambda: False)
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
@@ -1569,11 +1574,19 @@ class ProjectsPanel(QWidget):
         root.addWidget(self._label)
         self._list = QListWidget()
         self._list.itemActivated.connect(self._activate)   # double-click or Enter
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._context_menu)
         root.addWidget(self._list, 1)
         row = QHBoxLayout()
-        new = QPushButton("＋ Add project")
-        new.setToolTip("Pick a folder — adopt the project there, or create one")
-        new.clicked.connect(lambda: self._on_create())
+        new = QToolButton()
+        new.setText("＋ Add project")
+        new.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        new.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(new)
+        menu.addAction("Local folder…", lambda: self._on_create_local())
+        self._hub_action = menu.addAction("On the hub…", lambda: self._on_create_hub())
+        self._hub_action.setToolTip("Create a shared project on the hub (needs a connection)")
+        new.setMenu(menu)
         rev = QPushButton("Reveal")
         rev.clicked.connect(lambda: self._on_reveal())
         row.addWidget(new)
@@ -1586,15 +1599,33 @@ class ProjectsPanel(QWidget):
         active = self.manager.active
         projs = self.manager.projects()
         self._label.setText(f"Projects  ({len(projs)})")
+        self._hub_action.setEnabled(self._hub_enabled())    # greyed when offline
         for p in projs:
             on = active is not None and p.id == active.id
-            it = QListWidgetItem(("●  " if on else "○  ") + p.name)
+            badge = "☁ " if getattr(p, "is_hub", False) else ""
+            it = QListWidgetItem(("●  " if on else "○  ") + badge + p.name)
             it.setData(Qt.UserRole, p.id)
             if on:
                 f = it.font(); f.setBold(True); it.setFont(f)
-            if p.description:
-                it.setToolTip(p.description)
+            tip = p.description or ""
+            if getattr(p, "is_hub", False):
+                tip = (tip + "  ·  " if tip else "") + "on the hub"
+            if tip:
+                it.setToolTip(tip)
             self._list.addItem(it)
+
+    def _context_menu(self, pos):
+        it = self._list.itemAt(pos)
+        if it is None or self._on_share is None:
+            return
+        p = self.manager.get(it.data(Qt.UserRole))
+        if p is None or getattr(p, "is_hub", False):
+            return                                          # already on the hub
+        menu = QMenu(self)
+        act = menu.addAction("☁ Share to hub")
+        act.setEnabled(self._hub_enabled())
+        act.triggered.connect(lambda: self._on_share(p.id))
+        menu.exec(self._list.mapToGlobal(pos))
 
     def _activate(self, item):
         if item is None:                        # list cleared mid-signal → ignore
@@ -1949,7 +1980,9 @@ class MainWindow(QMainWindow):
         self._setup_projects()
         self.projects_panel = ProjectsPanel(
             self._project_mgr, on_activate=self._switch_project,
-            on_create=self._add_project, on_reveal=self._reveal_project)
+            on_create_local=self._add_project, on_create_hub=self._add_project_hub,
+            on_reveal=self._reveal_project, on_share=self._share_project,
+            hub_enabled=lambda: self.hub.connected)
         self.projects_dock = QDockWidget("Projects", self)
         self.projects_dock.setObjectName("ProjectsDock")
         self.projects_dock.setWidget(self.projects_panel)
@@ -2128,6 +2161,8 @@ class MainWindow(QMainWindow):
         self.sync_status.set_state("connecting" if connected else "offline")
         # surface (or retire) the hub's historic catalog as routable ports
         self.dashboard.refresh_ports()
+        if getattr(self, "projects_panel", None) is not None:
+            self.projects_panel.refresh()       # enable/disable the “On the hub…” item
 
     def _open_hub(self):
         if not self.hub.available:
@@ -2233,6 +2268,7 @@ class MainWindow(QMainWindow):
             p.set_sources([{"key": k} for k in dlg.selected_keys()])
             self._apply_source_lens()
             self._refresh_explorer()               # the Channels group reflects it
+            self._republish_active_if_hub()        # sync the lens if it's a hub project
 
     # -- global tags (one catalog, filtered by the active project lens) ------
     def _global_tags_path(self) -> str:
@@ -2313,6 +2349,47 @@ class MainWindow(QMainWindow):
         self.projects_panel.refresh()
         self._switch_project(p.id)
 
+    def _add_project_hub(self) -> None:
+        """Create a NEW project on the hub (opt-in). It's published as a record; the
+        hub materialises a folder and echoes it back as a ☁ project. We apply it
+        optimistically so it appears at once, then switch to it."""
+        if not self.hub.connected:
+            self.statusBar().showMessage("Connect to a hub first (☁ Hub).", 6000)
+            return
+        name, ok = QInputDialog.getText(self, "New hub project", "Project name:")
+        if not ok or not name.strip():
+            return
+        import uuid
+        rec = {"id": uuid.uuid4().hex, "name": name.strip(), "version": 1,
+               "sources": [], "windows": [], "layouts": {}, "deleted": False}
+        self._project_mgr.apply_hub_record(rec)           # optimistic local
+        self.hub.publish_project(rec)                     # push up (echo is idempotent)
+        self.projects_panel.refresh()
+        self._switch_project(rec["id"])
+
+    def _share_project(self, pid: str) -> None:
+        """Promote (MOVE) a LOCAL project to the hub: publish its record, render it
+        as a ☁ project (same id) and untrack the local entry — the local folder
+        stays on disk as an offline backup, and takes over again if the hub drops."""
+        if not self.hub.connected:
+            self.statusBar().showMessage("Connect to a hub first (☁ Hub).", 6000)
+            return
+        rec = self._project_mgr.share_to_hub(pid)
+        if not rec:
+            return
+        self._project_mgr.apply_hub_record(rec)           # now a ☁ project (same id)
+        self._project_mgr.untrack(pid)                    # drop the local entry
+        self.hub.publish_project(rec)
+        self.projects_panel.refresh()
+        self._refresh_explorer()
+        self.statusBar().showMessage(f"Shared “{rec.get('name')}” to the hub.", 5000)
+
+    def _republish_active_if_hub(self) -> None:
+        """A local edit to a hub project — bump its version and push the record up."""
+        p = self._project_mgr.active
+        if getattr(p, "is_hub", False):
+            self.hub.publish_project(p.bump())
+
     def _reveal_path(self, path: str) -> None:
         from qtpy.QtCore import QUrl
         from qtpy.QtGui import QDesktopServices
@@ -2367,6 +2444,7 @@ class MainWindow(QMainWindow):
         if ok and name:
             p.add_window(name, t0, t1)
             self._refresh_explorer()
+            self._republish_active_if_hub()
             self.statusBar().showMessage(f"Bookmarked “{name}”", 4000)
 
     def _jump_to_window(self, t0, t1) -> None:
@@ -2380,6 +2458,7 @@ class MainWindow(QMainWindow):
         if p is not None:
             p.remove_window(name)
             self._refresh_explorer()
+            self._republish_active_if_hub()
 
     def _switch_project(self, pid: str) -> None:
         """Make `pid` active: persist the current project's working layout, then
@@ -2773,6 +2852,7 @@ class MainWindow(QMainWindow):
         self._active_layout_path = path            # …then keep it live (autosaves)
         self._remember(path)
         self._refresh_explorer()
+        self._republish_active_if_hub()            # share the named layout if on hub
         self.statusBar().showMessage(f"Added layout “{name}” — it now autosaves", 5000)
 
     def _on_open(self):

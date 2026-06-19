@@ -525,6 +525,34 @@ def test_hub_project_incoming_appears_and_clears(qapp):
 
 
 @pytest.mark.ui
+def test_hub_project_share_and_republish(qapp):
+    """Sharing a local project MOVES it to the hub (publishes its record, untracks
+    the local entry); editing a hub project republishes a version-bumped record."""
+    import tempfile
+    w = _mainwindow(qapp)
+    try:
+        mgr = w._project_mgr
+        w.hub._viewer = types.SimpleNamespace(stop=lambda: None)   # pretend connected
+        pushed = []
+        w.hub.publish_project = lambda rec: pushed.append(rec)
+        local = mgr.track(tempfile.mkdtemp(), "ToShare")
+        local.add_window("w", 1.0, 2.0)
+        w._share_project(local.id)
+        hp = mgr.get(local.id)
+        assert hp is not None and hp.is_hub                  # now a ☁ project
+        assert local.id not in mgr._by_id                    # local entry untracked
+        assert pushed[-1]["id"] == local.id
+        assert pushed[-1]["windows"][0]["name"] == "w"       # the lens/bookmarks went up
+        # an edit to the active hub project pushes a bumped record
+        mgr.set_active(hp.id)
+        before = hp.version
+        w._republish_active_if_hub()
+        assert pushed[-1]["version"] == before + 1
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"

@@ -443,6 +443,14 @@ class ProjectManager:
         self._save_registry()
         return p
 
+    def untrack(self, pid: str) -> None:
+        """Stop tracking a LOCAL project (its folder stays on disk). Used by
+        share-to-hub, which MOVES a project to the hub (its hub copy, same id,
+        takes over; the local folder remains as an offline backup)."""
+        if pid in self._by_id:
+            self._by_id.pop(pid, None)
+            self._save_registry()
+
     def ensure_default(self, default_dir: str, legacy_root: str = None) -> Project:
         """Guarantee at least one tracked project. Adopt any projects already in a
         legacy root (migration from the old 'scan one root' model), else create a
