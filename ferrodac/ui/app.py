@@ -2093,7 +2093,8 @@ class MainWindow(QMainWindow):
             win = TimelineWindow(self.resolver, self.store_writer.store,
                                  self.time_context, self,
                                  names=self._timeline_sources(),
-                                 sources_fn=self._timeline_sources)
+                                 sources_fn=self._timeline_sources,
+                                 lens_fn=self._curated_source_keys)
             win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
             self._timeline_win = win
         self._timeline_win.show()
@@ -2202,11 +2203,16 @@ class MainWindow(QMainWindow):
         self._apply_tag_lens()
 
     # -- source lens (the project's curated channels) ------------------------
+    def _curated_source_keys(self) -> set:
+        """The active project's curated channel keys (empty = no curation). The
+        single source of truth for the Sources panel AND Timeline lens."""
+        p = self._project_mgr.active
+        return p.source_keys() if p is not None else set()
+
     def _apply_source_lens(self) -> None:
         """Filter the Sources view to the project's curated channels. An empty
         selection means 'no lens' (show all) — so a fresh project isn't blank."""
-        p = self._project_mgr.active
-        keys = p.source_keys() if p is not None else set()
+        keys = self._curated_source_keys()
         self.dashboard.set_source_lens(
             None if (self._sources_show_all or not keys) else keys)
 

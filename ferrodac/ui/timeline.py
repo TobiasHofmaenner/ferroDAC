@@ -350,11 +350,15 @@ class TimelineWindow(QtWidgets.QMainWindow):
     Live is just the head at now. Its own charts are a preview of the resolver."""
 
     def __init__(self, resolver, store, time_context, parent=None, names=None,
-                 sources_fn=None):
+                 sources_fn=None, lens_fn=None):
         super().__init__(parent)
         self._names = dict(names or {})      # key -> human display name (accumulated)
         self._sources_fn = sources_fn        # callable → {key: name} of LIVE sources
         #                                      (so sources that join the hub appear)
+        self._lens_fn = lens_fn              # callable → the active project's curated
+        #                                      channel keys (None/empty = no curation)
+        self._show_all = False               # off = the project's channel lens (mirrors
+        #                                      the Sources panel's "All" toggle)
         self.setWindowTitle("ferroDAC — Timeline")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)   # fresh tc link per open
         self.resize(1100, 720)
@@ -427,34 +431,86 @@ class TimelineWindow(QtWidgets.QMainWindow):
             except Exception:                 # a flaky provider must not break the view
                 pass
         keys = list(dict.fromkeys(list(self.store.sources()) + list(names)))
-        return keys, names
+        return self._lensed(keys), names
+
+    def _lensed(self, keys):
+        """The project's curated channels only (unless "All", or no curation) —
+        the Timeline's source list/ribbon mirror the Sources panel's lens."""
+        if self._show_all or self._lens_fn is None:
+            return keys
+        try:
+            lens = self._lens_fn()
+        except Exception:                     # a flaky provider must not blank the view
+            lens = None
+        if not lens:                          # nothing curated → show everything
+            return keys
+        return [k for k in keys if k in lens]
+
+    def _toggle_show_all(self, on):
+        self._show_all = bool(on)
+        self._rebuild_sources()               # re-filter the list, ribbon and charts
 
     def _sync_sources(self):
         """Pick up sources that appeared since the last tick (e.g. a device joined
         the hub) and fold them into the list, ribbon tracks and coverage — so the
         open Timeline updates without a close/reopen."""
+        keys, _ = self._available()
+        if set(keys) != set(self._sources):
+            self._rebuild_sources()
+        else:
+            self._names = self._available()[1]   # names may have resolved late
+
+    def _rebuild_sources(self):
+        """Rebuild the source list + ribbon from the (lens-filtered) current set,
+        preserving which sources are checked. Handles both ADD (a source joined)
+        and REMOVE (the lens narrowed) — dropping the preview chart of any source
+        that's no longer shown."""
         keys, names = self._available()
-        if set(keys) == set(self._sources):
-            self._names = names               # names may have resolved late
-            return
-        new = [k for k in keys if k not in self._sources]
+        keyset = set(keys)
+        checked = {self._src_list.item(i).data(QtCore.Qt.UserRole)
+                   for i in range(self._src_list.count())
+                   if self._src_list.item(i).checkState() == QtCore.Qt.Checked}
         self._sources, self._names = keys, names
-        for k in new:
+        self._src_list.blockSignals(True)     # restoring checks must not re-restream
+        self._src_list.clear()
+        for k in keys:
             it = QtWidgets.QListWidgetItem(self._name(k))
             it.setData(QtCore.Qt.UserRole, k)
             it.setForeground(QtGui.QColor(color_for(k)))
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
-            it.setCheckState(QtCore.Qt.Unchecked)
+            it.setCheckState(QtCore.Qt.Checked if k in checked else QtCore.Qt.Unchecked)
             self._src_list.addItem(it)
-        self._cover = {k: self.resolver.coverage(k) for k in self._sources}
+        self._src_list.blockSignals(False)
+        for k in list(self._charts):          # a no-longer-shown source loses its chart
+            if k not in keyset:
+                self._charts.pop(k).setParent(None)
+        self._cover = {k: self.resolver.coverage(k) for k in keys}
         self.ribbon.set_sources(self._sources, self._cover, self._names)
 
     # -- layout --
     def _build_ui(self):
         split = QtWidgets.QSplitter()
         self.setCentralWidget(split)
+        # left column: a "channels" header (with an All toggle = the project lens,
+        # mirroring the Sources panel) over the checkable source list.
+        leftcol = QtWidgets.QWidget()
+        leftcol.setFixedWidth(180)
+        lv = QtWidgets.QVBoxLayout(leftcol)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(0)
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(8, 6, 8, 4)
+        hl = QtWidgets.QLabel("Channels")
+        hl.setStyleSheet(f"color:{_MUTED}; font-weight:700; font-size:11px;")
+        head.addWidget(hl)
+        head.addStretch(1)
+        self._all_chk = QtWidgets.QCheckBox("All")
+        self._all_chk.setToolTip("Show every channel, not just this project's selection")
+        self._all_chk.setChecked(self._show_all)
+        self._all_chk.toggled.connect(self._toggle_show_all)
+        head.addWidget(self._all_chk)
+        lv.addLayout(head)
         left = QtWidgets.QListWidget()
-        left.setFixedWidth(180)
         for k in self._sources:
             it = QtWidgets.QListWidgetItem(self._name(k))
             it.setData(QtCore.Qt.UserRole, k)
@@ -464,7 +520,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
             left.addItem(it)
         left.itemChanged.connect(self._toggle)
         self._src_list = left
-        split.addWidget(left)
+        lv.addWidget(left, 1)
+        split.addWidget(leftcol)
 
         right = QtWidgets.QWidget()
         rv = QtWidgets.QVBoxLayout(right)

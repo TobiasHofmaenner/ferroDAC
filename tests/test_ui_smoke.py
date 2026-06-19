@@ -326,6 +326,33 @@ def test_jump_to_tag_parks_centered(qapp):
 
 
 @pytest.mark.ui
+def test_timeline_respects_channel_lens(qapp):
+    """The Timeline's source list shows the project's curated channels (like the
+    Sources panel), with an "All" toggle to widen to everything."""
+    from qtpy.QtCore import Qt
+    from ferrodac.ui.workspace import SourcePort
+    w = _mainwindow(qapp)
+    try:
+        for key in ("mg/ch1", "mg/ch2", "psu/v"):       # three live channels
+            w.dashboard._sources[key] = SourcePort(key, key.split("/")[-1],
+                                                    "float", "", "dev", "device")
+        w._project_mgr.active.set_sources([{"key": "mg/ch1"}])   # curate one
+        w._open_timeline()
+        qapp.processEvents()
+        tl = w._timeline_win
+        shown = {tl._src_list.item(i).data(Qt.UserRole)
+                 for i in range(tl._src_list.count())}
+        assert shown == {"mg/ch1"}                       # lens: only the curated channel
+        tl._all_chk.setChecked(True)                     # "All" → widen to everything
+        qapp.processEvents()
+        shown_all = {tl._src_list.item(i).data(Qt.UserRole)
+                     for i in range(tl._src_list.count())}
+        assert {"mg/ch1", "mg/ch2", "psu/v"} <= shown_all
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_timeline_opens_on_parked_window(qapp):
     """Opening the Timeline while parked (e.g. after Zoom-to-recording) keeps that
     window and frames the ribbon on it — it must not snap back to the live edge."""
