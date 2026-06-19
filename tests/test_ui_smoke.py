@@ -326,6 +326,25 @@ def test_jump_to_tag_parks_centered(qapp):
 
 
 @pytest.mark.ui
+def test_ribbon_min_window_is_zoom_relative(qapp):
+    """The timeline window can't be dragged shut (head onto tail), but the floor is
+    a fraction of the VISIBLE span — zoom in and you can make a finer window."""
+    from ferrodac.ui.timeline import Ribbon
+    r = Ribbon(["k"], {"k": []}, 0.0, 1000.0)
+    vb = r.getPlotItem().getViewBox()
+    vb.setXRange(0, 1000, padding=0)
+    r.set_window(200.0, 800.0)
+    r.region.setRegion((200.0, 200.5))               # collapse the head onto the tail
+    a, b = r.region.getRegion()
+    assert b - a >= 0.029 * 1000                      # floored to ~3% of the 1000-wide view
+    vb.setXRange(0, 100, padding=0)                   # zoom in 10×
+    r.set_window(40.0, 60.0)
+    r.region.setRegion((40.0, 40.1))
+    a2, b2 = r.region.getRegion()
+    assert 0.029 * 100 <= (b2 - a2) < (b - a)         # finer floor when zoomed in
+
+
+@pytest.mark.ui
 def test_timeline_respects_channel_lens(qapp):
     """The Timeline's source list shows the project's curated channels (like the
     Sources panel), with an "All" toggle to widen to everything."""

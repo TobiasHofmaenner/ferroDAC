@@ -194,6 +194,11 @@ class Ribbon(pg.PlotWidget):
     windowChanged = QtCore.Signal(float, float, bool)   # committed on release (heavy)
     recenter = QtCore.Signal(float)
 
+    # the window can't be dragged narrower than this fraction of the VISIBLE span,
+    # so head & tail never collapse onto one line — but it's zoom-relative, so
+    # zooming in shrinks the floor and you can always make a finer window.
+    _MIN_WIN_FRAC = 0.03
+
     def __init__(self, sources, cover, t0, t1, names=None):
         super().__init__(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self.setBackground(_PANEL)
@@ -301,9 +306,25 @@ class Ribbon(pg.PlotWidget):
         if head > x1 - w * 0.08 or head < x0:
             vb.setXRange(head - w * 0.9, head + w * 0.1, padding=0)
 
+    def _min_window(self):
+        """Floor on the window width — a fraction of the VISIBLE span (zoom level),
+        not the data — so the gap is kept relative to what's on screen."""
+        (x0, x1), _ = self.getPlotItem().getViewBox().viewRange()
+        return self._MIN_WIN_FRAC * max(1e-12, x1 - x0)
+
     def _on_region(self):
         # continuous (dragging): cheap live preview only — never the heavy commit
         a, b = self.region.getRegion()
+        min_w = self._min_window()
+        if b - a < min_w:                  # collapsing past the floor → hold the moved edge
+            pa, pb = self._region_ref      # the region at drag start
+            if abs(a - pa) >= abs(b - pb): # the tail (left) is the one being dragged in
+                a = b - min_w
+            else:                          # the head (right) is being dragged in
+                b = a + min_w
+            self.region.blockSignals(True)
+            self.region.setRegion((a, b))
+            self.region.blockSignals(False)
         self.head.setPos(b)
         self.windowPreview.emit(a, b)
 
