@@ -380,13 +380,21 @@ class TimelineWindow(QtWidgets.QMainWindow):
         now = time.time()
         lo = min((c[0][0] for c in self._cover.values() if c), default=now - 600)
         self.now = now
-        # open LIVE on a session overview: follow now, a sane live tail (capped to
-        # the session if it's short), and zoom the ribbon out to span the whole
-        # session (earliest data → now) so you get a history overview at a glance.
-        self.tc.set_width(max(60.0, min(600.0, now - lo)))
-        self.tc.follow_now()
-        self.t0, self.t1 = self.tc.window
-        self._view0 = lo - 0.04 * max(60.0, now - lo)   # session start, with margin
+        if self.tc.following:
+            # opened LIVE → a session overview: follow now, a sane live tail (capped
+            # to the session if it's short), and zoom the ribbon out to span the
+            # whole session (earliest data → now) for a history glance.
+            self.tc.set_width(max(60.0, min(600.0, now - lo)))
+            self.tc.follow_now()
+            self.t0, self.t1 = self.tc.window
+            self._view0, self._view1 = lo - 0.04 * max(60.0, now - lo), now
+        else:
+            # opened while PARKED (e.g. after Zoom-to-recording) → keep that exact
+            # window and frame the ribbon around it, so the Timeline lands where you
+            # already are instead of snapping back to the live edge.
+            self.t0, self.t1 = self.tc.window
+            pad = max(1.0, (self.t1 - self.t0) * 0.1)
+            self._view0, self._view1 = self.t0 - pad, self.t1 + pad
 
         self._build_ui()
         self._restore_state()                  # reopen as it was left (checked + speed)
@@ -466,7 +474,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True); scroll.setWidget(cw)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.ribbon = Ribbon(self._sources, self._cover, self._view0, self.now,
+        self.ribbon = Ribbon(self._sources, self._cover, self._view0, self._view1,
                              names=self._names)
         self.ribbon.setMinimumHeight(130)
         self.ribbon.windowPreview.connect(self._on_preview)  # dragging → live preview
@@ -480,6 +488,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.perf = PerfStrip()                              # always-on resource HUD
         rv.addWidget(self.perf)
         self.ribbon.set_window(self.t0, self.t1)
+        self.ribbon.set_now(self.now)            # live edge + xMax at real now (view ≠ now when parked)
         split.addWidget(right)
         split.setStretchFactor(1, 1)
 

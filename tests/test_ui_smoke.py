@@ -274,6 +274,28 @@ def test_zoom_recording_parks_window(qapp):
 
 
 @pytest.mark.ui
+def test_timeline_opens_on_parked_window(qapp):
+    """Opening the Timeline while parked (e.g. after Zoom-to-recording) keeps that
+    window and frames the ribbon on it — it must not snap back to the live edge."""
+    import time as _time
+    w = _mainwindow(qapp)
+    try:
+        tc = w.time_context
+        now = _time.time()
+        tc.park_window(now - 500, now - 200)          # where Zoom-to-recording lands
+        a, b = tc.window
+        w._open_timeline()
+        qapp.processEvents()
+        assert tc.following is False                   # didn't jump back to live
+        assert abs(tc.window[0] - a) < 1 and abs(tc.window[1] - b) < 1   # same window
+        # the ribbon view frames the parked window (region on screen, not off to the side)
+        (vx0, vx1), _ = w._timeline_win.ribbon.getPlotItem().getViewBox().viewRange()
+        assert vx0 <= a + 1 and vx1 >= b - 1
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_autorange_ignores_markers(qapp):
     """The "A" auto-range fits the DATA — tags/recordings are annotations and must
     not drag the time axis open (ignoreBounds on the marker items)."""
