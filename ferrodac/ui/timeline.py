@@ -258,6 +258,26 @@ class Ribbon(pg.PlotWidget):
     def set_coverage(self, cover):
         self._draw_bars(cover)
 
+    def set_sources(self, rows, cover, names=None):
+        """Rebuild the track rows (labels + bars) for a new source set — used when
+        sources appear live (e.g. a device joins the hub) while the Timeline is
+        open. The region/head/now markers are independent and stay put."""
+        if names is not None:
+            self._names = names
+        for lab, _ in self._labels:
+            self.removeItem(lab)
+        self._labels = []
+        self._rows = list(rows)
+        for i, key in enumerate(self._rows):
+            y = len(self._rows) - 1 - i
+            lab = pg.TextItem(self._names.get(key) or _label(key),
+                              color=color_for(key), anchor=(0, 0.5))
+            self.addItem(lab)
+            self._labels.append((lab, y + 0.4))
+        self.setYRange(-0.5, max(1, len(self._rows)), padding=0)
+        self._draw_bars(cover)
+        self._reflow()
+
     def set_now(self, now):
         """Move the live marker to `now` and clamp the view so you can't pan/zoom
         into the future — leaving a small margin so the marker isn't flush right."""
@@ -316,9 +336,12 @@ class TimelineWindow(QtWidgets.QMainWindow):
     into the live dashboard (the ReplayController, subscribed to the same `tc`).
     Live is just the head at now. Its own charts are a preview of the resolver."""
 
-    def __init__(self, resolver, store, time_context, parent=None, names=None):
+    def __init__(self, resolver, store, time_context, parent=None, names=None,
+                 sources_fn=None):
         super().__init__(parent)
-        self._names = names or {}            # key -> human display name
+        self._names = dict(names or {})      # key -> human display name (accumulated)
+        self._sources_fn = sources_fn        # callable → {key: name} of LIVE sources
+        #                                      (so sources that join the hub appear)
         self.setWindowTitle("ferroDAC — Timeline")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)   # fresh tc link per open
         self.resize(1100, 720)
@@ -339,7 +362,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._charts: dict = {}
         self._syncing = False                           # guard tc⇄ribbon feedback
 
-        self._sources = list(store.sources())
+        self._sources, self._names = self._available()
         self._cover = {k: resolver.coverage(k) for k in self._sources}
         now = time.time()
         lo = min((c[0][0] for c in self._cover.values() if c), default=now - 600)
@@ -372,6 +395,39 @@ class TimelineWindow(QtWidgets.QMainWindow):
 
     def _name(self, key):
         return self._names.get(key) or _label(key)
+
+    def _available(self):
+        """The current source set + names: the durable store's sources unioned
+        with the live ones (a viewer's hub devices may have no stored history yet).
+        Names accumulate so a late-resolving label is never lost."""
+        names = dict(self._names)
+        if self._sources_fn is not None:
+            try:
+                names.update(self._sources_fn() or {})
+            except Exception:                 # a flaky provider must not break the view
+                pass
+        keys = list(dict.fromkeys(list(self.store.sources()) + list(names)))
+        return keys, names
+
+    def _sync_sources(self):
+        """Pick up sources that appeared since the last tick (e.g. a device joined
+        the hub) and fold them into the list, ribbon tracks and coverage — so the
+        open Timeline updates without a close/reopen."""
+        keys, names = self._available()
+        if set(keys) == set(self._sources):
+            self._names = names               # names may have resolved late
+            return
+        new = [k for k in keys if k not in self._sources]
+        self._sources, self._names = keys, names
+        for k in new:
+            it = QtWidgets.QListWidgetItem(self._name(k))
+            it.setData(QtCore.Qt.UserRole, k)
+            it.setForeground(QtGui.QColor(color_for(k)))
+            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Unchecked)
+            self._src_list.addItem(it)
+        self._cover = {k: self.resolver.coverage(k) for k in self._sources}
+        self.ribbon.set_sources(self._sources, self._cover, self._names)
 
     # -- layout --
     def _build_ui(self):
@@ -515,6 +571,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         never double-drive it.)"""
         self.now = time.time()
         self.ribbon.set_now(self.now)
+        self._sync_sources()                          # fold in sources that joined live
         self._cov_ticks += 1
         if self._cov_ticks % 4 == 0:                  # coverage changes slowly (~2s)
             cov = {k: self.resolver.coverage(k) for k in self._sources}

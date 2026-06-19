@@ -1620,7 +1620,8 @@ class MainWindow(QMainWindow):
             from .timeline import TimelineWindow
             win = TimelineWindow(self.resolver, self.store_writer.store,
                                  self.time_context, self,
-                                 names=self.dashboard.source_names())
+                                 names=self.dashboard.source_names(),
+                                 sources_fn=self.dashboard.source_names)
             win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
             self._timeline_win = win
         self._timeline_win.show()
