@@ -259,7 +259,9 @@ class ChartPanel(Panel):
                            "fill": (10, 14, 19, 180)})
             line.sigPositionChangeFinished.connect(
                 lambda _=None, mid=mid: self._on_marker_drag(mid))
-            self.plot.addItem(line)
+            # ignoreBounds: a tag is an annotation, not data — keep it out of "A"
+            # auto-range so a tag off to the side can't drag the time axis open.
+            self.plot.addItem(line, ignoreBounds=True)
             self._marker_lines[mid] = (line, "line")
         else:
             line = entry[0]
@@ -282,7 +284,9 @@ class ChartPanel(Panel):
             reg.setZValue(-10)
             reg.sigRegionChangeFinished.connect(
                 lambda _=None, mid=mid: self._on_region_drag(mid))
-            self.plot.addItem(reg)
+            # ignoreBounds: a recording span is an annotation too — exclude it from
+            # "A" auto-range (else the whole span is forced on screen).
+            self.plot.addItem(reg, ignoreBounds=True)
             self._marker_lines[mid] = (reg, "region")
         else:
             reg = entry[0]

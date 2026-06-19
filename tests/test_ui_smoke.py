@@ -250,6 +250,30 @@ def test_events_split_recordings_and_tags(qapp):
 
 
 @pytest.mark.ui
+def test_autorange_ignores_markers(qapp):
+    """The "A" auto-range fits the DATA — tags/recordings are annotations and must
+    not drag the time axis open (ignoreBounds on the marker items)."""
+    from ferrodac.ui.panels import ChartPanel
+    from ferrodac.core.markers import MarkerModel
+    from ferrodac.core.tag import RECORDING
+    p = ChartPanel()
+    src = types.SimpleNamespace(name="p", label="p", unit="mbar", dtype="float")
+    p.add_source("k", src)
+    p.feed([types.SimpleNamespace(key="k", t=1000.0 + i, value=1.0 + i, status=0)
+            for i in range(11)])                     # data lives in t ∈ [1000, 1010]
+    ms = MarkerModel()
+    ms.add(50000.0, label="far tag")                 # a point far in the future
+    r = ms.add(60000.0, kind=RECORDING, label="REC")  # a span far away too
+    ms.update(r, t_end=61000.0)
+    p.attach_session(types.SimpleNamespace(), ms)
+    vb = p.plot.getViewBox()
+    vb.autoRange()
+    (xlo, xhi), _ = vb.viewRange()
+    assert xhi < 2000, "marker dragged the time axis open"   # ~1010, not 50000/60000
+    assert xlo > 500
+
+
+@pytest.mark.ui
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"
