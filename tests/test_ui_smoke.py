@@ -148,6 +148,30 @@ def test_project_sets_tag_lens(qapp):
 
 
 @pytest.mark.ui
+def test_project_sets_source_lens(qapp):
+    import tempfile
+    w = _mainwindow(qapp)
+    try:
+        # a fresh project with no curation = no lens (Sources shows everything)
+        assert w.dashboard.source_lens is None
+        # curate two channels on the active project → the lens narrows the view
+        w._project_mgr.active.set_sources([{"key": "a/x"}, {"key": "b/y"}])
+        w._apply_source_lens()
+        assert w.dashboard.source_lens == {"a/x", "b/y"}
+        # 'All' overrides the lens without forgetting the selection
+        w._set_source_lens_all(True)
+        assert w.dashboard.source_lens is None
+        w._set_source_lens_all(False)
+        assert w.dashboard.source_lens == {"a/x", "b/y"}
+        # switching to an un-curated project clears the lens (not blank-by-default)
+        p = w._project_mgr.track(tempfile.mkdtemp(), "Exp")
+        w._switch_project(p.id)
+        assert w.dashboard.source_lens is None
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"

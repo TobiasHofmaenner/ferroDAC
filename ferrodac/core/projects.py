@@ -100,6 +100,32 @@ class Project:
         """The autosaved working layout for this project (the live dashboard)."""
         return os.path.join(self.path, "working.json")
 
+    # -- curated source selection (a LENS over the catalog, not new data) ----
+    @property
+    def sources_path(self) -> str:
+        return os.path.join(self.path, "sources.json")
+
+    def sources(self) -> list:
+        """The project's curated channels: [{key, label?, notes?}, …]. Each maps
+        to a catalog source; the selection just filters the Sources view."""
+        try:
+            with open(self.sources_path, encoding="utf-8") as fh:
+                return json.load(fh).get("sources", [])
+        except Exception:
+            return []
+
+    def source_keys(self) -> set:
+        return {s.get("key") if isinstance(s, dict) else s for s in self.sources()}
+
+    def set_sources(self, sources: list) -> None:
+        try:
+            tmp = self.sources_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"sources": list(sources)}, fh, indent=2)
+            os.replace(tmp, self.sources_path)       # atomic
+        except Exception:
+            pass
+
     @property
     def reports_dir(self) -> str:
         return self.subdir("reports")

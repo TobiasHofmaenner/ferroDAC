@@ -24,6 +24,19 @@ def test_create_and_layout_scan():
     assert p.layouts() == ["overview"]
 
 
+def test_curated_sources_round_trip():
+    d = tempfile.mkdtemp()
+    p = Project.create(os.path.join(d, "exp1"), "Experiment 1")
+    assert p.sources() == [] and p.source_keys() == set()    # nothing curated yet
+    p.set_sources([{"key": "dev/p1"}, {"key": "dev/temp"}])
+    assert p.source_keys() == {"dev/p1", "dev/temp"}         # the lens selection
+    # persists to sources.json (NOT into project.json — meta stays clean)
+    assert json.load(open(os.path.join(p.path, "sources.json")))["sources"][0]["key"] == "dev/p1"
+    assert "sources" not in json.load(open(os.path.join(p.path, "project.json")))
+    # a fresh handle re-reads the selection from disk
+    assert Project(p.path).source_keys() == {"dev/p1", "dev/temp"}
+
+
 def test_registry_track_create_adopt_and_active():
     d = tempfile.mkdtemp()
     reg = os.path.join(d, "projects.json")

@@ -222,6 +222,8 @@ class Dashboard(QObject):
         self._panels: dict = {}                 # panel_id -> Panel
         self.clock = SessionClock()             # one shared time origin
         self.markers = MarkerModel(self)        # tags + record bookmarks
+        self._source_lens = None                # active project's channel selection
+        #                                         (a filter for the Sources view; None=all)
         self._sources: dict[str, SourcePort] = {}
         self._sinks: dict[str, SinkPort] = {}
         self._routes: dict[str, set] = {}        # source_key -> set(sink_key)
@@ -786,6 +788,23 @@ class Dashboard(QObject):
     # -- queries for the docks ----------------------------------------------
     def source_ports(self) -> list:
         return sorted(self._sources.values(), key=lambda p: (p.kind != "device", p.name))
+
+    # -- channel lens (filter the Sources VIEW to the project's selection) ---
+    def set_source_lens(self, keys) -> None:
+        self._source_lens = set(keys) if keys is not None else None
+        self.ports_changed.emit()               # the Sources panel re-renders
+
+    @property
+    def source_lens(self):
+        return None if self._source_lens is None else set(self._source_lens)
+
+    def visible_source_ports(self) -> list:
+        """Source ports the active lens shows (all when no lens). The catalog
+        (source_ports) is never filtered — this only narrows the Sources view."""
+        ports = self.source_ports()
+        if self._source_lens is None:
+            return ports
+        return [p for p in ports if p.key in self._source_lens]
 
     def sink_ports(self) -> list:
         return sorted(self._sinks.values(), key=lambda p: (p.kind != "device", p.name))

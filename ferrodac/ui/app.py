@@ -24,6 +24,7 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
@@ -510,19 +511,35 @@ class CollapsibleGroup(QWidget):
 
 
 class SourcesPanel(QWidget):
-    def __init__(self, manager: DeviceManager, dashboard: Dashboard, parent=None):
+    def __init__(self, manager: DeviceManager, dashboard: Dashboard,
+                 on_curate=None, on_lens=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.dashboard = dashboard
+        self._on_curate = on_curate
+        self._on_lens = on_lens
         self._cards: dict[str, SourceCard] = {}
         self._collapsed: set[str] = set()        # origins folded by the user
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
+        head = QHBoxLayout()
         self._label = QLabel("Sources")
         self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
-        root.addWidget(self._label)
+        head.addWidget(self._label)
+        head.addStretch(1)
+        if on_curate is not None:
+            cur = QToolButton()
+            cur.setText("✔ Curate")
+            cur.setToolTip("Pick which channels this project shows")
+            cur.clicked.connect(lambda: self._on_curate())
+            head.addWidget(cur)
+        self._all = QCheckBox("All")             # off = the project's channel lens
+        self._all.setToolTip("Show every channel, not just the project's selection")
+        self._all.toggled.connect(lambda on: self._on_lens and self._on_lens(on))
+        head.addWidget(self._all)
+        root.addLayout(head)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -540,10 +557,16 @@ class SourcesPanel(QWidget):
     def _rebuild(self):
         clear_layout(self._layout)
         self._cards = {}
-        ports = self.dashboard.source_ports()
-        self._label.setText(f"Sources  ({len(ports)})")
+        ports = self.dashboard.visible_source_ports()     # the project's channel lens
+        total = len(self.dashboard.source_ports())
+        self._label.setText(f"Sources  ({len(ports)}/{total})" if len(ports) != total
+                            else f"Sources  ({len(ports)})")
         if not ports:
-            ph = QLabel("No sources yet.\nAdd a device (Devices) or an input (Add menu).")
+            lensed = self.dashboard.source_lens is not None
+            msg = ("No channels curated for this project.\nHit “✔ Curate”, or tick "
+                   "“All”." if lensed
+                   else "No sources yet.\nAdd a device (Devices) or an input (Add menu).")
+            ph = QLabel(msg)
             ph.setStyleSheet("color:#7f8a99;")
             ph.setWordWrap(True)
             self._layout.addWidget(ph)
@@ -715,6 +738,54 @@ class SinksPanel(QWidget):
 # --------------------------------------------------------------------------- #
 #  Events / tags (markers shared across all charts)
 # --------------------------------------------------------------------------- #
+class _SourceCurateDialog(QDialog):
+    """Tick the channels this project should show. The selection is a LENS over
+    the global catalog (it filters the Sources view), not a copy of any data."""
+
+    def __init__(self, ports, selected, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Curate project channels")
+        self.setMinimumSize(360, 440)
+        lay = QVBoxLayout(self)
+        hint = QLabel("Tick the channels relevant to this project — the Sources "
+                      "panel will then show just these (untick “All” to see them).")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#7f8a99; font-size:11px;")
+        lay.addWidget(hint)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        host = QWidget()
+        col = QVBoxLayout(host)
+        col.setContentsMargins(4, 4, 4, 4)
+        col.setSpacing(3)
+        self._checks: dict = {}
+        sel = set(selected)
+        last_origin = None
+        for p in sorted(ports, key=lambda p: (p.origin or "", p.name)):
+            if p.dtype not in ("float", "bool", "trace"):
+                continue
+            if p.origin != last_origin:             # a light per-device header
+                last_origin = p.origin
+                h = QLabel(p.origin or "other")
+                h.setStyleSheet("color:#8a93a3; font-weight:700; font-size:11px;")
+                col.addWidget(h)
+            cb = QCheckBox(p.name)
+            cb.setChecked(p.key in sel)
+            self._checks[p.key] = cb
+            col.addWidget(cb)
+        col.addStretch(1)
+        scroll.setWidget(host)
+        lay.addWidget(scroll, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def selected_keys(self) -> list:
+        return [k for k, cb in self._checks.items() if cb.isChecked()]
+
+
 class _MarkerDialog(QDialog):
     def __init__(self, label="", comment="", parent=None):
         super().__init__(parent)
@@ -1593,7 +1664,10 @@ class MainWindow(QMainWindow):
         self._tag_save_timer.timeout.connect(self._save_global_tags)
         self.dashboard.markers.changed.connect(self._schedule_tag_save)
 
-        self.sources_panel = SourcesPanel(manager, self.dashboard)
+        self._sources_show_all = False
+        self.sources_panel = SourcesPanel(manager, self.dashboard,
+                                          on_curate=self._curate_sources,
+                                          on_lens=self._set_source_lens_all)
         self.sources_dock = QDockWidget("Sources", self)
         self.sources_dock.setObjectName("SourcesDock")
         self.sources_dock.setWidget(self.sources_panel)
@@ -1857,6 +1931,7 @@ class MainWindow(QMainWindow):
         # new tags file under the active project; tags themselves stay GLOBAL
         self.dashboard.markers.default_projects = [self._project_mgr.active.id]
         self._apply_tag_lens()
+        self._apply_source_lens()                         # the project's channel lens
         self._load_global_tags()
         self._update_project_title()
 
@@ -1869,6 +1944,29 @@ class MainWindow(QMainWindow):
     def _set_tag_lens_all(self, show_all: bool) -> None:
         self._tags_show_all = bool(show_all)
         self._apply_tag_lens()
+
+    # -- source lens (the project's curated channels) ------------------------
+    def _apply_source_lens(self) -> None:
+        """Filter the Sources view to the project's curated channels. An empty
+        selection means 'no lens' (show all) — so a fresh project isn't blank."""
+        p = self._project_mgr.active
+        keys = p.source_keys() if p is not None else set()
+        self.dashboard.set_source_lens(
+            None if (self._sources_show_all or not keys) else keys)
+
+    def _set_source_lens_all(self, show_all: bool) -> None:
+        self._sources_show_all = bool(show_all)
+        self._apply_source_lens()
+
+    def _curate_sources(self) -> None:
+        """Pick which channels this project shows (a lens over the catalog)."""
+        p = self._project_mgr.active
+        if p is None:
+            return
+        dlg = _SourceCurateDialog(self.dashboard.source_ports(), p.source_keys(), self)
+        if dlg.exec():
+            p.set_sources([{"key": k} for k in dlg.selected_keys()])
+            self._apply_source_lens()
 
     # -- global tags (one catalog, filtered by the active project lens) ------
     def _global_tags_path(self) -> str:
@@ -1970,6 +2068,7 @@ class MainWindow(QMainWindow):
         mgr.set_active(pid)                               # persists to the registry
         self.dashboard.markers.default_projects = [pid]   # new tags file here
         self._apply_tag_lens()                            # and the view filters to it
+        self._apply_source_lens()                         # follow the channel lens too
         wp = mgr.active.working_path
         layout = {}
         existed = os.path.exists(wp)
