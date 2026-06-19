@@ -63,24 +63,40 @@ class MarkerModel(QObject):
         super().__init__(parent)
         self._markers: dict[str, Marker] = {}
         self._label_counter = 0
+        self.default_projects: list = []     # new tags are filed under these (the
+        #                                      active project) unless add() overrides
 
     # -- local mutations (user/recorder; bump version + announce locally) ----
     def add(self, t: float, label: str = "", comment: str = "", kind: str = TAG,
             color: str = None, mid: str = None, t_end: float = None,
             run_dir: str = None, origin_kind: str = ORIGIN_USER,
             origin_id: str = "", scope: str = "global",
-            severity: str = "info", payload: dict = None) -> str:
+            severity: str = "info", payload: dict = None,
+            projects: list = None) -> str:
         if mid is None:
             mid = _uuid.uuid4().hex
         self._label_counter += 1
         color = color or color_for(kind, severity)
         if not label:
             label = _KIND_LABEL.get(kind, f"T{self._label_counter}")
+        projs = list(projects) if projects is not None else list(self.default_projects)
         m = Marker(mid, float(t), kind, label, comment, color, t_end, run_dir,
-                   origin_kind, origin_id, scope, severity, dict(payload or {}))
+                   origin_kind, origin_id, scope, severity, dict(payload or {}), projs)
         self._markers[mid] = m
         self._local(mid)
         return mid
+
+    def add_to_project(self, mid: str, pid: str) -> None:
+        m = self._markers.get(mid)
+        if m is not None and pid and pid not in m.projects:
+            m.projects = list(m.projects) + [pid]
+            self._local(mid)
+
+    def remove_from_project(self, mid: str, pid: str) -> None:
+        m = self._markers.get(mid)
+        if m is not None and pid in (m.projects or []):
+            m.projects = [p for p in m.projects if p != pid]
+            self._local(mid)
 
     def remove(self, mid: str) -> None:
         """Tombstone (not a hard drop) so the delete propagates across peers."""

@@ -161,6 +161,7 @@ def tag_to_proto(m: Marker) -> pb.Tag:
     # payload values go on the wire as strings (map<string,string>)
     for k, v in (m.payload or {}).items():
         t.payload[str(k)] = v if isinstance(v, str) else str(v)
+    t.projects.extend(m.projects or [])
     return t
 
 
@@ -173,4 +174,5 @@ def tag_from_proto(t: pb.Tag) -> Marker:
         origin_kind=_ORIGIN_FROM_PROTO.get(t.origin_kind, ORIGIN_USER),
         origin_id=t.origin_id, scope=t.scope or "global",
         severity=_SEVERITY_FROM_PROTO.get(t.severity, "info"),
-        payload=dict(t.payload), version=int(t.version), deleted=bool(t.deleted))
+        payload=dict(t.payload), projects=list(t.projects),
+        version=int(t.version), deleted=bool(t.deleted))

@@ -39,6 +39,11 @@ def test_hub_persists_tags_across_restart():
     assert not h3.publish_tag(pb.Tag(id="t1", t=1.0, label="stale", version=1))
     assert Hub(tags_path=path)._tags["t1"].label == "start (edited)"
 
+    # project membership (the curation lens) persists too
+    h3.publish_tag(pb.Tag(id="t3", t=2.0, label="grouped", version=1,
+                          projects=["projA", "projB"]))
+    assert list(Hub(tags_path=path)._tags["t3"].projects) == ["projA", "projB"]
+
 
 def test_no_path_is_in_memory_only():
     h = Hub()                                    # no persistence configured

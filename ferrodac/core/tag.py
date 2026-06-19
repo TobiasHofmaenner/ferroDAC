@@ -54,6 +54,7 @@ class Marker:
     scope: str = "global"             # global | device:<uuid> | source:<key>
     severity: str = "info"            # info|warn|error|critical (closed enum)
     payload: dict = field(default_factory=dict)   # open machine-readable map
+    projects: list = field(default_factory=list)  # project ids — curation lens (§8.1)
     version: int = 1                  # LWW: higher wins on merge by id
     deleted: bool = False             # tombstone — propagates a delete across peers
 
@@ -76,7 +77,8 @@ def marker_to_dict(m: Marker) -> dict:
             "comment": m.comment, "color": m.color, "t_end": m.t_end,
             "run_dir": m.run_dir, "origin_kind": m.origin_kind,
             "origin_id": m.origin_id, "scope": m.scope, "severity": m.severity,
-            "payload": m.payload, "version": m.version, "deleted": m.deleted}
+            "payload": m.payload, "projects": list(m.projects),
+            "version": m.version, "deleted": m.deleted}
 
 
 def marker_from_dict(d: dict) -> "Marker | None":
@@ -89,8 +91,8 @@ def marker_from_dict(d: dict) -> "Marker | None":
         d.get("t_end"), d.get("run_dir"),
         d.get("origin_kind", ORIGIN_USER), d.get("origin_id", ""),
         d.get("scope", "global"), d.get("severity", "info"),
-        dict(d.get("payload") or {}), int(d.get("version", 1)),
-        bool(d.get("deleted", False)))
+        dict(d.get("payload") or {}), list(d.get("projects") or []),
+        int(d.get("version", 1)), bool(d.get("deleted", False)))
 
 
 # §7.3 vocabulary alias — the entity is a Tag; "Marker" is the legacy name.

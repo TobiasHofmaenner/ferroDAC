@@ -312,6 +312,7 @@ message Tag {
   string color = 12;             // derived from kind/severity (carried for render)
   uint32 version = 13;           // LWW: higher wins on merge by id
   bool deleted = 14;             // tombstone — propagates a delete across peers
+  repeated string projects = 15; // project ids this tag belongs to (curation lens)
 }
 
 message PublishTagRequest {
