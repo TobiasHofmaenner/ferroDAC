@@ -30,8 +30,14 @@ except Exception:
 
 
 def _drain(loop) -> None:
-    """Cancel + await any tasks still pending (grpc.aio's internal handlers)
-    before closing a worker loop, so teardown doesn't log 'Task was destroyed'."""
+    """Cancel + await pending tasks (grpc.aio's internal handlers) AND shut down
+    the loop's default thread-pool executor before closing it.
+
+    Without the executor shutdown its worker threads ('asyncio_N') LEAK on every
+    (re)connect and, being non-daemon, hang the whole process at exit — the
+    interpreter joins them at shutdown and they never stop. That's the
+    'won't terminate while connected to the hub' bug. shutdown_default_executor
+    wakes + joins those workers, so a closed loop leaves nothing behind."""
     import asyncio
     try:
         pending = asyncio.all_tasks(loop)
@@ -41,3 +47,7 @@ def _drain(loop) -> None:
         t.cancel()
     if pending:
         loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    try:
+        loop.run_until_complete(loop.shutdown_default_executor())
+    except Exception:                       # pragma: no cover — old loop / no executor
+        pass

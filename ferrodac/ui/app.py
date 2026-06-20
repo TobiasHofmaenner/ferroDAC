@@ -2964,6 +2964,10 @@ class MainWindow(QMainWindow):
         self.manager.stop()
         self.engine.shutdown()
         super().closeEvent(event)
+        # closing the MAIN window quits the app — otherwise a still-open Timeline or
+        # config dialog (a top-level window) keeps the Qt event loop alive and the
+        # process never exits. (quitOnLastWindowClosed only fires if nothing lingers.)
+        QApplication.quit()
 
 
 # --------------------------------------------------------------------------- #
