@@ -99,12 +99,16 @@ function renderPresence(actors) {
   }
 }
 
+let renderSeq = 0;
 async function renderPreview() {
+  const seq = ++renderSeq;                          // drop stale out-of-order renders
+  let html;
   try {
-    $("doc").innerHTML = String(await processor.process(expandDisplayMath(text())));
+    html = String(await processor.process(expandDisplayMath(text())));
   } catch (e) {
-    $("doc").innerHTML = `<pre class="render-error">render error: ${String(e)}</pre>`;
+    html = `<pre class="render-error">render error: ${String(e)}</pre>`;
   }
+  if (seq === renderSeq) $("doc").innerHTML = html; // only the latest render wins
 }
 
 function text() {
@@ -189,9 +193,11 @@ function enterCollab(shouldSeed, seedText, actor) {
   ydoc.on("update", (u, origin) => {
     if (origin !== "remote" && bridge)
       bridge.collabSendUpdate(b64encode(u), false);   // local edit → up
-    if (origin === "remote") collabReady = true;       // got state from a peer
-    renderPreview();
-    scheduleMaterialise();
+    else if (origin === "remote")
+      collabReady = true;                              // got state from a peer
+    // Render + materialise are driven by the editor's updateListener (onChange),
+    // which fires AFTER y-codemirror reflects this change into the editor — so it
+    // reads FRESH text. Rendering here would read the editor before that sync.
   });
   awareness = new Awareness(ydoc);
   awareness.setLocalStateField("user", { name: actorName, color: colorFor(actorName) });
@@ -278,5 +284,14 @@ function connect() {
     bridge.ready();
   });
 }
+
+// Headless test/diagnostic hook (harmless in production): drive a local edit and
+// read the rendered output without reaching into the IIFE scope.
+window.__doc = {
+  insert: (s) => editor && editor.dispatch(
+    { changes: { from: editor.state.doc.length, insert: s } }),
+  html: () => $("doc").innerHTML,
+  text,
+};
 
 window.addEventListener("DOMContentLoaded", connect);

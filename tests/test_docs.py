@@ -168,6 +168,52 @@ def test_collab_two_views_converge_via_yjs(qapp):
         b.deleteLater()
 
 
+@pytest.mark.ui
+def test_collab_edits_rerender_preview(qapp):
+    """In a collab session BOTH the typist's and the receiver's rendered preview
+    update on EVERY edit — not just the first. Render is driven by the editor's
+    updateListener (fires after y-codemirror applies local AND remote changes), so a
+    stale double-render can't leave the preview behind."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    pa = os.path.join(d, "A.md")
+    pb_ = os.path.join(d, "B.md")
+    with open(pa, "w", encoding="utf-8") as fh:
+        fh.write("# doc\n")
+    with open(pb_, "w", encoding="utf-8") as fh:
+        fh.write("# old\n")
+    a = DocView()
+    a.resize(640, 420)
+    b = DocView()
+    b.resize(640, 420)
+    try:
+        a.open(pa)
+        b.open(pb_)
+        _wait_html(qapp, a.view, "doc")
+        _wait_html(qapp, b.view, "old")
+        ups = []
+        a.bridge.updateRequested.connect(lambda u, c: ups.append(u))
+        a.bridge.collabSeed.emit(True, "", "alice")
+        assert _pump(qapp, lambda: bool(ups))
+        b.bridge.collabSeed.emit(False, "", "bob")
+        _pump(qapp, lambda: True, 0.3)
+        for u in list(ups):
+            b.bridge.collabUpdate.emit(u)
+        _wait_html(qapp, b.view, "doc")
+
+        # a SECOND live edit — the case the convergence test never exercised
+        n = len(ups)
+        a.view.page().runJavaScript("window.__doc.insert(' MORE')")
+        assert _pump(qapp, lambda: len(ups) > n), "2nd edit emitted no update"
+        assert "MORE" in _wait_html(qapp, a.view, "MORE"), "typist's preview stale"
+        for u in ups[n:]:
+            b.bridge.collabUpdate.emit(u)
+        assert "MORE" in _wait_html(qapp, b.view, "MORE"), "receiver's preview stale"
+    finally:
+        a.deleteLater()
+        b.deleteLater()
+
+
 def _run_hub(projects_dir, out, ready):
     import asyncio
     loop = asyncio.new_event_loop()
