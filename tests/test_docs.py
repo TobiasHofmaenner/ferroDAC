@@ -31,6 +31,25 @@ def _wait_html(qapp, webview, needle, timeout=30.0):
 
 
 @pytest.mark.ui
+def test_docview_centers_display_math(qapp):
+    """A standalone `$$ … $$` line renders as CENTERED display math (katex-display),
+    matching Obsidian/GitHub/MathJax — not left-aligned inline."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "README.md")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("intro\n\n$$\\frac{\\sigma}{\\pi}$$\n")
+    dv = DocView()
+    dv.resize(560, 360)
+    try:
+        dv.open(p)
+        html = _wait_html(qapp, dv.view, "katex-display")
+        assert "katex-display" in html, "$$…$$ did not render as centered display math"
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_docview_renders_and_reloads(qapp):
     from ferrodac.ui.docs import DocView
     d = tempfile.mkdtemp()

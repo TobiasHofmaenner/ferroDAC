@@ -25,9 +25,18 @@ const processor = unified()
 
 const docEl = () => document.getElementById("doc");
 
+// A line that is exactly `$$ … $$` should be CENTERED display math (what every
+// other tool does), but remark-math only treats `$$` as display when the fences
+// are on their own lines. Expand a standalone `$$…$$` line to that block form
+// before parsing — the file on disk is untouched, this is render-only.
+function expandDisplayMath(md) {
+  return md.replace(/^[ \t]*\$\$([^$]+?)\$\$[ \t]*$/gm,
+                    (_m, inner) => `$$\n${inner.trim()}\n$$`);
+}
+
 async function render(md) {
   try {
-    docEl().innerHTML = String(await processor.process(md || ""));
+    docEl().innerHTML = String(await processor.process(expandDisplayMath(md || "")));
   } catch (e) {
     docEl().innerHTML = `<pre class="render-error">render error: ${String(e)}</pre>`;
   }
