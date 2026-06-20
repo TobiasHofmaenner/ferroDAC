@@ -85,6 +85,20 @@ function colorFor(name) {
   return `hsl(${h % 360} 70% 60%)`;
 }
 
+function renderPresence(actors) {
+  const el = $("presence");
+  if (!el) return;
+  el.replaceChildren();
+  for (const a of actors) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.title = a;
+    chip.textContent = ((a.split("@")[0] || "?")[0] || "?").toUpperCase();
+    chip.style.background = colorFor(a);
+    el.appendChild(chip);
+  }
+}
+
 async function renderPreview() {
   try {
     $("doc").innerHTML = String(await processor.process(expandDisplayMath(text())));
@@ -165,6 +179,11 @@ function scheduleMaterialise() {
 function enterCollab(shouldSeed, seedText, actor) {
   if (collabActive) return;
   actorName = actor || "editor";
+  // The seeder establishes the shared doc. Prefer THIS view's current text (the
+  // local .md the user is looking at) over the server's — on the FIRST ever
+  // collaboration the server file is empty, and seeding from it would wipe the
+  // local content. The server text is only a fallback (an empty local view).
+  const localText = text();
   ydoc = new Y.Doc();
   const ytext = ydoc.getText("md");
   ydoc.on("update", (u, origin) => {
@@ -191,7 +210,8 @@ function enterCollab(shouldSeed, seedText, actor) {
   // (the duplication trap). The seeder then fills the doc from the file text.
   editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: "" } });
   editor.dispatch({ effects: collabCompartment.reconfigure(yCollab(ytext, awareness)) });
-  if (shouldSeed) ydoc.transact(() => ytext.insert(0, seedText || ""), "seed");
+  if (shouldSeed)
+    ydoc.transact(() => ytext.insert(0, localText || seedText || ""), "seed");
   if (mode === "read") setMode("split");         // surface the collaboration
   status("collaborating");
 }
@@ -209,6 +229,7 @@ function leaveCollab() {
   clearTimeout(matTimer);
   lastSynced = finalText;
   if (bridge) bridge.save(finalText);            // land the final text in the local .md
+  renderPresence([]);
   status("");
 }
 
@@ -249,6 +270,7 @@ function connect() {
     bridge.collabPresence.connect((actorsJson) => {
       let actors = [];
       try { actors = JSON.parse(actorsJson); } catch (e) { /* ignore */ }
+      renderPresence(actors);
       const n = actors.length;
       status(`collaborating · ${n} editor${n === 1 ? "" : "s"}`);
     });

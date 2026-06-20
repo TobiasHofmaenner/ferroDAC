@@ -52,7 +52,8 @@ class HubController(QObject):
         self._projsync = None            # hub project sync (opt-in, role-independent)
         self._docsync = None             # live collab-editing relay (role-independent)
         self._doc_bridges: dict = {}     # doc_id -> [DocBridge] currently collaborating
-        self._aid = ""                   # this client's actor id (ferrodac@host)
+        self._aid = ""                   # this client's agent id (ferrodac@host)
+        self._collab_actor = ""          # collab presence name (display name or aid)
         self._project_mgr = None         # set post-construction (after _setup_projects)
         self._on_projects = None         # () -> refresh the Projects dock
         self._sync = None                # store-and-forward SyncRunner (agent role)
@@ -111,6 +112,10 @@ class HubController(QObject):
         self._update_local()
         aid = f"ferrodac@{socket.gethostname()}"
         self._aid = aid
+        from qtpy.QtCore import QSettings
+        name = (QSettings("ferroDAC", "ferroDAC").value(
+            "collab/name", "", type=str) or "").strip()
+        self._collab_actor = name or aid          # presence/cursor label
         if as_agent:
             self._agent = HubAgent(addr, agent_id=aid,
                                    on_state=self._state_cb("agent"))
@@ -282,7 +287,7 @@ class HubController(QObject):
 
     def doc_join(self, doc_id: str) -> None:
         if self._docsync is not None:
-            self._docsync.join(doc_id, actor=self._aid)
+            self._docsync.join(doc_id, actor=self._collab_actor or self._aid)
 
     def doc_leave(self, doc_id: str) -> None:
         if self._docsync is not None:
@@ -311,8 +316,9 @@ class HubController(QObject):
 
     def _on_doc_seed_gui(self, doc_id, should_seed, text) -> None:
         # the actor label for THIS client's own cursor (the seed itself is anonymous)
+        actor = self._collab_actor or self._aid
         self._emit_to_bridges(
-            doc_id, lambda b: b.collabSeed.emit(should_seed, text, self._aid))
+            doc_id, lambda b: b.collabSeed.emit(should_seed, text, actor))
 
     def _on_doc_update_gui(self, doc_id, update_b64) -> None:
         self._emit_to_bridges(doc_id, lambda b: b.collabUpdate.emit(update_b64))

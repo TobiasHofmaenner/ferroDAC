@@ -156,8 +156,9 @@ class DocView(QWidget):
         self._mtime_seen = None
         self._on_edit = on_edit          # optional override callable(path)
         self._on_configure = on_configure  # optional override callable()
-        self._collab = None              # a HubController, once bound (Phase 2 relay)
+        self._collab = None              # a HubController, when a hub+doc is available
         self._doc_id = None              # "<project_id>::<relpath>" for collaboration
+        self._collab_on = False          # currently in a live session?
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -168,6 +169,14 @@ class DocView(QWidget):
         self._title.setStyleSheet("font-weight:700; color:#c7d0db;")
         head.addWidget(self._title)
         head.addStretch(1)
+
+        self._collab_btn = QPushButton("👥 Collaborate")
+        self._collab_btn.setCheckable(True)
+        self._collab_btn.setToolTip("Edit this document together, live, with others "
+                                    "on the hub")
+        self._collab_btn.setVisible(False)        # shown once a hub + doc is available
+        self._collab_btn.toggled.connect(self._on_collab_toggled)
+        head.addWidget(self._collab_btn)
 
         self._open_btn = QPushButton("📂 Open…")
         self._open_btn.setToolTip("Open another markdown file in this view")
@@ -193,6 +202,12 @@ class DocView(QWidget):
         self.view = QWebEngineView()
         self.bridge = DocBridge(self)
         self.bridge.saveRequested.connect(self._write)   # in-app edits → the file
+        # Collaboration: the bridge↔hub wiring is STATIC (connected once); the doc_id
+        # and controller are dynamic state, so switching docs never re-wires signals.
+        self.bridge.updateRequested.connect(self._collab_send_update)
+        self.bridge.awarenessRequested.connect(self._collab_send_awareness)
+        self.bridge.snapshotRequested.connect(self._collab_send_snapshot)
+        self.bridge.leaveRequested.connect(self._stop_collab)
         self._channel = QWebChannel(self)
         self._channel.registerObject("bridge", self.bridge)
         self.view.page().setWebChannel(self._channel)
@@ -214,6 +229,7 @@ class DocView(QWidget):
             return None
 
     def open(self, path: str) -> None:
+        self.set_collab_target(None, None)        # a new file → drop any collab target
         for w in self._watcher.files() + self._watcher.directories():
             self._watcher.removePath(w)
         self._path = os.path.abspath(path)
@@ -305,29 +321,52 @@ class DocView(QWidget):
         else:
             configure_editor_command(self)
 
-    # -- collaboration (Phase 2 relay; the toggle UI lands in Phase 4) --------
-    def bind_collab(self, controller, doc_id: str) -> None:
-        """Wire this view's bridge to a HubController's doc relay. Outgoing edits
-        (JS → Qt) forward to the hub with this view's doc_id injected; incoming
-        edits route back via the controller's per-doc_id bridge registry."""
+    # -- collaboration -------------------------------------------------------
+    def set_collab_target(self, controller, doc_id) -> None:
+        """Declare which hub + doc_id this view COULD collaborate on (or (None, None)
+        when none). Shows/hides the Collaborate toggle; leaves any live session whose
+        target just went away (disconnected, switched to a non-hub doc, …)."""
+        if self._collab_on and (controller is not self._collab or doc_id != self._doc_id):
+            self._stop_collab()
         self._collab = controller
         self._doc_id = doc_id
-        b = self.bridge
-        b.updateRequested.connect(
-            lambda u, c, d=doc_id: controller.doc_send_update(d, u, c))
-        b.awarenessRequested.connect(
-            lambda s, d=doc_id: controller.doc_send_awareness(d, s))
-        b.snapshotRequested.connect(
-            lambda t, d=doc_id: controller.doc_send_snapshot(d, t))
-        b.leaveRequested.connect(self.stop_collab)
+        available = controller is not None and bool(doc_id)
+        self._collab_btn.setVisible(available)
+        if not available and self._collab_on:
+            self._stop_collab()
 
-    def start_collab(self) -> None:
-        if self._collab is not None and self._doc_id:
-            self._collab.doc_register(self._doc_id, self.bridge)
-            self._collab.doc_join(self._doc_id)
+    def _on_collab_toggled(self, checked: bool) -> None:
+        if checked:
+            self._start_collab()
+        else:
+            self._stop_collab()
 
-    def stop_collab(self) -> None:
-        if self._collab is not None and self._doc_id:
+    def _start_collab(self) -> None:
+        if self._collab_on or self._collab is None or not self._doc_id:
+            return
+        self._collab_on = True
+        self._collab.doc_register(self._doc_id, self.bridge)
+        self._collab.doc_join(self._doc_id)       # → DocSeed starts the JS session
+        self._collab_btn.setChecked(True)
+        self._collab_btn.setText("👥 Collaborating")
+
+    def _stop_collab(self) -> None:
+        if self._collab_on and self._collab is not None and self._doc_id:
             self._collab.doc_leave(self._doc_id)
             self._collab.doc_unregister(self._doc_id, self.bridge)
-            self.bridge.collabStopped.emit()
+            self.bridge.collabStopped.emit()       # JS tears down Yjs → back to solo
+        self._collab_on = False
+        self._collab_btn.setChecked(False)
+        self._collab_btn.setText("👥 Collaborate")
+
+    def _collab_send_update(self, update_b64: str, compaction: bool) -> None:
+        if self._collab_on and self._collab is not None and self._doc_id:
+            self._collab.doc_send_update(self._doc_id, update_b64, compaction)
+
+    def _collab_send_awareness(self, state_b64: str) -> None:
+        if self._collab_on and self._collab is not None and self._doc_id:
+            self._collab.doc_send_awareness(self._doc_id, state_b64)
+
+    def _collab_send_snapshot(self, text: str) -> None:
+        if self._collab_on and self._collab is not None and self._doc_id:
+            self._collab.doc_send_snapshot(self._doc_id, text)

@@ -6,6 +6,7 @@ installed) and marked `ui` (the lightweight CI gate skips Qt).
 
 import os
 import tempfile
+import threading
 import time
 
 import pytest
@@ -134,7 +135,7 @@ def test_collab_two_views_converge_via_yjs(qapp):
     pa = os.path.join(d, "A.md")
     pb_ = os.path.join(d, "B.md")
     with open(pa, "w", encoding="utf-8") as fh:
-        fh.write("# seed\n")
+        fh.write("# hello collab\n")              # A's local content seeds the shared doc
     with open(pb_, "w", encoding="utf-8") as fh:
         fh.write("# other\n")
     a = DocView()
@@ -144,13 +145,13 @@ def test_collab_two_views_converge_via_yjs(qapp):
     try:
         a.open(pa)
         b.open(pb_)
-        _wait_html(qapp, a.view, "seed")          # A's bundle loaded + bridge wired
+        _wait_html(qapp, a.view, "hello collab")  # A's bundle loaded + bridge wired
         _wait_html(qapp, b.view, "other")         # B's too
 
         updates = []
         a.bridge.updateRequested.connect(lambda u, c: updates.append(u))
-        # A seeds the shared doc from this (collaborative) text and emits the update
-        a.bridge.collabSeed.emit(True, "# hello collab\n", "alice")
+        # A seeds from its LOCAL content (server text empty — first collaboration)
+        a.bridge.collabSeed.emit(True, "", "alice")
         assert _pump(qapp, lambda: bool(updates)), "seeder emitted no Yjs update"
         seed_update = updates[0]
 
@@ -165,6 +166,112 @@ def test_collab_two_views_converge_via_yjs(qapp):
     finally:
         a.deleteLater()
         b.deleteLater()
+
+
+def _run_hub(projects_dir, out, ready):
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    from hub.core import Hub
+    from hub.main import build_server
+    server, _ = build_server(hub=Hub(projects_dir=projects_dir))
+    port = server.add_insecure_port("127.0.0.1:0")
+    loop.run_until_complete(server.start())
+    out["addr"] = f"127.0.0.1:{port}"
+    out["loop"] = loop
+    ready.set()
+    loop.run_forever()
+    loop.run_until_complete(server.stop(0))
+    loop.close()
+
+
+def _mk_doc_controller(addr, actor):
+    """A real HubController exercising ONLY its doc path (no dashboard/engine), with
+    its HubDocSync wired exactly as connect() does — so this is the real relay +
+    QueuedConnection routing, not a stub."""
+    from ferrodac.ui.hubclient import HubController
+    from ferrodac.net.docs import HubDocSync
+    hc = HubController(None, None, None)
+    hc._aid = hc._collab_actor = actor
+    hc._docsync = HubDocSync(
+        addr, agent_id=actor,
+        on_seed=lambda d, s, t: hc._doc_seed.emit(d, s, t),
+        on_update=lambda d, u: hc._doc_update.emit(d, u),
+        on_awareness=lambda d, a: hc._doc_awareness.emit(d, a),
+        on_presence=lambda d, a: hc._doc_presence.emit(d, a))
+    hc._docsync.start()
+    return hc
+
+
+@pytest.mark.ui
+def test_collab_end_to_end_through_hub(qapp):
+    """The WHOLE stack: two DocViews, two real HubControllers, one hub. A toggles
+    Collaborate on a cold doc → seeds from its local text → the hub fans it to B,
+    whose editor converges. Exercises DocView toggle → controller → HubDocSync → hub
+    → HubDocSync → controller (QueuedConnection) → bridge → JS, both directions."""
+    pytest.importorskip("grpc")
+    pytest.importorskip("ferrodac_contract.v1.data_plane_pb2")
+    from ferrodac.ui.docs import DocView
+
+    tmp = tempfile.mkdtemp()
+    os.makedirs(os.path.join(tmp, "proj1", "docs"), exist_ok=True)
+    pa = os.path.join(tmp, "A.md")
+    pb_ = os.path.join(tmp, "B.md")
+    with open(pa, "w", encoding="utf-8") as fh:
+        fh.write("# live doc\n")
+    with open(pb_, "w", encoding="utf-8") as fh:
+        fh.write("# stale\n")
+    doc_id = "proj1::README.md"
+
+    out, ready = {}, threading.Event()
+    ht = threading.Thread(target=_run_hub, args=(tmp, out, ready), daemon=True)
+    ht.start()
+    assert ready.wait(5), "hub did not start"
+    addr = out["addr"]
+
+    hca = _mk_doc_controller(addr, "alice")
+    hcb = _mk_doc_controller(addr, "bob")
+    a = DocView()
+    a.resize(640, 420)
+    b = DocView()
+    b.resize(640, 420)
+    try:
+        a.open(pa)
+        b.open(pb_)
+        _wait_html(qapp, a.view, "live doc")
+        _wait_html(qapp, b.view, "stale")
+
+        a_seeds = []
+        a.bridge.collabSeed.connect(lambda s, t, act: a_seeds.append(s))
+        a_updates = []
+        a.bridge.updateRequested.connect(lambda u, c: a_updates.append(u))
+
+        # A goes live first → cold room → it seeds from its local "# live doc"
+        a.set_collab_target(hca, doc_id)
+        a._start_collab()
+        assert _pump(qapp, lambda: a_seeds and a_seeds[0] is True), "A wasn't asked to seed"
+        assert _pump(qapp, lambda: bool(a_updates)), "A emitted no baseline to the hub"
+
+        # B joins → the hub replays the baseline → B converges through the full stack
+        b.set_collab_target(hcb, doc_id)
+        b._start_collab()
+        html = _wait_html(qapp, b.view, "live doc", timeout=20)
+        assert "live doc" in html, "B did not converge through the hub"
+        assert html.count("live doc") == 1, "content duplicated"
+        assert "stale" not in html, "B's original text survived the merge"
+    finally:
+        a._stop_collab()
+        b._stop_collab()
+        for _ in range(10):
+            qapp.processEvents()
+            time.sleep(0.02)
+        hca._docsync.stop()
+        hcb._docsync.stop()
+        a.deleteLater()
+        b.deleteLater()
+        if out.get("loop") is not None:
+            out["loop"].call_soon_threadsafe(out["loop"].stop)
+        ht.join(timeout=5)
 
 
 @pytest.mark.ui

@@ -2253,6 +2253,19 @@ class MainWindow(QMainWindow):
         readme = self._active_readme()
         if readme:
             self._docs_view.open(readme)
+        self._refresh_doc_collab()
+
+    def _refresh_doc_collab(self) -> None:
+        """Offer the Docs view's Collaborate toggle when it's showing a HUB
+        project's doc and the hub is connected; otherwise hide it (ending any live
+        session). doc_id = "<project_id>::README.md" — the server maps it under the
+        project's docs/ folder."""
+        if self._docs_view is None:
+            return
+        p = self._project_mgr.active
+        doc_id = (f"{p.id}::README.md"
+                  if getattr(p, "is_hub", False) and self.hub.connected else None)
+        self._docs_view.set_collab_target(self.hub if doc_id else None, doc_id)
 
     def _lock_chrome(self, editable: bool) -> None:
         """Player + Log docks follow the 'Edit layout' toggle, like the panel
@@ -2283,6 +2296,7 @@ class MainWindow(QMainWindow):
         self.dashboard.refresh_ports()
         if getattr(self, "projects_panel", None) is not None:
             self.projects_panel.refresh()       # enable/disable the “On the hub…” item
+        self._refresh_doc_collab()              # offer/retire the Collaborate toggle
 
     def _open_hub(self):
         if not self.hub.available:
