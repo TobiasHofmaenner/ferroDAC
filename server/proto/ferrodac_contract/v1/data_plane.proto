@@ -425,6 +425,90 @@ service Projects {
 }
 
 // --------------------------------------------------------------------------- //
+//  Docs — LIVE collaborative document editing (DESIGN §10.x).
+// --------------------------------------------------------------------------- //
+// A project markdown file edited by several people at once. The CRDT (Yjs) lives
+// in the EDITOR (the browser); the hub is a DUMB per-doc ROOM that fans opaque
+// update bytes out to the other members and persists durability — it NEVER parses
+// the bytes (no CRDT on the server: keeps the hub language-agnostic, the wire
+// additive, and avoids a Python CRDT dep). doc_id = "<project_id>::<relpath>",
+// the file under the hub project's docs/ folder. Bidirectional like Ingest.Session:
+// ONE Session per client multiplexes every doc room it joins (doc_id on each msg).
+//
+// Seeding (the anti-duplication rule): independently seeding a Yjs doc from text
+// on each peer yields non-mergeable docs. So the hub designates the FIRST joiner of
+// a COLD room as the seeder (DocSeed.should_seed + the file text); that peer builds
+// the doc and emits the first DocUpdate. Every OTHER joiner starts EMPTY and applies
+// the replayed baseline+log (Yjs applyUpdate is idempotent + commutative, so order/
+// dupes converge). Durability: a compacted baseline blob (<relpath>.ycrdt) the
+// leader refreshes, plus a human-readable <relpath> materialised from DocSnapshot.
+// Role-independent and ADDITIVE, exactly like Tags/Projects.
+
+message DocJoin {
+  string token = 1;              // reserved auth seam (allow-all in M1)
+  string doc_id = 2;             // "<project_id>::<relpath>"
+  string actor = 3;              // who is editing (e.g. ferrodac@host) — presence
+  string color = 4;             // cursor/presence colour (carried for render)
+}
+
+message DocLeave { string doc_id = 1; }
+
+message DocUpdate {
+  string doc_id = 1;
+  bytes update = 2;              // opaque Yjs update — the hub never parses it
+  bool compaction = 3;          // leader-only: replace the baseline, clear the log
+}
+
+message DocAwareness {
+  string doc_id = 1;
+  bytes state = 2;               // opaque y-protocols awareness — expendable
+}
+
+message DocSnapshot {
+  string doc_id = 1;
+  string text = 2;               // human-readable materialisation (leader writes .md)
+}
+
+message DocSeed {                // hub -> client: cold-start handshake (reply to Join)
+  string doc_id = 1;
+  bool should_seed = 2;          // true: build the doc from `text`, emit the first update
+  string text = 3;               // file text to seed from (only when should_seed)
+}
+
+message DocPresence {            // hub -> client: room membership for the avatars
+  string doc_id = 1;
+  repeated string actors = 2;
+}
+
+// Up the Docs Session stream (client -> hub).
+message DocClientMsg {
+  oneof msg {
+    Hello hello = 1;             // first message (reused from Ingest)
+    DocJoin join = 2;
+    DocLeave leave = 3;
+    DocUpdate update = 4;
+    DocAwareness awareness = 5;
+    DocSnapshot snapshot = 6;
+  }
+}
+
+// Down the Docs Session stream (hub -> client).
+message DocServerMsg {
+  oneof msg {
+    Welcome welcome = 1;         // handshake reply (reused from Ingest)
+    DocSeed seed = 2;
+    DocUpdate update = 3;        // replayed baseline+log, then live fan-out
+    DocAwareness awareness = 4;
+    DocPresence presence = 5;
+  }
+}
+
+service Docs {
+  // One stream per client; carries every doc room it joins (doc_id on each msg).
+  rpc Session(stream DocClientMsg) returns (stream DocServerMsg);
+}
+
+// --------------------------------------------------------------------------- //
 //  Store service — durable historic data (DESIGN §7.4 / §12.1).
 //
 //  One contract, two directions, both thin wrappers over the hub's ZarrStore:

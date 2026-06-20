@@ -17,7 +17,7 @@ import uuid as _uuid
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from .core import CONTRACT_VERSION, HUB_VERSION, Hub, Subscriber
+from .core import CONTRACT_VERSION, HUB_VERSION, DocMember, Hub, Subscriber
 
 log = logging.getLogger("hub")
 
@@ -166,6 +166,76 @@ class ProjectsServicer(rpc.ProjectsServicer):
             pass
         finally:
             self.hub.remove_project_watcher(q)
+
+
+class DocsServicer(rpc.DocsServicer):
+    """Live collaborative editing (DESIGN §10.x). One bidirectional Session per
+    client multiplexes every doc room it joins; the hub is a DUMB relay of opaque
+    Yjs update bytes + presence, never parsing the CRDT. Role-independent and
+    ADDITIVE like Tags/Projects — an old client that never opens a Session is
+    unaffected."""
+
+    def __init__(self, hub: Hub):
+        self.hub = hub
+
+    async def Session(self, request_iterator, context):  # noqa: N802
+        outq: asyncio.Queue = asyncio.Queue()      # this client's single out-stream
+        members: dict[str, DocMember] = {}         # doc_id -> our membership
+        agent = "?"
+
+        async def reader() -> None:
+            nonlocal agent
+            try:
+                async for msg in request_iterator:
+                    which = msg.WhichOneof("msg")
+                    if which == "hello":
+                        agent = msg.hello.agent_id or "?"
+                        outq.put_nowait(pb.DocServerMsg(welcome=pb.Welcome(
+                            session_id=_uuid.uuid4().hex,
+                            contract_version=CONTRACT_VERSION,
+                            hub_version=HUB_VERSION)))
+                    elif which == "join":
+                        doc_id = msg.join.doc_id
+                        if doc_id in members:
+                            continue
+                        member = DocMember(outq, msg.join.actor or agent)
+                        if self.hub.doc_join(doc_id, member):
+                            members[doc_id] = member
+                    elif which == "leave":
+                        member = members.pop(msg.leave.doc_id, None)
+                        if member is not None:
+                            self.hub.doc_leave(msg.leave.doc_id, member)
+                    elif which == "update":
+                        member = members.get(msg.update.doc_id)
+                        if member is not None:
+                            self.hub.doc_update(msg.update.doc_id, member,
+                                                msg.update.update, msg.update.compaction)
+                    elif which == "awareness":
+                        member = members.get(msg.awareness.doc_id)
+                        if member is not None:
+                            self.hub.doc_awareness(msg.awareness.doc_id, member,
+                                                   msg.awareness.state)
+                    elif which == "snapshot":
+                        member = members.get(msg.snapshot.doc_id)
+                        if member is not None:
+                            self.hub.doc_snapshot(msg.snapshot.doc_id, member,
+                                                  msg.snapshot.text)
+            finally:
+                outq.put_nowait(None)              # sentinel → the generator stops
+
+        rtask = asyncio.create_task(reader())
+        try:
+            while True:
+                item = await outq.get()
+                if item is None:
+                    break
+                yield item
+        finally:
+            rtask.cancel()
+            for doc_id, member in list(members.items()):   # leave every joined room
+                self.hub.doc_leave(doc_id, member)
+            log.info("docs client disconnected: %s (left %d room(s))",
+                     agent, len(members))
 
 
 # --------------------------------------------------------------------------- #

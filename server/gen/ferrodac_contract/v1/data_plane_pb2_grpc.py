@@ -616,6 +616,79 @@ class Projects:
             _registered_method=True)
 
 
+class DocsStub:
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Session = channel.stream_stream(
+                '/ferrodac_contract.v1.Docs/Session',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DocClientMsg.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DocServerMsg.FromString,
+                _registered_method=True)
+
+
+class DocsServicer:
+    """Missing associated documentation comment in .proto file."""
+
+    def Session(self, request_iterator, context):
+        """One stream per client; carries every doc room it joins (doc_id on each msg).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_DocsServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Session': grpc.stream_stream_rpc_method_handler(
+                    servicer.Session,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DocClientMsg.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DocServerMsg.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'ferrodac_contract.v1.Docs', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('ferrodac_contract.v1.Docs', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class Docs:
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def Session(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_stream(
+            request_iterator,
+            target,
+            '/ferrodac_contract.v1.Docs/Session',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.DocClientMsg.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.DocServerMsg.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class StoreStub:
     """Missing associated documentation comment in .proto file."""
 

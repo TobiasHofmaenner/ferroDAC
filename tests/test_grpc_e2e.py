@@ -17,6 +17,7 @@ E2E = [
     "sync_e2e",     # sync mirror + live tail + read tier (ListSources/Coverage/Query/ReadRaw/Trace)
     "e2e",          # agent → hub → viewer: transparent remote device, subscribe, retire
     "net_e2e",      # app net layer round-trip (convert + agent/viewer), incl. Trace
+    "docs_collab_e2e",  # live collab rooms: seed/fan-out/compaction/snapshot/persist
 ]
 
 
