@@ -60,7 +60,7 @@ class DocView(QWidget):
     """Renders a project markdown file live; an external editor editing the raw file
     is just another writer the watcher catches."""
 
-    def __init__(self, on_edit=None, parent=None):
+    def __init__(self, on_edit=None, on_configure=None, parent=None):
         super().__init__(parent)
         self._path = None                # absolute path of the open doc
         self._on_edit = on_edit          # callable(path) — launch the user's editor
@@ -76,9 +76,14 @@ class DocView(QWidget):
         head.addStretch(1)
         if on_edit is not None:
             self._edit_btn = QPushButton("↗ Open externally")
-            self._edit_btn.setToolTip("Open this file in your system's default editor")
+            self._edit_btn.setToolTip("Open this file in your configured editor")
             self._edit_btn.clicked.connect(self._edit_external)
             head.addWidget(self._edit_btn)
+        if on_configure is not None:
+            gear = QPushButton("⚙")
+            gear.setToolTip("Set the external editor command")
+            gear.clicked.connect(lambda: on_configure())
+            head.addWidget(gear)
         root.addLayout(head)
 
         self.view = QWebEngineView()

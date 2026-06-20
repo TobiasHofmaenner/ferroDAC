@@ -1644,6 +1644,19 @@ def _dur(seconds) -> str:
     return f"{s // 3600}h {(s % 3600) // 60:02d}m"
 
 
+def _editor_args(command: str, path: str) -> list:
+    """argv for an external-editor command template. ``{file}`` (or ``{path}``) is
+    replaced with the file path; with no placeholder the path is appended.
+    ``'konsole -e nvim {file}'`` → ``['konsole','-e','nvim', path]``."""
+    import shlex
+    parts = shlex.split(command)
+    if not parts:
+        return []
+    if "{file}" in command or "{path}" in command:
+        return [a.replace("{file}", path).replace("{path}", path) for a in parts]
+    return parts + [path]
+
+
 class ProjectExplorer(QWidget):
     """The ACTIVE project's contents, grouped and format-aware (Phase 3b). Every
     group is SCANNED fresh from the filesystem — `layouts/`, the curated channels
@@ -2173,9 +2186,39 @@ class MainWindow(QMainWindow):
             ph.setToolTip(str(exc))
             self.docs_dock.setWidget(ph)
             return
-        self._docs_view = DocView(on_edit=self._reveal_path)   # opens with OS default
+        self._docs_view = DocView(on_edit=self._open_doc_external,
+                                  on_configure=self._configure_editor)
         self.docs_dock.setWidget(self._docs_view)
         self._open_active_doc()
+
+    def _open_doc_external(self, path: str) -> None:
+        """Open `path` in the user's CONFIGURED editor command (e.g.
+        ``konsole -e nvim {file}``) — run directly, no OS app-chooser. Falls back to
+        the OS default when no command is set."""
+        from qtpy.QtCore import QSettings
+        cmd = QSettings("ferroDAC", "ferroDAC").value("editor/command", "", type=str) or ""
+        if cmd.strip():
+            import subprocess
+            try:
+                subprocess.Popen(_editor_args(cmd, path), start_new_session=True)
+                return
+            except Exception as exc:                   # noqa: BLE001
+                self.statusBar().showMessage(f"Editor command failed: {exc}", 7000)
+        self._reveal_path(path)                        # OS default (the .md handler)
+
+    def _configure_editor(self) -> None:
+        from qtpy.QtCore import QSettings
+        s = QSettings("ferroDAC", "ferroDAC")
+        cur = s.value("editor/command", "", type=str) or ""
+        text, ok = QInputDialog.getText(
+            self, "External editor command",
+            "Command to open a file (use {file} for the path; blank = OS default).\n"
+            "e.g.   konsole -e nvim {file}",
+            text=cur)
+        if ok:
+            s.setValue("editor/command", text.strip())
+            self.statusBar().showMessage(
+                f"External editor: {text.strip() or 'OS default'}", 5000)
 
     def _open_active_doc(self) -> None:
         """Show the active project's README.md (bootstrap a starter if missing)."""

@@ -614,6 +614,38 @@ def test_hub_project_share_and_republish(qapp):
         w.close()
 
 
+def test_editor_args_template():
+    from ferrodac.ui.app import _editor_args
+    assert _editor_args("konsole -e nvim {file}", "/a/b.md") == \
+        ["konsole", "-e", "nvim", "/a/b.md"]
+    assert _editor_args("code", "/a/b.md") == ["code", "/a/b.md"]        # appended
+    assert _editor_args("gvim '{file}'", "/x y.md") == ["gvim", "/x y.md"]  # path w/ space
+    assert _editor_args("", "/a/b.md") == []                             # blank → none
+
+
+@pytest.mark.ui
+def test_open_doc_external_uses_configured_command(qapp, monkeypatch):
+    """↗ Open externally runs the CONFIGURED editor command directly (no OS chooser)."""
+    from qtpy.QtCore import QSettings
+    w = _mainwindow(qapp)
+    try:
+        QSettings("ferroDAC", "ferroDAC").setValue("editor/command", "konsole -e nvim {file}")
+        launched = {}
+        monkeypatch.setattr("subprocess.Popen", lambda args, **kw: launched.update(args=args))
+        w._open_doc_external("/proj/README.md")
+        assert launched["args"] == ["konsole", "-e", "nvim", "/proj/README.md"]
+        # blank command → falls back to the OS open (no subprocess)
+        QSettings("ferroDAC", "ferroDAC").setValue("editor/command", "")
+        launched.clear()
+        revealed = {}
+        monkeypatch.setattr(w, "_reveal_path", lambda p: revealed.update(p=p))
+        w._open_doc_external("/proj/README.md")
+        assert launched == {} and revealed["p"] == "/proj/README.md"
+    finally:
+        QSettings("ferroDAC", "ferroDAC").remove("editor/command")
+        w.close()
+
+
 @pytest.mark.ui
 def test_docs_dock_is_lazy(qapp):
     """The Docs dock exists but its QtWebEngine view is NOT created until shown —
