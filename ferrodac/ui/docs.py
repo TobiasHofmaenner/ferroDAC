@@ -75,8 +75,8 @@ class DocView(QWidget):
         head.addWidget(self._title)
         head.addStretch(1)
         if on_edit is not None:
-            self._edit_btn = QPushButton("✎ Edit in editor")
-            self._edit_btn.setToolTip("Open this file in your external editor")
+            self._edit_btn = QPushButton("↗ Open externally")
+            self._edit_btn.setToolTip("Open this file in your system's default editor")
             self._edit_btn.clicked.connect(self._edit_external)
             head.addWidget(self._edit_btn)
         root.addLayout(head)

@@ -615,6 +615,48 @@ def test_hub_project_share_and_republish(qapp):
 
 
 @pytest.mark.ui
+def test_docs_dock_is_lazy(qapp):
+    """The Docs dock exists but its QtWebEngine view is NOT created until shown —
+    so launch + the UI suite don't spin up Chromium per window."""
+    w = _mainwindow(qapp)
+    try:
+        assert hasattr(w, "docs_dock")
+        assert not w.docs_dock.isVisible()        # hidden by default
+        assert w._docs_view is None               # lazy: no WebEngine instantiated
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_docs_dock_renders_active_readme(qapp):
+    """Opening the Docs dock lazily builds the view, bootstraps the active project's
+    README.md, and renders it (the integration the user sees)."""
+    pytest.importorskip("qtpy.QtWebEngineWidgets")
+    import os
+    import time
+    w = _mainwindow(qapp)
+    try:
+        w._ensure_docs_view()                     # what first-show triggers
+        assert w._docs_view is not None
+        p = w._project_mgr.active
+        assert os.path.exists(os.path.join(p.path, "README.md"))   # bootstrapped
+        out = {"html": ""}
+        end = time.time() + 30
+        while time.time() < end:
+            w._docs_view.view.page().runJavaScript(
+                "var d=document.getElementById('doc'); d?d.innerHTML:''",
+                lambda h: out.__setitem__("html", h or ""))
+            for _ in range(20):
+                qapp.processEvents()
+                time.sleep(0.02)
+            if p.name in out["html"]:
+                break
+        assert p.name in out["html"], "active project README did not render"
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"

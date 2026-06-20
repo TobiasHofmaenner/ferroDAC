@@ -1963,8 +1963,23 @@ class MainWindow(QMainWindow):
         self.events_dock.setWidget(self.events_panel)
         self.events_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.RightDockWidgetArea, self.events_dock)
+
+        # Docs: an in-app markdown/LaTeX view of the project's README/notes. The
+        # QtWebEngine view is created LAZILY (on first show) so launch + the UI
+        # tests don't spin up Chromium, and the app still runs if WebEngine is
+        # absent. The .md file is truth — edit it in your own editor too.
+        self._docs_view = None
+        self._docs_unavailable = False
+        self.docs_dock = QDockWidget("Docs", self)
+        self.docs_dock.setObjectName("DocsDock")
+        self.docs_dock.setMinimumWidth(320)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.docs_dock)
+        self.docs_dock.visibilityChanged.connect(self._on_docs_visible)
+
         self.tabifyDockWidget(self.sources_dock, self.sinks_dock)
         self.tabifyDockWidget(self.sinks_dock, self.events_dock)
+        self.tabifyDockWidget(self.events_dock, self.docs_dock)
+        self.docs_dock.setVisible(False)
         self.sources_dock.raise_()
 
         self.devices_panel = DevicesPanel(manager, self._open_config)
@@ -2075,6 +2090,7 @@ class MainWindow(QMainWindow):
         view.addAction(self.sources_dock.toggleViewAction())
         view.addAction(self.sinks_dock.toggleViewAction())
         view.addAction(self.events_dock.toggleViewAction())
+        view.addAction(self.docs_dock.toggleViewAction())
         if getattr(self, "player_dock", None) is not None:
             view.addAction(self.player_dock.toggleViewAction())
         view.addAction(self.log_dock.toggleViewAction())
@@ -2104,6 +2120,7 @@ class MainWindow(QMainWindow):
         self.record_action = tb.addAction("● Record", self._toggle_record)
         tb.addAction("＋ Tag", self._add_tag)
         tb.addAction("🕑 Timeline", self._open_timeline)
+        tb.addAction("📄 Docs", self._open_docs)
         tb.addSeparator()
         tb.addAction(self.hub_action)
 
@@ -2133,6 +2150,48 @@ class MainWindow(QMainWindow):
         self._timeline_win.show()
         self._timeline_win.raise_()
         self._timeline_win.activateWindow()
+
+    # -- docs (in-app markdown/LaTeX view; the .md file is truth) -------------
+    def _open_docs(self) -> None:
+        self.docs_dock.setVisible(True)
+        self.docs_dock.raise_()          # → visibilityChanged → lazy-create the view
+
+    def _on_docs_visible(self, visible: bool) -> None:
+        if visible and self._docs_view is None and not self._docs_unavailable:
+            self._ensure_docs_view()
+
+    def _ensure_docs_view(self) -> None:
+        try:
+            from .docs import DocView
+        except Exception as exc:         # noqa: BLE001 — QtWebEngine not installed
+            self._docs_unavailable = True
+            ph = QLabel("Document view needs QtWebEngine.\n\nInstall:\n"
+                        "python3-pyside6.qtwebenginewidgets")
+            ph.setAlignment(Qt.AlignCenter)
+            ph.setWordWrap(True)
+            ph.setStyleSheet("color:#7f8a99; padding:24px;")
+            ph.setToolTip(str(exc))
+            self.docs_dock.setWidget(ph)
+            return
+        self._docs_view = DocView(on_edit=self._reveal_path)   # opens with OS default
+        self.docs_dock.setWidget(self._docs_view)
+        self._open_active_doc()
+
+    def _open_active_doc(self) -> None:
+        """Show the active project's README.md (bootstrap a starter if missing)."""
+        p = self._project_mgr.active
+        if p is None or self._docs_view is None:
+            return
+        readme = os.path.join(p.path, "README.md")
+        if not os.path.exists(readme):
+            try:
+                os.makedirs(p.path, exist_ok=True)
+                with open(readme, "w", encoding="utf-8") as fh:
+                    fh.write(f"# {p.name}\n\n_Describe this project — what, why, "
+                             "and what you expect to see._\n")
+            except Exception:            # noqa: BLE001
+                pass
+        self._docs_view.open(readme)
 
     def _lock_chrome(self, editable: bool) -> None:
         """Player + Log docks follow the 'Edit layout' toggle, like the panel
@@ -2489,6 +2548,8 @@ class MainWindow(QMainWindow):
             self.dashboard.add_panel("chart")      # fresh project → a default chart
         self._update_project_title()
         self._refresh_explorer()                   # show the new project's contents
+        if self._docs_view is not None:
+            self._open_active_doc()                # follow the switch to its README
         self.statusBar().showMessage(f"Project: {mgr.active.name}", 5000)
 
     def _on_export(self):
@@ -3051,6 +3112,14 @@ def main(argv=None) -> int:
     # thread, and a Qt call from the wrong thread is flagged with its origin stack.
     from ..diagnostics import install as _install_diagnostics
     _install_diagnostics(os.path.dirname(logpath) if logpath else "")
+
+    # QtWebEngine (the in-app Docs view) wants shared GL contexts set BEFORE the
+    # QApplication exists. Harmless when WebEngine isn't used.
+    try:
+        from qtpy.QtCore import Qt as _Qt
+        QApplication.setAttribute(_Qt.AA_ShareOpenGLContexts)
+    except Exception:                              # noqa: BLE001
+        pass
 
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("ferroDAC")
