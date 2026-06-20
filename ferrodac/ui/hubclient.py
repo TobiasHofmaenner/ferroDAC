@@ -310,7 +310,9 @@ class HubController(QObject):
                 self.doc_unregister(doc_id, b)
 
     def _on_doc_seed_gui(self, doc_id, should_seed, text) -> None:
-        self._emit_to_bridges(doc_id, lambda b: b.collabSeed.emit(should_seed, text))
+        # the actor label for THIS client's own cursor (the seed itself is anonymous)
+        self._emit_to_bridges(
+            doc_id, lambda b: b.collabSeed.emit(should_seed, text, self._aid))
 
     def _on_doc_update_gui(self, doc_id, update_b64) -> None:
         self._emit_to_bridges(doc_id, lambda b: b.collabUpdate.emit(update_b64))

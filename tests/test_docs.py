@@ -113,6 +113,60 @@ def test_doc_panel_registered_opens_and_persists(qapp):
         other.deleteLater()
 
 
+def _pump(qapp, pred, timeout=15.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        qapp.processEvents()
+        time.sleep(0.02)
+    return False
+
+
+@pytest.mark.ui
+def test_collab_two_views_converge_via_yjs(qapp):
+    """Two DocViews exchanging one opaque Yjs update converge to identical text
+    with NO duplication — the real bundle's Yjs, end-to-end. The seeder builds the
+    doc from its text and emits the seed update; the other starts empty and applies
+    it (the single-seeding rule that avoids CRDT duplication)."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    pa = os.path.join(d, "A.md")
+    pb_ = os.path.join(d, "B.md")
+    with open(pa, "w", encoding="utf-8") as fh:
+        fh.write("# seed\n")
+    with open(pb_, "w", encoding="utf-8") as fh:
+        fh.write("# other\n")
+    a = DocView()
+    a.resize(640, 420)
+    b = DocView()
+    b.resize(640, 420)
+    try:
+        a.open(pa)
+        b.open(pb_)
+        _wait_html(qapp, a.view, "seed")          # A's bundle loaded + bridge wired
+        _wait_html(qapp, b.view, "other")         # B's too
+
+        updates = []
+        a.bridge.updateRequested.connect(lambda u, c: updates.append(u))
+        # A seeds the shared doc from this (collaborative) text and emits the update
+        a.bridge.collabSeed.emit(True, "# hello collab\n", "alice")
+        assert _pump(qapp, lambda: bool(updates)), "seeder emitted no Yjs update"
+        seed_update = updates[0]
+
+        # B joins empty, then applies A's update → converges
+        b.bridge.collabSeed.emit(False, "", "bob")
+        assert _pump(qapp, lambda: True, timeout=0.4)   # let B enter collab
+        b.bridge.collabUpdate.emit(seed_update)
+        html = _wait_html(qapp, b.view, "hello collab")
+        assert "hello collab" in html, "B did not converge to A's text"
+        assert html.count("hello collab") == 1, "content duplicated (seeding bug)"
+        assert "other" not in html, "B's original text survived the merge"
+    finally:
+        a.deleteLater()
+        b.deleteLater()
+
+
 @pytest.mark.ui
 def test_docview_renders_and_reloads(qapp):
     from ferrodac.ui.docs import DocView

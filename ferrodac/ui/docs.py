@@ -94,7 +94,7 @@ class DocBridge(QObject):
 
     # Collaboration (Phase 2 relay). doc_id is IMPLICIT per DocView (Qt owns it);
     # only opaque base64 payloads cross the bridge. Qt → JS:
-    collabSeed = Signal(bool, str)       # (should_seed, text) — start a collab session
+    collabSeed = Signal(bool, str, str)  # (should_seed, text, actor) — start a collab session
     collabUpdate = Signal(str)           # (update_b64) — an incoming Yjs update
     collabAwareness = Signal(str)        # (state_b64) — an incoming awareness update
     collabPresence = Signal(str)         # (actors_json) — room membership
