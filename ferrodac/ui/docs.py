@@ -63,6 +63,8 @@ class DocView(QWidget):
     def __init__(self, on_edit=None, on_configure=None, parent=None):
         super().__init__(parent)
         self._path = None                # absolute path of the open doc
+        self._dir = None                 # its folder (watched too — atomic-save safe)
+        self._mtime_seen = None
         self._on_edit = on_edit          # callable(path) — launch the user's editor
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -96,15 +98,33 @@ class DocView(QWidget):
 
         self._watcher = QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._reload)
+        # …and the FOLDER: editors that save atomically (nvim, vim, VS Code) replace
+        # the file's inode, which silently kills a file-only watch — a directory
+        # watch still fires on the rename, so live reload survives any editor.
+        self._watcher.directoryChanged.connect(self._on_dir_changed)
+
+    @staticmethod
+    def _file_mtime(path):
+        try:
+            return os.path.getmtime(path) if path else None
+        except OSError:
+            return None
 
     def open(self, path: str) -> None:
-        if self._path and self._path in self._watcher.files():
-            self._watcher.removePath(self._path)
+        for w in self._watcher.files() + self._watcher.directories():
+            self._watcher.removePath(w)
         self._path = os.path.abspath(path)
+        self._dir = os.path.dirname(self._path)
         self._title.setText(os.path.basename(self._path))
         if os.path.exists(self._path):
             self._watcher.addPath(self._path)
+        if os.path.isdir(self._dir):
+            self._watcher.addPath(self._dir)
         self._reload()
+
+    def _on_dir_changed(self, _dir) -> None:
+        if self._file_mtime(self._path) != self._mtime_seen:   # OUR file changed
+            self._reload()
 
     def _reload(self, _path=None) -> None:
         text = ""
@@ -114,12 +134,15 @@ class DocView(QWidget):
                     text = fh.read()
             except Exception:            # noqa: BLE001 — unreadable/just-removed
                 pass
+        self._mtime_seen = self._file_mtime(self._path)
         self.bridge.set_doc(os.path.basename(self._path or ""), text)
-        # An atomic save (write tmp + rename) makes QFileSystemWatcher drop the path —
-        # re-add it so we keep catching external edits.
+        # re-arm watches — an atomic save drops the file watch (the dir watch persists)
         if (self._path and os.path.exists(self._path)
                 and self._path not in self._watcher.files()):
             self._watcher.addPath(self._path)
+        if (self._dir and os.path.isdir(self._dir)
+                and self._dir not in self._watcher.directories()):
+            self._watcher.addPath(self._dir)
 
     def _edit_external(self) -> None:
         if self._path and self._on_edit is not None:
