@@ -647,6 +647,26 @@ def test_open_doc_external_uses_configured_command(qapp, monkeypatch):
 
 
 @pytest.mark.ui
+def test_gui_thread_gc(qapp):
+    """The segfault fix: automatic GC is disabled (so it never runs on a worker
+    thread and frees a QObject-with-timer cross-thread), and collection is drained
+    from a GUI-thread timer instead."""
+    import gc
+    from ferrodac.diagnostics import install_gui_thread_gc
+    was = gc.isenabled()
+    timer = None
+    try:
+        timer = install_gui_thread_gc(500)
+        assert not gc.isenabled()       # no cyclic GC on a worker thread, ever
+        assert timer.isActive()         # …collected on the GUI thread instead
+    finally:
+        if timer is not None:
+            timer.stop()
+        if was:
+            gc.enable()
+
+
+@pytest.mark.ui
 def test_docs_dock_is_lazy(qapp):
     """The Docs dock exists but its QtWebEngine view is NOT created until shown —
     so launch + the UI suite don't spin up Chromium per window."""

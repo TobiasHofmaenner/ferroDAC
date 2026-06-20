@@ -45,6 +45,32 @@ def install(logdir: str = "") -> None:
     _install_qt_message_handler()
 
 
+_gc_timer = None        # kept alive so the GUI-thread collector keeps running
+
+
+def install_gui_thread_gc(interval_ms: int = 2000):
+    """Garbage-collect ONLY on the GUI thread — the fix for the long-standing
+    segfault.
+
+    Python's cyclic GC runs on whichever thread crosses the allocation threshold.
+    The data plane's worker threads (notably zarr's 'zarr_io' de/compression loop)
+    allocate heavily, so GC fires *there* — and if it frees a QObject that owns a
+    timer, that's a CROSS-THREAD Qt destruction (``QObject::~QObject: Timers cannot
+    be stopped from another thread`` / ``QBasicTimer``) which corrupts Qt's state and
+    SIGSEGVs. Disabling automatic GC and draining it from a GUI-thread ``QTimer``
+    keeps every QObject finalisation on the GUI thread. Returns the timer.
+    """
+    global _gc_timer
+    import gc
+
+    from qtpy.QtCore import QTimer
+    gc.disable()                                 # no GC on a worker thread, ever
+    _gc_timer = QTimer()
+    _gc_timer.timeout.connect(gc.collect)        # …drained here, on the GUI thread
+    _gc_timer.start(max(250, int(interval_ms)))
+    return _gc_timer
+
+
 def _write(s: str) -> None:
     try:
         sys.stderr.write(s)
