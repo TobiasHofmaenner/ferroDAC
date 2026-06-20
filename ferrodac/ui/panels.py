@@ -51,6 +51,7 @@ class Panel(QWidget):
 
     kind = "panel"
     is_input = False
+    routable = True            # False → carries no data port (e.g. a document view)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1809,6 +1810,51 @@ class CompositionPanel(Panel):
             self._cfg["gases"] = st["gases"]
 
 
+class DocPanel(Panel):
+    """A document (markdown/LaTeX) view as a dashboard panel — render + edit a file.
+
+    Unlike every other panel it carries NO data routing (``routable = False``): no
+    patch-bay port, no data-bus subscription. That lets several coexist, each on its
+    own file, and each can be popped into its own window. Needs QtWebEngine; if it's
+    absent the panel degrades to a one-line note instead of crashing a layout load.
+    """
+
+    kind = "doc"
+    routable = False
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._path = None
+        try:
+            from .docs import DocView          # lazy: only this panel pulls QtWebEngine
+            self._view = DocView()
+            lay.addWidget(self._view)
+        except Exception as exc:                # noqa: BLE001 — WebEngine not installed
+            self._view = None
+            note = QLabel("Document view needs QtWebEngine.\n\nInstall:\n"
+                          "python3-pyside6.qtwebenginewidgets")
+            note.setAlignment(Qt.AlignCenter)
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#7f8a99; padding:24px;")
+            note.setToolTip(str(exc))
+            lay.addWidget(note)
+
+    def open(self, path: str) -> None:
+        self._path = path
+        if self._view is not None:
+            self._view.open(path)
+
+    def state(self) -> dict:
+        return {"path": self._path} if self._path else {}
+
+    def set_state(self, state: dict) -> None:
+        path = state.get("path")
+        if path:
+            self.open(path)
+
+
 PANEL_TYPES = {
     "chart": ("Chart", ChartPanel),
     "numeric": ("7-seg display", NumericPanel),
@@ -1820,4 +1866,5 @@ PANEL_TYPES = {
     "slider": ("Slider", SliderPanel),
     "button": ("Button", ButtonPanel),
     "toggle": ("Toggle", TogglePanel),
+    "doc": ("Document", DocPanel),
 }

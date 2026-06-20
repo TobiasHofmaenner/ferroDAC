@@ -89,6 +89,31 @@ def test_docview_edit_mode_mounts_and_saves(qapp):
 
 
 @pytest.mark.ui
+def test_doc_panel_registered_opens_and_persists(qapp):
+    """The Document panel is in the Add-menu registry, carries no data route, opens
+    a file, and round-trips its path through save/restore state."""
+    from ferrodac.ui.panels import PANEL_TYPES, DocPanel
+    assert PANEL_TYPES.get("doc", (None, None))[1] is DocPanel
+    assert DocPanel.routable is False            # no patch-bay port
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "notes.md")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("# notes\n")
+    panel = DocPanel()
+    panel.resize(600, 400)
+    other = DocPanel()
+    try:
+        panel.open(p)
+        assert panel.state() == {"path": p}
+        assert panel.state() != other.state()    # the other is still empty
+        other.set_state({"path": p})             # restore from a saved layout
+        assert other.state() == {"path": p}
+    finally:
+        panel.deleteLater()
+        other.deleteLater()
+
+
+@pytest.mark.ui
 def test_docview_renders_and_reloads(qapp):
     from ferrodac.ui.docs import DocView
     d = tempfile.mkdtemp()

@@ -21,10 +21,11 @@ os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 if getattr(os, "geteuid", lambda: 1)() == 0:
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
-from qtpy.QtCore import QFileSystemWatcher, QObject, QUrl, Signal, Slot
+from qtpy.QtCore import QFileSystemWatcher, QObject, Qt, QUrl, Signal, Slot
 from qtpy.QtWebChannel import QWebChannel
 from qtpy.QtWebEngineWidgets import QWebEngineView
 from qtpy.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -33,6 +34,54 @@ from qtpy.QtWidgets import (
 )
 
 _DIST = os.path.join(os.path.dirname(__file__), "web", "dist")
+
+
+def editor_command_args(command: str, path: str) -> list:
+    """argv for an external-editor command template. ``{file}`` (or ``{path}``) is
+    replaced with the file path; with no placeholder the path is appended.
+    ``'konsole -e nvim {file}'`` → ``['konsole','-e','nvim', path]``."""
+    import shlex
+    parts = shlex.split(command)
+    if not parts:
+        return []
+    if "{file}" in command or "{path}" in command:
+        return [a.replace("{file}", path).replace("{path}", path) for a in parts]
+    return parts + [path]
+
+
+def launch_external_editor(path: str) -> str:
+    """Open `path` in the user's CONFIGURED editor command (QSettings
+    ``editor/command``), else the OS default handler. Returns '' on success or an
+    error string. The built-in default behind a DocView's ``↗ Open externally``."""
+    from qtpy.QtCore import QSettings
+    from qtpy.QtGui import QDesktopServices
+    cmd = (QSettings("ferroDAC", "ferroDAC").value(
+        "editor/command", "", type=str) or "").strip()
+    if cmd:
+        import subprocess
+        try:
+            subprocess.Popen(editor_command_args(cmd, path), start_new_session=True)
+            return ""
+        except Exception as exc:                       # noqa: BLE001
+            return str(exc)
+    QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+    return ""
+
+
+def configure_editor_command(parent=None) -> None:
+    """Prompt for the external-editor command and store it (QSettings). The built-in
+    behind a DocView's ``⚙``."""
+    from qtpy.QtCore import QSettings
+    from qtpy.QtWidgets import QInputDialog
+    s = QSettings("ferroDAC", "ferroDAC")
+    cur = s.value("editor/command", "", type=str) or ""
+    text, ok = QInputDialog.getText(
+        parent, "External editor command",
+        "Command to open a file (use {file} for the path; blank = OS default).\n"
+        "e.g.   konsole -e nvim {file}",
+        text=cur)
+    if ok:
+        s.setValue("editor/command", text.strip())
 
 
 class DocBridge(QObject):
@@ -70,7 +119,8 @@ class DocView(QWidget):
         self._path = None                # absolute path of the open doc
         self._dir = None                 # its folder (watched too — atomic-save safe)
         self._mtime_seen = None
-        self._on_edit = on_edit          # callable(path) — launch the user's editor
+        self._on_edit = on_edit          # optional override callable(path)
+        self._on_configure = on_configure  # optional override callable()
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -81,16 +131,26 @@ class DocView(QWidget):
         self._title.setStyleSheet("font-weight:700; color:#c7d0db;")
         head.addWidget(self._title)
         head.addStretch(1)
-        if on_edit is not None:
-            self._edit_btn = QPushButton("↗ Open externally")
-            self._edit_btn.setToolTip("Open this file in your configured editor")
-            self._edit_btn.clicked.connect(self._edit_external)
-            head.addWidget(self._edit_btn)
-        if on_configure is not None:
-            gear = QPushButton("⚙")
-            gear.setToolTip("Set the external editor command")
-            gear.clicked.connect(lambda: on_configure())
-            head.addWidget(gear)
+
+        self._open_btn = QPushButton("📂 Open…")
+        self._open_btn.setToolTip("Open another markdown file in this view")
+        self._open_btn.clicked.connect(self._open_picker)
+        head.addWidget(self._open_btn)
+
+        self._win_btn = QPushButton("⤢ Window")
+        self._win_btn.setToolTip("Open this document in its own window")
+        self._win_btn.clicked.connect(self._pop_out)
+        head.addWidget(self._win_btn)
+
+        self._edit_btn = QPushButton("↗ Open externally")
+        self._edit_btn.setToolTip("Open this file in your configured editor")
+        self._edit_btn.clicked.connect(self._edit_external)
+        head.addWidget(self._edit_btn)
+
+        gear = QPushButton("⚙")
+        gear.setToolTip("Set the external editor command")
+        gear.clicked.connect(self._configure_external)
+        head.addWidget(gear)
         root.addLayout(head)
 
         self.view = QWebEngineView()
@@ -170,6 +230,40 @@ class DocView(QWidget):
         except Exception:                        # noqa: BLE001
             pass
 
+    def _open_picker(self) -> None:
+        start = self._dir or os.getcwd()
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open document", start,
+            "Markdown (*.md *.markdown *.txt);;All files (*)")
+        if path:
+            self.open(path)
+
+    def _pop_out(self) -> None:
+        """Open this document in its OWN top-level window — a standalone DocView on
+        the same file. The file stays truth, so the two views reconcile through it
+        (edit in one → the watcher re-renders the other)."""
+        if not self._path:
+            return
+        win = DocView(on_edit=self._on_edit, on_configure=self._on_configure,
+                      parent=self.window())
+        win.setWindowFlag(Qt.Window, True)              # owned, but its own OS window
+        win.setAttribute(Qt.WA_DeleteOnClose, True)
+        win.setWindowTitle(f"{os.path.basename(self._path)} — ferroDAC")
+        win.resize(860, 640)
+        win.open(self._path)
+        win.show()
+        win.raise_()
+
     def _edit_external(self) -> None:
-        if self._path and self._on_edit is not None:
+        if not self._path:
+            return
+        if self._on_edit is not None:                   # host override (status msgs)
             self._on_edit(self._path)
+        else:
+            launch_external_editor(self._path)          # built-in default
+
+    def _configure_external(self) -> None:
+        if self._on_configure is not None:
+            self._on_configure()
+        else:
+            configure_editor_command(self)

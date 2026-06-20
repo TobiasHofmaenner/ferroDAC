@@ -283,6 +283,10 @@ class Dashboard(QObject):
         """The live panels (display + input), for the replay reset hook."""
         return list(self._panels.values())
 
+    def panel(self, pid: str):
+        """The live panel for an id (None if unknown)."""
+        return self._panels.get(pid)
+
     # -- panels --------------------------------------------------------------
     def add_panel(self, kind: str, pid: str = None, title: str = None) -> str:
         label, cls = PANEL_TYPES[kind]
@@ -298,7 +302,9 @@ class Dashboard(QObject):
         panel.set_display_name(title)        # let panels show their name (slider…)
         self._panels[pid] = panel
 
-        if getattr(cls, "is_input", False):
+        if not getattr(cls, "routable", True):
+            pass                                 # no data port (e.g. a document panel)
+        elif getattr(cls, "is_input", False):
             key = f"ui/{pid}"
             self._sources[key] = SourcePort(
                 key, panel.title, cls.source_dtype, "", "input", "virtual", panel

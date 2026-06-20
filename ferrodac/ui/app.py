@@ -2118,7 +2118,7 @@ class MainWindow(QMainWindow):
         add = self.menuBar().addMenu("&Add")
         for kind, (label, _cls) in PANEL_TYPES.items():
             act = add.addAction(f"Add {label}")
-            act.triggered.connect(lambda _=False, k=kind: self.dashboard.add_panel(k))
+            act.triggered.connect(lambda _=False, k=kind: self._add_panel(k))
 
         netmenu = self.menuBar().addMenu("&Cloud")
         self.hub_action = netmenu.addAction("ferroDAC Cloud…", self._open_hub)
@@ -2220,11 +2220,21 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"External editor: {text.strip() or 'OS default'}", 5000)
 
-    def _open_active_doc(self) -> None:
-        """Show the active project's README.md (bootstrap a starter if missing)."""
+    def _add_panel(self, kind: str) -> None:
+        """Add a dashboard panel (the &Add menu). A new Document panel opens on the
+        active project's README by default — same starting point as the Docs dock."""
+        pid = self.dashboard.add_panel(kind)
+        if kind == "doc":
+            panel = self.dashboard.panel(pid)
+            readme = self._active_readme()
+            if panel is not None and readme:
+                panel.open(readme)
+
+    def _active_readme(self) -> str | None:
+        """The active project's README.md path, bootstrapping a starter if missing."""
         p = self._project_mgr.active
-        if p is None or self._docs_view is None:
-            return
+        if p is None:
+            return None
         readme = os.path.join(p.path, "README.md")
         if not os.path.exists(readme):
             try:
@@ -2234,7 +2244,15 @@ class MainWindow(QMainWindow):
                              "and what you expect to see._\n")
             except Exception:            # noqa: BLE001
                 pass
-        self._docs_view.open(readme)
+        return readme if os.path.exists(readme) else None
+
+    def _open_active_doc(self) -> None:
+        """Show the active project's README.md in the Docs dock."""
+        if self._docs_view is None:
+            return
+        readme = self._active_readme()
+        if readme:
+            self._docs_view.open(readme)
 
     def _lock_chrome(self, editable: bool) -> None:
         """Player + Log docks follow the 'Edit layout' toggle, like the panel
