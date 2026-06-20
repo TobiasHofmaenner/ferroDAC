@@ -10,6 +10,9 @@ import os
 import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Pin the SAME Qt binding the app uses (ferrodac._qtbinding prefers PySide6), so
+# tests exercise the real binding — and so QtWebEngine (PySide6-only here) is found.
+os.environ.setdefault("QT_API", "pyside6")
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 for _p in (_ROOT,

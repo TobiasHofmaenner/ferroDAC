@@ -13,3 +13,8 @@ dist/
 *.parquet
 /scratch/
 /projects/
+
+# the in-app doc-view web bundle is a committed, shipped artifact (like the proto
+# stubs) — re-include it despite the global dist/ ignore above.
+!ferrodac/ui/web/dist/
+!ferrodac/ui/web/dist/**

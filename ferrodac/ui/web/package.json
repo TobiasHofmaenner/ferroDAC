@@ -1,0 +1,25 @@
+{
+  "name": "ferrodac-docs",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ferroDAC in-app document view — markdown + LaTeX renderer (bundled, shipped offline).",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "unified": "^11",
+    "remark-parse": "^11",
+    "remark-gfm": "^4",
+    "remark-math": "^6",
+    "remark-rehype": "^11",
+    "rehype-katex": "^7",
+    "rehype-highlight": "^7",
+    "rehype-stringify": "^10",
+    "katex": "^0.16",
+    "highlight.js": "^11"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24"
+  }
+}
