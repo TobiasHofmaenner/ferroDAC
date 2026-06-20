@@ -24,7 +24,7 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import CONTRACT_VERSION, _drain
+from . import CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain
 
 log = logging.getLogger("hub.docs")
 
@@ -145,7 +145,8 @@ class HubDocSync:
     async def _session_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                async with grpc.aio.insecure_channel(self._addr) as ch:
+                async with grpc.aio.insecure_channel(
+                        self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
                     stub = rpc.DocsStub(ch)
                     call = stub.Session(self._outgen())
                     async for msg in call:

@@ -17,7 +17,7 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import _drain, convert
+from . import GRPC_CHANNEL_OPTIONS, _drain, convert
 
 log = logging.getLogger("hub.viewer")
 
@@ -70,7 +70,8 @@ class HubViewer:
     async def _main(self) -> None:
         while not self._stop.is_set():
             try:
-                async with grpc.aio.insecure_channel(self._addr) as ch:
+                async with grpc.aio.insecure_channel(
+                        self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
                     v = rpc.ViewerStub(ch)
                     self._notify(True, f"connected to {self._addr}")
                     watch = asyncio.create_task(self._watch(v))

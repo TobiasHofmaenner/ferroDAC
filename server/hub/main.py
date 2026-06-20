@@ -45,7 +45,14 @@ def build_server(hub: "Hub | None" = None, store=None
     """Wire a gRPC server around a Hub (shared by main and the e2e test). `store`
     is the hub's durable ZarrStore (sync target + read tier); may be None."""
     hub = hub or Hub()
-    server = grpc.aio.server()
+    # Match the clients' lifted message cap (ferrodac.net.GRPC_CHANNEL_OPTIONS): the
+    # default 4 MiB is too small for a backlogged store-sync chunk or a full-res
+    # ReadRawTrace response. (Clients also split sync pushes to stay well under it.)
+    max_bytes = 64 * 1024 * 1024
+    server = grpc.aio.server(options=[
+        ("grpc.max_send_message_length", max_bytes),
+        ("grpc.max_receive_message_length", max_bytes),
+    ])
     rpc.add_IngestServicer_to_server(IngestServicer(hub), server)
     rpc.add_ViewerServicer_to_server(ViewerServicer(hub), server)
     rpc.add_TagsServicer_to_server(TagsServicer(hub), server)

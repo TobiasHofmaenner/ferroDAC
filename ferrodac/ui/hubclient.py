@@ -145,7 +145,8 @@ class HubController(QObject):
         if self._resolver is not None and net.GRPC_AVAILABLE:
             import grpc
             from ..net.readtier import HubReadTier
-            self._read_chan = grpc.insecure_channel(addr)
+            self._read_chan = grpc.insecure_channel(
+                addr, options=net.GRPC_CHANNEL_OPTIONS)
             tier = HubReadTier(self._read_chan)
             self._resolver.set_remote(tier)
             self._hub_sources = tier.sources()        # one ListSources for the catalog

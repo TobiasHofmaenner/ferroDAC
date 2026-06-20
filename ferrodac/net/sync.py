@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from . import GRPC_AVAILABLE
+from . import GRPC_AVAILABLE, GRPC_CHANNEL_OPTIONS
 from ..store import SyncEngine
 
 log = logging.getLogger("ferrodac.sync")
@@ -94,7 +94,7 @@ class SyncRunner:
             self._thread = None
 
     def _run(self) -> None:
-        channel = grpc.insecure_channel(self.addr)
+        channel = grpc.insecure_channel(self.addr, options=GRPC_CHANNEL_OPTIONS)
         engine = SyncEngine(self.local_store, GrpcSyncTransport(channel, self.token))
         log.info("sync started → %s", self.addr)
         self._report("connecting", f"→ {self.addr}")

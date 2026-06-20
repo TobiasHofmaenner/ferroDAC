@@ -22,6 +22,17 @@ if os.path.isdir(_GEN) and _GEN not in sys.path:
 
 CONTRACT_VERSION = 1
 
+# gRPC's default 4 MiB message cap is too small for the data plane: a backlogged
+# store-sync chunk or a full-res ReadRawTrace response can exceed it. Lift it on
+# every client channel (the hub matches this server-side). The sync also splits its
+# pushes to stay well under even the DEFAULT cap (store/sync.py); this is headroom +
+# the read tier (large trace reads).
+MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+GRPC_CHANNEL_OPTIONS = [
+    ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
+    ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+]
+
 try:
     import grpc  # noqa: F401
     GRPC_AVAILABLE = True
