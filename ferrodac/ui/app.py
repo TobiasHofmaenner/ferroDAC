@@ -3043,6 +3043,11 @@ def main(argv=None) -> int:
     log.info("ferroDAC %s starting (frozen=%s); log → %s",
              __version__, getattr(sys, "frozen", False), logpath)
 
+    # crash + threading diagnostics: a segfault now prints a Python stack of every
+    # thread, and a Qt call from the wrong thread is flagged with its origin stack.
+    from ..diagnostics import install as _install_diagnostics
+    _install_diagnostics(os.path.dirname(logpath) if logpath else "")
+
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("ferroDAC")
     icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
