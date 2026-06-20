@@ -89,6 +89,16 @@ class DeviceManager(QObject):
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
         if self._discoverable and not self._scan.isRunning():
+            # GUI-thread setup BEFORE the worker scans: a driver may need to touch
+            # thread-affine Qt subsystems (e.g. the camera brings up Qt Multimedia
+            # here, not on the discovery worker — see CameraDevice.prepare_discovery).
+            for drv in self._discoverable:
+                prep = getattr(drv, "prepare_discovery", None)
+                if prep is not None:
+                    try:
+                        prep()
+                    except Exception:            # noqa: BLE001
+                        log.exception("prepare_discovery failed: %s", drv)
             self._scan.start()
 
     def stop(self) -> None:

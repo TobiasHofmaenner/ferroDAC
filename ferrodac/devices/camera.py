@@ -5,10 +5,12 @@ It discovers the host's cameras (Qt Multimedia), exposes each camera's supported
 frames as a single ``image`` **Source** (the Reading value is a QImage,
 normalised to RGB888 so the data plane is pixel-format agnostic and CV-ready).
 
-Qt Multimedia objects are thread-affine. Discovery is safe off-thread, but the
-live QCamera must run on the GUI thread, so all capture happens inside a small
-controller that we move to the application thread; the Device object itself
-stays callable from the manager's worker threads.
+Qt Multimedia objects are thread-affine — and `QMediaDevices.videoInputs()` brings
+the whole backend up on the CALLING thread, so even *enumeration* must happen on the
+GUI thread (we cache it via ``install_camera_enumeration``; ``discover()`` only reads
+the cache). The live QCamera likewise runs on the GUI thread, inside a small
+controller moved to the application thread; the Device object itself stays callable
+from the manager's worker threads.
 """
 
 from __future__ import annotations
@@ -70,6 +72,46 @@ def _default_format_index(formats: list) -> int:
         if r.width() == 1280 and r.height() == 720 and round(f.maxFrameRate()) == 30:
             return i
     return len(formats) // 2 if formats else 0
+
+
+# --------------------------------------------------------------------------- #
+#  GUI-thread camera enumeration
+# --------------------------------------------------------------------------- #
+# `QMediaDevices.videoInputs()` INITIALISES the platform multimedia backend on the
+# CALLING thread. Doing that from the manager's discovery worker pulls Qt Multimedia
+# (FFmpeg) up off the GUI thread — fragile and flagged by the diagnostics harness as
+# a likely segfault source. So we enumerate on the GUI thread via a QMediaDevices we
+# own here, cache EVERYTHING discover() needs (the QCameraDevice handle + its formats,
+# id and description are value reads, safe to pass to the worker), and refresh on
+# `videoInputsChanged`. discover() (worker thread) then makes ZERO Qt Multimedia calls.
+_devices_watcher = None          # QMediaDevices, GUI-thread-owned (kept alive here)
+_video_inputs: list = []         # cached [(QCameraDevice, formats, instance_id, name)]
+
+
+def _refresh_video_inputs() -> None:
+    """Re-read the camera list — MUST run on the GUI thread."""
+    global _video_inputs
+    cached = []
+    try:
+        for dev in QMediaDevices.videoInputs():
+            if dev.isNull():
+                continue
+            cid = bytes(dev.id()).decode("utf-8", "replace")
+            cached.append((dev, _dedup_formats(dev), f"cam:{cid}", dev.description()))
+    except Exception:            # noqa: BLE001 — backend hiccup → no cameras this pass
+        cached = []
+    _video_inputs = cached
+
+
+def install_camera_enumeration() -> None:
+    """Enumerate cameras on the GUI thread and keep the cache fresh. Idempotent;
+    a no-op without Qt Multimedia. Call once on the GUI thread before discovery."""
+    global _devices_watcher
+    if not HAVE_QT_MULTIMEDIA or _devices_watcher is not None:
+        return
+    _devices_watcher = QMediaDevices()                  # lives on the GUI thread
+    _devices_watcher.videoInputsChanged.connect(_refresh_video_inputs)
+    _refresh_video_inputs()
 
 
 # --------------------------------------------------------------------------- #
@@ -179,18 +221,20 @@ class CameraDevice(BaseDevice):
         self._controller = None
 
     @classmethod
+    def prepare_discovery(cls) -> None:
+        """GUI-thread setup hook (called by the DeviceManager before scanning):
+        bring Qt Multimedia up HERE, on the GUI thread, not on the worker."""
+        install_camera_enumeration()
+
+    @classmethod
     def discover(cls):
-        if not HAVE_QT_MULTIMEDIA:
-            return []
+        # Reads ONLY the GUI-thread-populated cache — no Qt Multimedia calls here
+        # (those would run on the manager's worker thread; see the note above).
         out = []
-        for dev in QMediaDevices.videoInputs():
+        for dev, formats, iid, name in list(_video_inputs):
             try:
-                if dev.isNull():
-                    continue
-                cid = bytes(dev.id()).decode("utf-8", "replace")
-                formats = _dedup_formats(dev)
-                out.append(cls(dev, formats, f"cam:{cid}", dev.description()))
-            except Exception:
+                out.append(cls(dev, formats, iid, name))
+            except Exception:        # noqa: BLE001
                 continue
         return out
 
