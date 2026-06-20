@@ -994,3 +994,81 @@ annotations→notes, nudging); the Python SDK + scaffolded notebooks.
   versioned; old folders remain readable.
 - **Observability of ferroDAC itself:** structured logs + health from every
   driver process and the orchestrator.
+
+---
+
+## 18. Future modalities — semantic overlays (recorded 2026-06-20)
+
+> **Not scheduled.** Two product directions we want, captured *now* so near-term
+> architecture choices don't quietly block them. The thesis: ferroDAC is a **raw
+> data plane** (Device/Source/Sink + time-indexed store, §5/§7) with **semantic
+> overlays** on top. **Projects (§8) is the first overlay.** Both ideas below are
+> *more overlays* — additive, not rewrites — and they ride the machinery we
+> already built (the Projects folder-record + hub-sync pattern, tags §7.3,
+> recordings, importers §7.2, processors/analysis §15).
+
+### 18.1 QC / preprogrammed flows (guided procedures)
+
+A reusable **procedure** that walks an operator through a process, *controls*
+instruments along the way, captures data, then computes a **pass/fail verdict**
+and emits a **report** autonomously. Motivating case (Ferrovac UHV·CTS): a
+suitcase *bakeout* program — ramp the bake, watch RGA/pressure/temps, then
+verdict + report.
+
+- Decomposes mostly into **existing primitives**: a procedure *run* ≈ a
+  **recording** (the span) + a **sequence of tags** (step start/end/result, with
+  `kind` + structured `payload`, §7.3 — the audit log) + a **verdict**.
+- **New pieces:** (a) the **procedure** itself = a *declarative, serializable
+  program* (steps, actions, waits-for-condition, operator prompts) — authored &
+  shared like a layout (a hub record, §8.1); (b) the **verdict** = a first-class
+  derived artifact (not ephemeral UI state); (c) a **report generator** (templated
+  doc from run + verdict + plots → `reports/`).
+- **Load-bearing dependency:** the **control plane must become real** — Sinks that
+  actually command devices, with read-back and wait-for-condition. The seam is
+  already reserved (Sink ports + the `Command` down-channel, §5.3/§12). *Do not
+  let the app calcify as monitoring-only.* (Bakeout controls heaters → control is
+  safety-relevant; the procedure engine needs robust state + interlocks.)
+
+### 18.2 Sample tracking — lifecycle provenance
+
+Track a **physical sample** through its whole life (e.g. sapphire wafer → dicing
+→ He cryostat), **pinning every measurement and process step to the sample**
+across many devices, sessions and *labs*. Add importers for fab tools
+(sputter/PVD/dicing/RIE). Outcome: the full lifecycle + all data for batch
+analysis (why was this batch bad/good?) and **publication-grade fab provenance**
+(an under-served need in quantum-device work).
+
+- **New entity:** a **Sample** with a stable UUID + **lineage** (a DAG: a wafer
+  splits into dies; a sample moves between tools/cryostats). Mirrors the Device
+  UUID + registry pattern (§5).
+- **Pinning** = a *membership/reference* from data → sample. Tags already carry
+  `projects: list` and a typed `scope` (`device:…`/`source:…`); a sample is just
+  **another ref dimension**. The lifecycle view is the **union of recordings/tags
+  that reference the sample** — you do **not** re-key the raw store (§7.4); you
+  join via refs on the overlay layer.
+- **Importers** (§7.2 reimport-via-FileDevice) bring fab-tool logs/recipes in,
+  each emitting data pinned to (sample, step). **Cross-lab aggregation** rides the
+  hub (§12) + the importers.
+
+### 18.3 Architectural guardrails (so neither gets blocked)
+
+1. **Keep the overlay / data-membership model GENERAL.** *This is the one most at
+   risk today.* The lens machinery is currently project-specific
+   (`MarkerModel.set_lens(project_ids)`, `Marker.projects`). A Sample is a
+   **parallel** grouping dimension; a QC-run is **another**. Model "what does this
+   datum/tag/recording belong to" as a set of **typed refs** (`project:…`,
+   `sample:…`, `run:…`) so new dimensions are *additive*, not a retrofit. Watch
+   this whenever we touch membership/lens code.
+2. **Keep the control/command plane first-class and real** (§18.1 dies without it).
+3. **Derived results/verdicts are first-class artifacts**, not ephemeral UI state
+   (both pass/fail and batch analysis need this).
+4. **Reuse the folder-record + hub-service pattern** (§8.1, the `Projects` gRPC
+   service + `Project.to_record()/apply_record()`) as the **template** for new
+   shareable artifact types — a `Procedure` service and a `Sample` service drop in
+   the same shape (mountable folders, LWW records, watch/publish).
+5. **Generalize the identity/registry pattern** (§5) so Samples (and procedures)
+   get UUIDs + a registry like Devices do.
+
+**Bottom line:** both are *overlays on the existing data plane* — no rewrite. The
+single decision most at risk now is guardrail #1 (the project-specific lens);
+keep the membership model general and these stay cheap to add later.
