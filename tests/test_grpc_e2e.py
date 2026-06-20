@@ -18,6 +18,7 @@ E2E = [
     "e2e",          # agent → hub → viewer: transparent remote device, subscribe, retire
     "net_e2e",      # app net layer round-trip (convert + agent/viewer), incl. Trace
     "docs_collab_e2e",  # live collab rooms: seed/fan-out/compaction/snapshot/persist
+    "docs_net_e2e",     # app collab relay (HubDocSync) round-trip, base64 at the seam
 ]
 
 

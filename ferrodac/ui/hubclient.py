@@ -28,6 +28,10 @@ class HubController(QObject):
     _catalog = Signal(str, object)        # event_type, pb.DeviceDescriptor
     _tag = Signal(object)                 # an incoming Marker from the hub
     _project = Signal(object)             # an incoming project record (dict) from the hub
+    _doc_seed = Signal(str, bool, str)    # doc_id, should_seed, text — collab session start
+    _doc_update = Signal(str, str)        # doc_id, update_b64 — an incoming Yjs update
+    _doc_awareness = Signal(str, str)     # doc_id, state_b64 — an incoming awareness update
+    _doc_presence = Signal(str, object)   # doc_id, actors list
     status = Signal(str)                  # human status line
     sync_status = Signal(str, str)        # store-sync (state, detail) — §12.1
     connection_changed = Signal(bool)     # connected ↔ disconnected
@@ -46,6 +50,9 @@ class HubController(QObject):
         self._viewer = None
         self._tagsync = None
         self._projsync = None            # hub project sync (opt-in, role-independent)
+        self._docsync = None             # live collab-editing relay (role-independent)
+        self._doc_bridges: dict = {}     # doc_id -> [DocBridge] currently collaborating
+        self._aid = ""                   # this client's actor id (ferrodac@host)
         self._project_mgr = None         # set post-construction (after _setup_projects)
         self._on_projects = None         # () -> refresh the Projects dock
         self._sync = None                # store-and-forward SyncRunner (agent role)
@@ -60,6 +67,10 @@ class HubController(QObject):
         self._catalog.connect(self._on_catalog_gui, Qt.QueuedConnection)
         self._tag.connect(self._on_tag_gui, Qt.QueuedConnection)
         self._project.connect(self._on_project_gui, Qt.QueuedConnection)
+        self._doc_seed.connect(self._on_doc_seed_gui, Qt.QueuedConnection)
+        self._doc_update.connect(self._on_doc_update_gui, Qt.QueuedConnection)
+        self._doc_awareness.connect(self._on_doc_awareness_gui, Qt.QueuedConnection)
+        self._doc_presence.connect(self._on_doc_presence_gui, Qt.QueuedConnection)
 
     def set_projects(self, project_mgr, on_change) -> None:
         """Wire hub-project sync to the client ProjectManager (called by the app
@@ -99,6 +110,7 @@ class HubController(QObject):
         self.addr = addr
         self._update_local()
         aid = f"ferrodac@{socket.gethostname()}"
+        self._aid = aid
         if as_agent:
             self._agent = HubAgent(addr, agent_id=aid,
                                    on_state=self._state_cb("agent"))
@@ -150,6 +162,18 @@ class HubController(QObject):
                 on_project=lambda rec: self._project.emit(rec),
                 on_state=self._state_cb("projects"))
             self._projsync.start()
+        # Docs ride their own channel too (role-independent, opt-in): the relay is
+        # always available while connected; a DocView joins a room only when the
+        # user opts into collaboration (DESIGN §10.x).
+        from ..net.docs import HubDocSync
+        self._docsync = HubDocSync(
+            addr, agent_id=aid,
+            on_seed=lambda d, s, t: self._doc_seed.emit(d, s, t),
+            on_update=lambda d, u: self._doc_update.emit(d, u),
+            on_awareness=lambda d, a: self._doc_awareness.emit(d, a),
+            on_presence=lambda d, a: self._doc_presence.emit(d, a),
+            on_state=self._state_cb("docs"))
+        self._docsync.start()
         self.status.emit(f"ferroDAC Cloud: connecting to {addr} …")
         self.connection_changed.emit(True)
 
@@ -183,6 +207,10 @@ class HubController(QObject):
         if self._projsync is not None:
             self._projsync.stop()
             self._projsync = None
+        if self._docsync is not None:
+            self._docsync.stop()
+            self._docsync = None
+        self._doc_bridges.clear()
         if self._project_mgr is not None:
             self._project_mgr.clear_hub()        # hub projects aren't offline
             if self._on_projects is not None:
@@ -237,6 +265,63 @@ class HubController(QObject):
         self._project_mgr.apply_hub_record(record)
         if self._on_projects is not None:
             self._on_projects()
+
+    # -- docs collab relay (role-independent; opt-in per DocView) ------------
+    def doc_register(self, doc_id: str, bridge) -> None:
+        """A DocView is now collaborating on doc_id — route incoming edits to it."""
+        lst = self._doc_bridges.setdefault(doc_id, [])
+        if bridge not in lst:
+            lst.append(bridge)
+
+    def doc_unregister(self, doc_id: str, bridge) -> None:
+        lst = self._doc_bridges.get(doc_id)
+        if lst and bridge in lst:
+            lst.remove(bridge)
+            if not lst:
+                self._doc_bridges.pop(doc_id, None)
+
+    def doc_join(self, doc_id: str) -> None:
+        if self._docsync is not None:
+            self._docsync.join(doc_id, actor=self._aid)
+
+    def doc_leave(self, doc_id: str) -> None:
+        if self._docsync is not None:
+            self._docsync.leave(doc_id)
+
+    def doc_send_update(self, doc_id: str, update_b64: str, compaction: bool = False) -> None:
+        if self._docsync is not None:
+            self._docsync.send_update(doc_id, update_b64, compaction)
+
+    def doc_send_awareness(self, doc_id: str, state_b64: str) -> None:
+        if self._docsync is not None:
+            self._docsync.send_awareness(doc_id, state_b64)
+
+    def doc_send_snapshot(self, doc_id: str, text: str) -> None:
+        if self._docsync is not None:
+            self._docsync.send_snapshot(doc_id, text)
+
+    def _emit_to_bridges(self, doc_id: str, fn) -> None:
+        """Call fn(bridge) for each bridge on doc_id, skipping any that have been
+        deleted (a popped-out window closed mid-session)."""
+        for b in list(self._doc_bridges.get(doc_id, [])):
+            try:
+                fn(b)
+            except RuntimeError:                 # underlying QObject gone
+                self.doc_unregister(doc_id, b)
+
+    def _on_doc_seed_gui(self, doc_id, should_seed, text) -> None:
+        self._emit_to_bridges(doc_id, lambda b: b.collabSeed.emit(should_seed, text))
+
+    def _on_doc_update_gui(self, doc_id, update_b64) -> None:
+        self._emit_to_bridges(doc_id, lambda b: b.collabUpdate.emit(update_b64))
+
+    def _on_doc_awareness_gui(self, doc_id, state_b64) -> None:
+        self._emit_to_bridges(doc_id, lambda b: b.collabAwareness.emit(state_b64))
+
+    def _on_doc_presence_gui(self, doc_id, actors) -> None:
+        import json
+        payload = json.dumps(list(actors))
+        self._emit_to_bridges(doc_id, lambda b: b.collabPresence.emit(payload))
 
     # -- agent side (GUI thread) --------------------------------------------
     def _feed_agent(self, batch) -> None:

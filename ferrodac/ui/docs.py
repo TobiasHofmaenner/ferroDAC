@@ -92,6 +92,20 @@ class DocBridge(QObject):
     docChanged = Signal(str, str)        # (relpath, text) — Qt → JS (load / external edit)
     saveRequested = Signal(str)          # (text) — JS → Qt (autosave from the editor)
 
+    # Collaboration (Phase 2 relay). doc_id is IMPLICIT per DocView (Qt owns it);
+    # only opaque base64 payloads cross the bridge. Qt → JS:
+    collabSeed = Signal(bool, str)       # (should_seed, text) — start a collab session
+    collabUpdate = Signal(str)           # (update_b64) — an incoming Yjs update
+    collabAwareness = Signal(str)        # (state_b64) — an incoming awareness update
+    collabPresence = Signal(str)         # (actors_json) — room membership
+    collabStopped = Signal()             # Qt left the session → JS tears down Yjs
+    # JS → Qt (re-emitted by the slots below; DocView forwards to the HubController):
+    joinRequested = Signal()
+    leaveRequested = Signal()
+    updateRequested = Signal(str, bool)  # (update_b64, compaction)
+    awarenessRequested = Signal(str)     # (state_b64)
+    snapshotRequested = Signal(str)      # (text) — leader materialises the .md
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._relpath = ""
@@ -109,6 +123,27 @@ class DocBridge(QObject):
     def save(self, text: str) -> None:
         self.saveRequested.emit(text)
 
+    # -- collaboration: JS → Qt (thin re-emit; DocView forwards to the hub) --
+    @Slot()
+    def collabJoin(self) -> None:
+        self.joinRequested.emit()
+
+    @Slot()
+    def collabLeave(self) -> None:
+        self.leaveRequested.emit()
+
+    @Slot(str, bool)
+    def collabSendUpdate(self, update_b64: str, compaction: bool = False) -> None:
+        self.updateRequested.emit(update_b64, compaction)
+
+    @Slot(str)
+    def collabSendAwareness(self, state_b64: str) -> None:
+        self.awarenessRequested.emit(state_b64)
+
+    @Slot(str)
+    def collabSendSnapshot(self, text: str) -> None:
+        self.snapshotRequested.emit(text)
+
 
 class DocView(QWidget):
     """Renders a project markdown file live; an external editor editing the raw file
@@ -121,6 +156,8 @@ class DocView(QWidget):
         self._mtime_seen = None
         self._on_edit = on_edit          # optional override callable(path)
         self._on_configure = on_configure  # optional override callable()
+        self._collab = None              # a HubController, once bound (Phase 2 relay)
+        self._doc_id = None              # "<project_id>::<relpath>" for collaboration
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -267,3 +304,30 @@ class DocView(QWidget):
             self._on_configure()
         else:
             configure_editor_command(self)
+
+    # -- collaboration (Phase 2 relay; the toggle UI lands in Phase 4) --------
+    def bind_collab(self, controller, doc_id: str) -> None:
+        """Wire this view's bridge to a HubController's doc relay. Outgoing edits
+        (JS → Qt) forward to the hub with this view's doc_id injected; incoming
+        edits route back via the controller's per-doc_id bridge registry."""
+        self._collab = controller
+        self._doc_id = doc_id
+        b = self.bridge
+        b.updateRequested.connect(
+            lambda u, c, d=doc_id: controller.doc_send_update(d, u, c))
+        b.awarenessRequested.connect(
+            lambda s, d=doc_id: controller.doc_send_awareness(d, s))
+        b.snapshotRequested.connect(
+            lambda t, d=doc_id: controller.doc_send_snapshot(d, t))
+        b.leaveRequested.connect(self.stop_collab)
+
+    def start_collab(self) -> None:
+        if self._collab is not None and self._doc_id:
+            self._collab.doc_register(self._doc_id, self.bridge)
+            self._collab.doc_join(self._doc_id)
+
+    def stop_collab(self) -> None:
+        if self._collab is not None and self._doc_id:
+            self._collab.doc_leave(self._doc_id)
+            self._collab.doc_unregister(self._doc_id, self.bridge)
+            self.bridge.collabStopped.emit()
