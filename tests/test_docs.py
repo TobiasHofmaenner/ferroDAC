@@ -50,6 +50,45 @@ def test_docview_centers_display_math(qapp):
 
 
 @pytest.mark.ui
+def test_docview_edit_mode_mounts_and_saves(qapp):
+    """Switching to Edit mounts the CodeMirror editor; the editor's autosave path
+    writes the .md (file stays truth)."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "README.md")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("# original\n")
+    dv = DocView()
+    dv.resize(720, 420)
+    try:
+        dv.open(p)
+        _wait_html(qapp, dv.view, "original")          # rendered in Read mode
+        dv.view.page().runJavaScript(
+            "document.querySelector('#toolbar [data-mode=edit]').click()")
+        got = {"v": ""}
+        end = time.time() + 15
+        while time.time() < end:
+            dv.view.page().runJavaScript(
+                "document.querySelector('.cm-editor') ? 'yes' : 'no'",
+                lambda r: got.__setitem__("v", r))
+            for _ in range(10):
+                qapp.processEvents()
+                time.sleep(0.02)
+            if got["v"] == "yes":
+                break
+        assert got["v"] == "yes", "CodeMirror did not mount in Edit mode"
+        # the editor autosaves via bridge.save → the file is written
+        dv.bridge.save("# edited in app\n\n$$x^2$$\n")
+        for _ in range(10):
+            qapp.processEvents()
+            time.sleep(0.02)
+        with open(p, encoding="utf-8") as fh:
+            assert fh.read() == "# edited in app\n\n$$x^2$$\n"
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_docview_renders_and_reloads(qapp):
     from ferrodac.ui.docs import DocView
     d = tempfile.mkdtemp()

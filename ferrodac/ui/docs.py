@@ -40,7 +40,8 @@ class DocBridge(QObject):
     hands the renderer the current document's text and pushes a fresh copy on every
     (external) change. The JS calls ``ready()`` once loaded so there's no race."""
 
-    docChanged = Signal(str, str)        # (relpath, text)
+    docChanged = Signal(str, str)        # (relpath, text) — Qt → JS (load / external edit)
+    saveRequested = Signal(str)          # (text) — JS → Qt (autosave from the editor)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,6 +55,10 @@ class DocBridge(QObject):
     @Slot()
     def ready(self) -> None:
         self.docChanged.emit(self._relpath, self._text)   # (re)send to a just-loaded page
+
+    @Slot(str)
+    def save(self, text: str) -> None:
+        self.saveRequested.emit(text)
 
 
 class DocView(QWidget):
@@ -90,6 +95,7 @@ class DocView(QWidget):
 
         self.view = QWebEngineView()
         self.bridge = DocBridge(self)
+        self.bridge.saveRequested.connect(self._write)   # in-app edits → the file
         self._channel = QWebChannel(self)
         self._channel.registerObject("bridge", self.bridge)
         self.view.page().setWebChannel(self._channel)
@@ -143,6 +149,26 @@ class DocView(QWidget):
         if (self._dir and os.path.isdir(self._dir)
                 and self._dir not in self._watcher.directories()):
             self._watcher.addPath(self._dir)
+
+    def _write(self, text: str) -> None:
+        """Persist the in-app editor's text (the file stays truth). Records our own
+        mtime so the watcher doesn't treat our save as an external change — and the
+        JS ignores the echoed text anyway (it equals what it just sent)."""
+        if not self._path:
+            return
+        try:
+            tmp = self._path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(tmp, self._path)          # atomic
+            self._mtime_seen = self._file_mtime(self._path)
+            if self._path not in self._watcher.files():
+                self._watcher.addPath(self._path)
+            if (self._dir and os.path.isdir(self._dir)
+                    and self._dir not in self._watcher.directories()):
+                self._watcher.addPath(self._dir)
+        except Exception:                        # noqa: BLE001
+            pass
 
     def _edit_external(self) -> None:
         if self._path and self._on_edit is not None:

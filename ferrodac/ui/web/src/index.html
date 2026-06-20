@@ -10,8 +10,17 @@
   <!-- qrc: Qt serves the QWebChannel JS to pages inside QWebEngine; harmless 404 in a plain browser (the bundle falls back to a sample). -->
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head>
-<body>
-  <article id="doc" class="markdown-body"></article>
+<body data-mode="read">
+  <div id="toolbar">
+    <button data-mode="read" title="Rendered view">📖 Read</button>
+    <button data-mode="edit" title="Edit the source">✎ Edit</button>
+    <button data-mode="split" title="Source + live preview">⇆ Split</button>
+    <span id="status"></span>
+  </div>
+  <div id="panes">
+    <div id="editor"></div>
+    <article id="doc" class="markdown-body"></article>
+  </div>
   <script src="bundle.js"></script>
 </body>
 </html>
