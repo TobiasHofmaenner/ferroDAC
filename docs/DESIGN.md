@@ -788,6 +788,62 @@ in the future web client**.
   **solo** (edit/render, LaTeX, highlighting), reusable in the web client;
   (3) Yjs + Hocuspocus **collaboration** as a server-backend phase-2.
 
+### 10.2 Plans — the experiment as an object (decided 2026-06-20)
+
+The headline answer to "people don't document their experiments": make the
+**Plan** a first-class artifact — *the experiment as an object* that exists
+**before, during, and after** the data, and that data attaches to. It front-loads
+documentation to the moment of intent (when the operator actually has the context
+in their head) instead of begging for it a year later (when it's gone).
+
+**A Plan is a rich, OPTIONAL experiment record.** Fields you *may* fill, **none
+required**: purpose, objective, protocol/steps, expected outcome, **success
+criteria**, setup notes, free text. It can exist with or without bound data, be
+authored off-instrument (in a meeting, no devices), and be edited by anyone who
+has it.
+
+**Iron rule — MECHANISM, NOT POLICY (anti-LIMS, §1/§2):** the tool provides the
+Plan object and **gets out of the way**. There is **no enforced lifecycle, no
+approval gate, no mandated transitions, and recording is never blocked.** *Uses*
+— a solo scratchpad ⟷ a thing you screen-share with a CO ⟷ a QC procedure — are
+processes **people grow into**, never modes the tool dictates. The moment the app
+imposes a workflow it becomes the LIMS experimenters route around. A nudge that
+can't be ignored is not a nudge. ("Approval," if a team wants it, is *emergent* —
+someone types "discussed 6/20, agreed — Anya" in the notes; the tool offers a
+place to say it, never asks for it.)
+
+- **The only intrinsic distinction is OBSERVED, never imposed: has bound data, or
+  not.** No data yet → an open/"ghost" card you can **▶ Arm**; data bound → a
+  captured card. That's describing reality, not a state machine.
+- **Arm binds intent to data:** ▶ on the card drops the REC marker on live data;
+  Stop produces a bundle that is *already documented* because the Plan was filled
+  up front. "Record now, document later" stays a fully first-class path (it just
+  auto-creates an undocumented recording that then nags softly).
+- **Lives in a Project; collaboration is just sharing.** A Plan is a lightweight
+  record in the project (a `plans` entry beside `layouts`, §8.1) → it **syncs via
+  the hub** exactly like the rest of the project record. The meeting-room → bench
+  handoff *is* the hub sync — the CO authors on a laptop, the tech opens it at the
+  instrument and arms it. The **Plan (intent) syncs as a record; the captured data
+  stays in the data plane** (store sync, §12.1) — records sync, heavy bytes don't.
+- **Success criteria is the seed of the §18.1 verdict.** Optional here, but the
+  same field becomes the QC pass/fail condition once data is evaluated against it:
+  **a Plan + execution + evaluation = a QC run.** The Plan is the on-ramp; the
+  procedure engine (§18.1) is the same artifact grown up.
+- **Zero-effort bookkeeping rides along (§10):** auto-context snapshot at arm
+  (devices/config/sources/layout/operator/version), **auto-screenshot of the
+  dashboard at start+stop** into `docs/`, a self-writing run `log.md`, and an
+  always-present `meta.json`/`README.md` — so a folder opened a year later is
+  *never* a bare Excel file. The human only ever supplies the irreducible *why*.
+- **Nudges are soft, ambient, dismissible (§10):** provenance-debt badges on
+  under-documented cards, a per-recording completeness carrot, and an
+  end-of-session "still need a summary?" sweep — the last catch while context is
+  fresh. Never modal, never blocking.
+
+- **Phasing:** (1) local Plan as a rich optional record → arm → record → capture,
+  with auto-context + ghost/captured cards in the Explorer; (2) soft nudges
+  (auto `log.md`, stop-summary, end-of-session sweep); (3) hub-sync of plans
+  (rides §8.1) + media/photos + the §10.1 editor for the prose fields.
+
 ---
 
 ## 11. Performance & data regimes
