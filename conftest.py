@@ -41,7 +41,26 @@ def qapp():
     except Exception:                       # noqa: BLE001 — guard is best-effort
         pass
     yield app
-    # Flush pending deleteLater (e.g. QtWebEngine views) so they're destroyed while
-    # the QApplication is still alive — reduces exit-time teardown segfaults.
-    for _ in range(3):
-        app.processEvents()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    """QtWebEngine's C++ teardown during interpreter finalisation segfaults on
+    headless runners even though every test passed (the crash is purely in Qt
+    finalisation, after the summary). Once the session is over and reported, exit
+    immediately with the real status, skipping that crashy teardown — but ONLY when
+    a QApplication was actually created (UI runs), so non-Qt jobs exit normally."""
+    try:
+        from qtpy.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            return
+    except Exception:                       # noqa: BLE001 — no Qt → normal exit
+        return
+    import os
+    import sys
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:                       # noqa: BLE001
+        pass
+    os._exit(int(exitstatus))
