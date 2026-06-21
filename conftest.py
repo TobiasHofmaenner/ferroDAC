@@ -41,3 +41,7 @@ def qapp():
     except Exception:                       # noqa: BLE001 — guard is best-effort
         pass
     yield app
+    # Flush pending deleteLater (e.g. QtWebEngine views) so they're destroyed while
+    # the QApplication is still alive — reduces exit-time teardown segfaults.
+    for _ in range(3):
+        app.processEvents()
