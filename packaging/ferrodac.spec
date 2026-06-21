@@ -55,6 +55,9 @@ hiddenimports += [
     "PySide6.QtOpenGL",
     "PySide6.QtOpenGLWidgets",
     "PySide6.QtSvg",
+    "PySide6.QtWebEngineWidgets",    # in-app document view (Docs / editor / collab)
+    "PySide6.QtWebEngineCore",       # → pulls the QtWebEngineProcess + resources hook
+    "PySide6.QtWebChannel",          # the Qt↔JS bridge for the editor
     "cv2",                           # vision preprocessing
     "psutil",                        # Timeline perf HUD (runtime import in PerfStrip)
 ]
@@ -62,6 +65,16 @@ hiddenimports += [
 datas = collect_data_files("pyqtgraph")
 # Bundle the window/taskbar icon so the running app can load it.
 datas += [(os.path.join(ROOT, "ferrodac", "assets", "app.png"), "ferrodac/assets")]
+
+# The in-app document view (Docs / editor / live collaboration) is a QtWebEngine
+# page that loads the OFFLINE web bundle under ferrodac/ui/web/dist (built by
+# esbuild, committed — no CDN at runtime). Ship the whole tree (HTML/JS/CSS + the
+# KaTeX fonts), preserving its path so docs.py's `_DIST` resolves inside the frozen
+# app. Without this the Docs panel can't load its page.
+_WEB = os.path.join(ROOT, "ferrodac", "ui", "web", "dist")
+for _dp, _dn, _fn in os.walk(_WEB):
+    for _f in _fn:
+        datas += [(os.path.join(_dp, _f), os.path.relpath(_dp, ROOT))]
 
 # The "General" OCR engine (RapidOCR / ONNX Runtime) — bundle its models + libs.
 # Wrapped so a packaging hiccup can't break the build; the engine degrades to
