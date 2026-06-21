@@ -281,6 +281,12 @@ function connect() {
       status(`collaborating · ${n} editor${n === 1 ? "" : "s"}`);
     });
     bridge.collabStopped.connect(leaveCollab);
+    bridge.collabRequestState.connect(() => {
+      // a new LOCAL view (e.g. a popped-out window) needs the current doc — dump our
+      // full Yjs state so it converges (it started empty).
+      if (ydoc && bridge)
+        bridge.collabSendUpdate(b64encode(Y.encodeStateAsUpdate(ydoc)), false);
+    });
     bridge.ready();
   });
 }

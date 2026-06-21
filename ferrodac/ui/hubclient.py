@@ -273,47 +273,68 @@ class HubController(QObject):
             self._on_projects()
 
     # -- docs collab relay (role-independent; opt-in per DocView) ------------
-    def doc_register(self, doc_id: str, bridge) -> None:
-        """A DocView is now collaborating on doc_id — route incoming edits to it."""
+    # The hub treats THIS APP as ONE member per doc (one Docs.Session stream), so a
+    # second LOCAL view of the same doc (e.g. a popped-out window) can't be seeded by
+    # the hub, and the hub never echoes our own edits back to our other views. The
+    # controller therefore keeps a list of local bridges per doc and fans edits out
+    # to the local peers itself, seeding a newcomer from an existing one.
+    def doc_open(self, doc_id: str, bridge) -> None:
         lst = self._doc_bridges.setdefault(doc_id, [])
-        if bridge not in lst:
-            lst.append(bridge)
+        if bridge in lst:
+            return
+        first = not lst
+        lst.append(bridge)
+        if first:
+            if self._docsync is not None:        # first local view → join the hub room;
+                self._docsync.join(doc_id, actor=self._collab_actor or self._aid)
+            # the hub's DocSeed → _on_doc_seed_gui → collabSeed reaches this bridge.
+        else:
+            # a 2nd+ local view: seed it from an existing local peer (start empty, then
+            # have a peer dump its full Yjs state — routed here by doc_send_update).
+            actor = self._collab_actor or self._aid
+            bridge.collabSeed.emit(False, "", actor)
+            for peer in lst:
+                if peer is not bridge:
+                    peer.collabRequestState.emit()
+                    break
 
-    def doc_unregister(self, doc_id: str, bridge) -> None:
+    def doc_close(self, doc_id: str, bridge) -> None:
         lst = self._doc_bridges.get(doc_id)
-        if lst and bridge in lst:
-            lst.remove(bridge)
-            if not lst:
-                self._doc_bridges.pop(doc_id, None)
+        if not lst or bridge not in lst:
+            return
+        lst.remove(bridge)
+        if not lst:                              # last local view → leave the hub room
+            self._doc_bridges.pop(doc_id, None)
+            if self._docsync is not None:
+                self._docsync.leave(doc_id)
 
-    def doc_join(self, doc_id: str) -> None:
-        if self._docsync is not None:
-            self._docsync.join(doc_id, actor=self._collab_actor or self._aid)
-
-    def doc_leave(self, doc_id: str) -> None:
-        if self._docsync is not None:
-            self._docsync.leave(doc_id)
-
-    def doc_send_update(self, doc_id: str, update_b64: str, compaction: bool = False) -> None:
+    def doc_send_update(self, doc_id: str, update_b64: str,
+                        compaction: bool = False, sender=None) -> None:
         if self._docsync is not None:
             self._docsync.send_update(doc_id, update_b64, compaction)
+        self._emit_to_bridges(                   # local fan-out (hub won't echo to us)
+            doc_id, lambda b: b.collabUpdate.emit(update_b64), exclude=sender)
 
-    def doc_send_awareness(self, doc_id: str, state_b64: str) -> None:
+    def doc_send_awareness(self, doc_id: str, state_b64: str, sender=None) -> None:
         if self._docsync is not None:
             self._docsync.send_awareness(doc_id, state_b64)
+        self._emit_to_bridges(
+            doc_id, lambda b: b.collabAwareness.emit(state_b64), exclude=sender)
 
     def doc_send_snapshot(self, doc_id: str, text: str) -> None:
         if self._docsync is not None:
             self._docsync.send_snapshot(doc_id, text)
 
-    def _emit_to_bridges(self, doc_id: str, fn) -> None:
-        """Call fn(bridge) for each bridge on doc_id, skipping any that have been
-        deleted (a popped-out window closed mid-session)."""
+    def _emit_to_bridges(self, doc_id: str, fn, exclude=None) -> None:
+        """Call fn(bridge) for each bridge on doc_id (except `exclude`), dropping any
+        that have been deleted (a popped-out window closed mid-session)."""
         for b in list(self._doc_bridges.get(doc_id, [])):
+            if b is exclude:
+                continue
             try:
                 fn(b)
             except RuntimeError:                 # underlying QObject gone
-                self.doc_unregister(doc_id, b)
+                self.doc_close(doc_id, b)
 
     def _on_doc_seed_gui(self, doc_id, should_seed, text) -> None:
         # the actor label for THIS client's own cursor (the seed itself is anonymous)

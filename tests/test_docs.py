@@ -214,6 +214,44 @@ def test_collab_edits_rerender_preview(qapp):
         b.deleteLater()
 
 
+@pytest.mark.ui
+def test_collab_local_fanout_and_seed(qapp):
+    """Two local views sharing one controller (docked + popped-out window of the same
+    doc): the hub treats the app as ONE member, so the controller must (a) seed a 2nd
+    local view from an existing peer and (b) fan a local edit to the other view itself
+    (the hub never echoes our own edits back). This is the pop-out-while-collaborating
+    fix — without it the second view stays stale."""
+    from ferrodac.ui.hubclient import HubController
+    from ferrodac.ui.docs import DocBridge
+    hc = HubController(None, None, None)
+    hc._aid = hc._collab_actor = "me"
+    b1, b2 = DocBridge(), DocBridge()
+    seeds2, req1, up1, up2 = [], [], [], []
+    b2.collabSeed.connect(lambda s, t, a: seeds2.append((s, t, a)))
+    b1.collabRequestState.connect(lambda: req1.append(1))
+    b1.collabUpdate.connect(lambda u: up1.append(u))
+    b2.collabUpdate.connect(lambda u: up2.append(u))
+    try:
+        hc.doc_open("D", b1)             # first local view
+        hc.doc_open("D", b2)             # 2nd local view → seeded from b1
+        qapp.processEvents()
+        assert seeds2 and seeds2[0][0] is False, "2nd view not told to enter empty"
+        assert req1, "existing peer not asked to dump its state to seed the newcomer"
+
+        hc.doc_send_update("D", "UPD", sender=b2)   # b2 edits
+        qapp.processEvents()
+        assert up1 == ["UPD"], "local edit did not fan out to the peer view"
+        assert up2 == [], "local edit echoed back to its own sender"
+
+        hc.doc_close("D", b2)            # closing the window leaves b1 in the room
+        assert "D" in hc._doc_bridges and b1 in hc._doc_bridges["D"]
+        hc.doc_close("D", b1)            # last view → room gone
+        assert "D" not in hc._doc_bridges
+    finally:
+        b1.deleteLater()
+        b2.deleteLater()
+
+
 def _run_hub(projects_dir, out, ready):
     import asyncio
     loop = asyncio.new_event_loop()

@@ -91,6 +91,7 @@ class DocBridge(QObject):
 
     docChanged = Signal(str, str)        # (relpath, text) — Qt → JS (load / external edit)
     saveRequested = Signal(str)          # (text) — JS → Qt (autosave from the editor)
+    jsReady = Signal()                   # the JS bridge handshake completed (page ready)
 
     # Collaboration (Phase 2 relay). doc_id is IMPLICIT per DocView (Qt owns it);
     # only opaque base64 payloads cross the bridge. Qt → JS:
@@ -99,6 +100,7 @@ class DocBridge(QObject):
     collabAwareness = Signal(str)        # (state_b64) — an incoming awareness update
     collabPresence = Signal(str)         # (actors_json) — room membership
     collabStopped = Signal()             # Qt left the session → JS tears down Yjs
+    collabRequestState = Signal()        # dump full Yjs state (to seed a new local view)
     # JS → Qt (re-emitted by the slots below; DocView forwards to the HubController):
     joinRequested = Signal()
     leaveRequested = Signal()
@@ -117,6 +119,7 @@ class DocBridge(QObject):
 
     @Slot()
     def ready(self) -> None:
+        self.jsReady.emit()                               # JS bridge wired (collab-safe now)
         self.docChanged.emit(self._relpath, self._text)   # (re)send to a just-loaded page
 
     @Slot(str)
@@ -159,6 +162,8 @@ class DocView(QWidget):
         self._collab = None              # a HubController, when a hub+doc is available
         self._doc_id = None              # "<project_id>::<relpath>" for collaboration
         self._collab_on = False          # currently in a live session?
+        self._js_ready = False           # has the JS bridge handshake completed?
+        self._pending_collab = False     # asked to collaborate before the JS was ready
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -202,6 +207,7 @@ class DocView(QWidget):
         self.view = QWebEngineView()
         self.bridge = DocBridge(self)
         self.bridge.saveRequested.connect(self._write)   # in-app edits → the file
+        self.bridge.jsReady.connect(self._on_js_ready)    # gate collab on the JS handshake
         # Collaboration: the bridge↔hub wiring is STATIC (connected once); the doc_id
         # and controller are dynamic state, so switching docs never re-wires signals.
         self.bridge.updateRequested.connect(self._collab_send_update)
@@ -304,8 +310,18 @@ class DocView(QWidget):
         win.setWindowTitle(f"{os.path.basename(self._path)} — ferroDAC")
         win.resize(860, 640)
         win.open(self._path)
+        # If this view is collaborating, the pop-out joins the SAME live session (as a
+        # local peer) instead of being a solo view that just fights over the file.
+        if self._collab is not None and self._doc_id:
+            win.set_collab_target(self._collab, self._doc_id)
+            if self._collab_on:
+                win.start_collab()
         win.show()
         win.raise_()
+
+    def closeEvent(self, event):  # noqa: N802
+        self._stop_collab()       # a closed pop-out leaves the room (locally; hub iff last)
+        super().closeEvent(event)
 
     def _edit_external(self) -> None:
         if not self._path:
@@ -337,23 +353,40 @@ class DocView(QWidget):
 
     def _on_collab_toggled(self, checked: bool) -> None:
         if checked:
-            self._start_collab()
+            self.start_collab()
         else:
             self._stop_collab()
+
+    def _on_js_ready(self) -> None:
+        self._js_ready = True
+        if self._pending_collab:              # a pop-out asked to collab before JS was up
+            self._pending_collab = False
+            self._start_collab()
+
+    def start_collab(self) -> None:
+        """Join the collab session — DEFERRING until the JS bridge handshake completes
+        (a freshly popped-out window's page is still loading, and a collabSeed emitted
+        before its JS wires up would be lost)."""
+        if self._collab is None or not self._doc_id:
+            return
+        if self._js_ready:
+            self._start_collab()
+        else:
+            self._pending_collab = True
 
     def _start_collab(self) -> None:
         if self._collab_on or self._collab is None or not self._doc_id:
             return
         self._collab_on = True
-        self._collab.doc_register(self._doc_id, self.bridge)
-        self._collab.doc_join(self._doc_id)       # → DocSeed starts the JS session
+        # doc_open joins the hub room (first local view) OR seeds this view from an
+        # existing local peer (a 2nd view, e.g. a popped-out window of the same doc).
+        self._collab.doc_open(self._doc_id, self.bridge)
         self._collab_btn.setChecked(True)
         self._collab_btn.setText("👥 Collaborating")
 
     def _stop_collab(self) -> None:
         if self._collab_on and self._collab is not None and self._doc_id:
-            self._collab.doc_leave(self._doc_id)
-            self._collab.doc_unregister(self._doc_id, self.bridge)
+            self._collab.doc_close(self._doc_id, self.bridge)   # leaves the hub iff last
             self.bridge.collabStopped.emit()       # JS tears down Yjs → back to solo
         self._collab_on = False
         self._collab_btn.setChecked(False)
@@ -361,11 +394,12 @@ class DocView(QWidget):
 
     def _collab_send_update(self, update_b64: str, compaction: bool) -> None:
         if self._collab_on and self._collab is not None and self._doc_id:
-            self._collab.doc_send_update(self._doc_id, update_b64, compaction)
+            self._collab.doc_send_update(self._doc_id, update_b64, compaction,
+                                         sender=self.bridge)
 
     def _collab_send_awareness(self, state_b64: str) -> None:
         if self._collab_on and self._collab is not None and self._doc_id:
-            self._collab.doc_send_awareness(self._doc_id, state_b64)
+            self._collab.doc_send_awareness(self._doc_id, state_b64, sender=self.bridge)
 
     def _collab_send_snapshot(self, text: str) -> None:
         if self._collab_on and self._collab is not None and self._doc_id:
