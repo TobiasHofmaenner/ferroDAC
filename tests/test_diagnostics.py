@@ -39,7 +39,13 @@ def test_qt_thread_guard_flags_off_thread_timer():
         'threading.Thread(target=lambda: QTimer().start(50),'
         ' name="hub-projects", daemon=True).start(); time.sleep(0.4)')
     out = _run(prog).stderr
-    # the exact bug: a QTimer started on a raw worker thread → flagged with origin
-    assert "Timers can only be used" in out
+    # The exact bug: a QTimer started on a raw worker thread → flagged with origin.
+    # The Qt warning TEXT varies by version ("Timers can only be used with threads
+    # started with QThread" vs "current thread's event dispatcher has already been
+    # destroyed"), so assert the STABLE bits: our origin annotation + the thread.
+    assert "[Qt]" in out                                  # a Qt message was captured
+    assert ("Timers can only be used" in out
+            or "event dispatcher has already been destroyed" in out
+            or "startTimer" in out)
     assert "off the GUI thread: True" in out
     assert "hub-projects" in out                          # the offending thread named

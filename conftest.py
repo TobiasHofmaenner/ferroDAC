@@ -30,4 +30,14 @@ def qapp():
     """A single QApplication for the UI smoke tests."""
     from qtpy.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
+    # Mirror the app's segfault guard (ferrodac-segfault-gc): cyclic GC of a
+    # QObject-with-timer on a non-GUI thread corrupts Qt → SIGSEGV. UI tests spin
+    # real worker threads (hub agent/viewer/docs sync), so without this the cyclic
+    # collector can fire on one of them and crash teardown. gc.disable() + a
+    # GUI-thread collector is exactly what app.main() installs.
+    try:
+        from ferrodac.diagnostics import install_gui_thread_gc
+        install_gui_thread_gc()
+    except Exception:                       # noqa: BLE001 — guard is best-effort
+        pass
     yield app
