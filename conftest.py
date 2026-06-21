@@ -43,13 +43,20 @@ def qapp():
     yield app
 
 
-@pytest.hookimpl(trylast=True)
+_pytest_exit_code = {"code": 0}
+
+
 def pytest_sessionfinish(session, exitstatus):
+    _pytest_exit_code["code"] = int(exitstatus)
+
+
+def pytest_unconfigure(config):
     """QtWebEngine's C++ teardown during interpreter finalisation segfaults on
     headless runners even though every test passed (the crash is purely in Qt
-    finalisation, after the summary). Once the session is over and reported, exit
-    immediately with the real status, skipping that crashy teardown — but ONLY when
-    a QApplication was actually created (UI runs), so non-Qt jobs exit normally."""
+    finalisation). Once pytest has FULLY finished AND printed its summary (this hook
+    runs last, unlike pytest_sessionfinish which fires inside the reporter's
+    hookwrapper), exit with the real status, skipping that crashy teardown — but ONLY
+    when a QApplication exists (UI runs), so non-Qt jobs exit normally."""
     try:
         from qtpy.QtWidgets import QApplication
         if QApplication.instance() is None:
@@ -63,4 +70,4 @@ def pytest_sessionfinish(session, exitstatus):
         sys.stderr.flush()
     except Exception:                       # noqa: BLE001
         pass
-    os._exit(int(exitstatus))
+    os._exit(_pytest_exit_code["code"])
