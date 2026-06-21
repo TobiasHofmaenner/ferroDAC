@@ -11,7 +11,14 @@ diagnostics harness flagged. The fix: enumerate on the GUI thread
 import pytest
 
 pytest.importorskip("qtpy")
-pytest.importorskip("qtpy.QtMultimedia")
+# Qt Multimedia can fail to LOAD (not merely be absent) on a headless CI runner —
+# e.g. `libpulse.so.0: cannot open shared object file`. importorskip re-raises that
+# (the failing module is PySide6.QtMultimedia, not the name we asked for), so guard
+# the import ourselves and skip the whole module. Camera enumeration is GUI-only.
+try:
+    import qtpy.QtMultimedia  # noqa: F401
+except Exception as exc:       # noqa: BLE001
+    pytest.skip(f"Qt Multimedia unavailable: {exc}", allow_module_level=True)
 
 
 def test_discover_reads_cache_not_backend(monkeypatch):
