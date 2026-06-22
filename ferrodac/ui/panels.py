@@ -1846,6 +1846,11 @@ class DocPanel(Panel):
         if self._view is not None:
             self._view.open(path)
 
+    def set_doc_macros(self, on_list_recordings, on_export_recording) -> None:
+        """Wire the editor's /rec macro to the app's recording services."""
+        if self._view is not None:
+            self._view.set_macros(on_list_recordings, on_export_recording)
+
     def state(self) -> dict:
         return {"path": self._path} if self._path else {}
 

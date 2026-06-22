@@ -342,7 +342,9 @@ class DocView(QWidget):
         if not self._path:
             return
         win = DocView(on_edit=self._on_edit, on_configure=self._on_configure,
-                      parent=self.window())
+                      parent=self.window(),
+                      on_list_recordings=self._on_list_recordings,
+                      on_export_recording=self._on_export_recording)
         win.setWindowFlag(Qt.Window, True)              # owned, but its own OS window
         win.setAttribute(Qt.WA_DeleteOnClose, True)
         win.setWindowTitle(f"{os.path.basename(self._path)} — ferroDAC")
@@ -403,6 +405,14 @@ class DocView(QWidget):
             self._start_collab()
 
     # -- editor macros (/rec): list recordings + export one on demand --------
+    def set_macros(self, on_list_recordings, on_export_recording) -> None:
+        """Wire the /rec macro to the app's services (used by doc panels created via
+        the Add menu or a layout, which can't get the callbacks at construction)."""
+        self._on_list_recordings = on_list_recordings
+        self._on_export_recording = on_export_recording
+        if self._js_ready:                    # warm the cache if the page is already up
+            self._push_recordings()
+
     def _push_recordings(self) -> None:
         if self._on_list_recordings is None:
             return

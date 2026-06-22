@@ -2228,9 +2228,19 @@ class MainWindow(QMainWindow):
         pid = self.dashboard.add_panel(kind)
         if kind == "doc":
             panel = self.dashboard.panel(pid)
+            self._wire_doc_panels()
             readme = self._active_readme()
             if panel is not None and readme:
                 panel.open(readme)
+
+    def _wire_doc_panels(self) -> None:
+        """Give every Document panel's editor the /rec macro services. Doc panels are
+        created generically (Add menu / layout restore), so they can't receive the
+        callbacks at construction — wire them here (idempotent)."""
+        for panel in self.dashboard.panels():
+            if hasattr(panel, "set_doc_macros"):
+                panel.set_doc_macros(self._list_recordings,
+                                     self._export_recording_for_doc)
 
     def _active_readme(self) -> str | None:
         """The active project's README.md path, bootstrapping a starter if missing."""
@@ -2612,6 +2622,7 @@ class MainWindow(QMainWindow):
         self.dashboard.import_layout(layout)       # swap panels/routes/markers only
         if not existed and not self.dashboard.panels():
             self.dashboard.add_panel("chart")      # fresh project → a default chart
+        self._wire_doc_panels()                    # macro services for any doc panels
         self._update_project_title()
         self._refresh_explorer()                   # show the new project's contents
         if self._docs_view is not None:
