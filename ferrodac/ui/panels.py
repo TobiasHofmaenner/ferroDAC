@@ -42,7 +42,7 @@ from ..core.markers import RECORDING
 from ..core.trace import Trace
 from ..analysis.library import DEFAULT_GASES, LIBRARY
 from ._common import color_for, fmt
-from .widget import Widget
+from .widget import WIDGET_TYPES, Widget
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
 
@@ -2006,7 +2006,9 @@ class DocPanel(Panel):
             self.open(path)
 
 
-PANEL_TYPES = {
+# Built-ins register into the shared WIDGET_TYPES registry; PANEL_TYPES is that same
+# dict, so plugin widgets (which call register_widget) appear in the Add menu too.
+WIDGET_TYPES.update({
     "chart": ("Chart", ChartPanel),
     "numeric": ("7-seg display", NumericPanel),
     "spectrum": ("Spectrum", SpectrumPanel),
@@ -2019,4 +2021,5 @@ PANEL_TYPES = {
     "button": ("Button", ButtonPanel),
     "toggle": ("Toggle", TogglePanel),
     "doc": ("Document", DocPanel),
-}
+})
+PANEL_TYPES = WIDGET_TYPES

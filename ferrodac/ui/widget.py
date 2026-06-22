@@ -8,6 +8,24 @@ stable; bump the plugin `api` version if it changes.
 """
 from qtpy.QtWidgets import QWidget
 
+# The widget registry: kind -> (menu label, class). Built-ins populate it (see
+# panels.PANEL_TYPES, which IS this dict); plugin widgets add themselves with the
+# @register_widget decorator below, so they appear in the Add menu like any built-in.
+WIDGET_TYPES: dict = {}
+
+
+def register_widget(label=None):
+    """Class decorator registering a Widget subclass by its ``kind`` for the Add menu.
+    ``label`` defaults to the class's ``label`` attribute (or its ``kind``)::
+
+        @register_widget("Polar plot")
+        class PolarPlot(Widget): ...
+    """
+    def deco(cls):
+        WIDGET_TYPES[cls.kind] = (label or getattr(cls, "label", cls.kind), cls)
+        return cls
+    return deco
+
 
 class Widget(QWidget):
     """A widget that displays a routed set of Sources (and/or emits control inputs)."""

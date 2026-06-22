@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from ferrodac.plugin import FLOAT, Port, Processor
+from ferrodac.plugin import FLOAT, Port, Processor, register_processor
 
 # numpy 2.x renamed trapz → trapezoid; support both.
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
 
+@register_processor
 class WindowIntegral(Processor):
     kind = "window_integral"          # registry key (must be unique across loaded plugins)
     label = "Window integral"         # human label (shown in the UI / /proc)

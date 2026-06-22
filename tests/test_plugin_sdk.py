@@ -81,6 +81,36 @@ def test_trace_xarray_roundtrip():
     assert t2.x_unit == "amu" and t2.y_unit == "A"
 
 
+def test_register_processor_via_example():
+    """Importing a plugin's processor module self-registers it (what the loader relies
+    on) — the example uses @register_processor. Qt-free."""
+    import sys
+    if EX not in sys.path:
+        sys.path.insert(0, EX)
+    from ferrodac.analysis.processor import PROCESSOR_TYPES
+    import ferrodac_ext_example.processors.integrate  # noqa: F401 — triggers registration
+    assert "window_integral" in PROCESSOR_TYPES
+    assert PROCESSOR_TYPES["window_integral"].label == "Window integral"
+
+
+@pytest.mark.ui
+def test_widget_registry(qapp):
+    from ferrodac.plugin import Widget, register_widget
+    from ferrodac.ui.panels import PANEL_TYPES
+    from ferrodac.ui.widget import WIDGET_TYPES
+    assert PANEL_TYPES is WIDGET_TYPES                  # one shared registry
+    assert {"chart", "bars", "composition"} <= set(PANEL_TYPES)   # builtins registered
+
+    @register_widget("My Plugin Widget")
+    class MyWidget(Widget):
+        kind = "test_plugin_widget"
+
+    try:
+        assert WIDGET_TYPES["test_plugin_widget"] == ("My Plugin Widget", MyWidget)
+    finally:
+        WIDGET_TYPES.pop("test_plugin_widget", None)    # don't leak into the Add menu
+
+
 @pytest.mark.ui
 def test_panel_subclasses_widget(qapp):
     from ferrodac.plugin import Widget
