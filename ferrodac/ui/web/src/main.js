@@ -69,6 +69,7 @@ const exportResults = new Map();        // recId → files from a fresh export-n
 const exportWaiters = new Map();
 let processorsCache = [];               // [{kind,label}] — the /proc macro's choices
 let awaitingProcInsert = false;         // a picked processor's source is being fetched
+let awaitingDevTable = false;           // the /dev instruments table is being built
 let mode = "read";        // read | edit | split
 let lastSynced = "";      // the text the file currently holds (per our knowledge)
 let saveTimer = null;
@@ -313,7 +314,29 @@ function slashSource(context) {
       })),
     };
   }
+  if (cmd === "dev") {
+    return {
+      from: w.from, filter: false,
+      options: [{
+        label: "dev: Instruments used", detail: "lab-journal table", type: "function",
+        apply: (v, c, from, to) => {
+          v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/dev`
+          awaitingDevTable = true;
+          if (bridge) bridge.requestDeviceTable();              // inserted on arrival
+        },
+      }],
+    };
+  }
   return null;
+}
+
+// Insert the instruments table built by the app (the curated devices' provenance).
+function insertDeviceTable(md) {
+  if (!editor || !md) return;
+  const block = "\n\n" + md.replace(/\s+$/, "") + "\n";
+  const at = editor.state.selection.main.head;
+  editor.dispatch({ changes: { from: at, insert: block },
+                    selection: { anchor: at + block.length } });
 }
 
 // Insert a processor's source as a fenced code block (open science — cite the
@@ -497,6 +520,9 @@ const SLASH_HELP = [
   { cmd: "/proc", title: "Insert a processor's source",
     desc: "Pick a processor in use → drops its source as a python code block, plus a "
         + "white-paper link if the (plugin) processor ships one." },
+  { cmd: "/dev", title: "Insert an instruments table",
+    desc: "Drops a lab-journal table of the devices behind your curated sources — "
+        + "manufacturer, model, serial, firmware, calibration and asset tag." },
 ];
 
 function buildMacroHelp() {
@@ -566,6 +592,11 @@ function connect() {
       awaitingProcInsert = false;
       insertProcessorSource(kind, src, paperRel);
     });
+    bridge.deviceTable.connect((md) => {                   // picked /dev → insert
+      if (!awaitingDevTable) return;
+      awaitingDevTable = false;
+      insertDeviceTable(md);
+    });
     bridge.collabSeed.connect(enterCollab);
     bridge.collabUpdate.connect((b64) => {
       if (ydoc) Y.applyUpdate(ydoc, b64decode(b64), "remote");
@@ -614,6 +645,11 @@ window.__doc = {
   insertProcessorSource: (kind) => {            // pick a processor → fetch + insert source
     awaitingProcInsert = true;
     if (bridge) bridge.requestProcessorSource(kind);
+  },
+  // /dev test hook: request the instruments table → inserted on arrival
+  insertDeviceTable: () => {
+    awaitingDevTable = true;
+    if (bridge) bridge.requestDeviceTable();
   },
   // compute the stage-2 (list) menu for a recording → result in __doc._lastLabels
   stage2Labels: (recId) => {

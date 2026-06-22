@@ -1051,3 +1051,41 @@ def test_export_spec_resolution_and_roundtrip(qapp):
         assert db.panel(pid).export_spec == {"width": 3000}
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_dev_journal_table_from_curated_sources(qapp):
+    """/dev app side: the instruments table lists the DEVICES behind the curated
+    sources (deduped per device), merging descriptor provenance with user metadata."""
+    from ferrodac.core.device import DeviceDescriptor, Interface
+    from ferrodac.ui.workspace import SourcePort
+    w = _mainwindow(qapp)
+    try:
+        descs = [
+            DeviceDescriptor("sim:rga:1", "qms", "RGA", Interface(kind="sim"),
+                             hardware_id="SIM-RGA-1", model="Q200", firmware="1.2",
+                             manufacturer="Ferrovac", cal_date="2026-01-15",
+                             cal_due="2027-01-15", cal_cert="CAL-1"),
+            DeviceDescriptor("sim:gauge:1", "gauge", "Gauge", Interface(kind="sim"),
+                             hardware_id="SIM-GAUGE-1", model="SimGauge 6",
+                             manufacturer="Ferrovac"),
+        ]
+        w.manager.active_descriptors = lambda: descs
+        # two channels of the RGA device + one of the gauge → curate all three
+        for key, dev in (("sim:rga:1/spectrum", "RGA"), ("sim:rga:1/total", "RGA"),
+                         ("sim:gauge:1/ch1", "Gauge")):
+            w.dashboard._sources[key] = SourcePort(key, key.split("/")[-1],
+                                                   "float", "", dev, "device")
+        w.dashboard.set_source_lens({"sim:rga:1/spectrum", "sim:rga:1/total",
+                                     "sim:gauge:1/ch1"})
+        w._device_meta().set("SIM-RGA-1", {"asset_tag": "LAB-007"})  # user fills the gap
+
+        md = w._device_journal_markdown()
+        assert "## Instruments" in md
+        assert md.count("| RGA |") == 1, md         # one row despite two curated channels
+        assert "| Gauge |" in md
+        assert "SIM-RGA-1" in md and "Q200" in md
+        assert "2026-01-15 → due 2027-01-15 (CAL-1)" in md
+        assert "LAB-007" in md                        # user metadata merged in
+    finally:
+        w.close()

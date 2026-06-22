@@ -382,6 +382,35 @@ def test_slash_proc_cites_whitepaper(qapp):
 
 
 @pytest.mark.ui
+def test_slash_dev_inserts_instruments_table(qapp):
+    """The /dev macro: the app builds an instruments table (markdown) and the editor
+    drops it at the cursor — a lab-journal provenance block."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    table = ("## Instruments\n\n"
+             "| Instrument | Manufacturer | Model | Serial | Firmware | Calibration | Asset |\n"
+             "|---|---|---|---|---|---|---|\n"
+             "| RGA | Acme | Q200 | SN-1 | 1.2 | 2026-01-01 → due 2027-01-01 | — |\n")
+    dv = DocView(on_device_table=lambda: table)
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        dv.view.page().runJavaScript("window.__doc.insertDeviceTable()")
+        assert _pump(qapp, lambda: "## Instruments" in (_js(qapp, dv.view, "window.__doc.text()") or ""))
+        txt = _js(qapp, dv.view, "window.__doc.text()")
+        assert "| RGA | Acme | Q200 | SN-1 |" in txt, txt
+        # and it renders as a real table (not raw pipes)
+        html = _js(qapp, dv.view, "window.__doc.html()")
+        assert "<table" in html and "SN-1" in html
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_slash_macro_lists_existing_and_export_now(qapp):
     """Picking a recording shows its ALREADY-exported files plus an 'Export now' item."""
     from ferrodac.ui.docs import DocView

@@ -2230,6 +2230,7 @@ class MainWindow(QMainWindow):
                                   on_list_recording_exports=self._list_recording_exports,
                                   on_list_processors=self._list_processors,
                                   on_processor_source=self._processor_source,
+                                  on_device_table=self._device_journal_markdown,
                                   on_saved=lambda: self._schedule_project_commit(
                                       "Edited documents"))
         self.docs_dock.setWidget(self._docs_view)
@@ -2295,7 +2296,8 @@ class MainWindow(QMainWindow):
                                      self._export_recording_for_doc,
                                      self._list_recording_exports,
                                      self._list_processors,
-                                     self._processor_source)
+                                     self._processor_source,
+                                     self._device_journal_markdown)
 
     def _active_readme(self) -> str | None:
         """The active project's README.md path, bootstrapping a starter if missing."""
@@ -2935,6 +2937,60 @@ class MainWindow(QMainWindow):
             return dest
         except Exception:                          # noqa: BLE001
             return None
+
+    # -- editor /dev macro: an "instruments used" table for the lab journal --
+    def _device_meta(self):
+        if getattr(self, "_devmeta", None) is None:
+            from ..core.devicemeta import DeviceMeta
+            from qtpy.QtCore import QStandardPaths
+            cfg = (QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
+                   or os.path.join(os.path.expanduser("~"), ".ferrodac"))
+            self._devmeta = DeviceMeta(os.path.join(cfg, "device_meta.json"))
+        return self._devmeta
+
+    def _journal_devices(self) -> list:
+        """The unique DEVICES behind the project's curated sources (first-seen order)."""
+        by_id = {}
+        for d in self.manager.active_descriptors():
+            if d.uuid:
+                by_id[d.uuid] = d
+            by_id[d.instance_id] = d
+        seen, devices = set(), []
+        for p in self.dashboard.visible_source_ports():     # the curated channel lens
+            if getattr(p, "kind", "") != "device":
+                continue
+            d = by_id.get(p.key.split("/")[0])              # key = "<device-id>/<source>"
+            if d is not None and d.instance_id not in seen:
+                seen.add(d.instance_id)
+                devices.append(d)
+        return devices
+
+    def _device_journal_markdown(self) -> str:
+        """A Markdown 'Instruments' table for the curated devices — descriptor fields
+        merged with user metadata (calibration, asset tag, …). For the /dev macro."""
+        from .. import __version__
+        from ..core.devicemeta import device_key, merge_device_info
+        devices = self._journal_devices()
+        if not devices:
+            return "_No instruments — curate some device channels first._"
+        meta = self._device_meta()
+        rows = [merge_device_info(d, meta.get(device_key(d))) for d in devices]
+        lines = ["## Instruments", "",
+                 "| Instrument | Manufacturer | Model | Serial | Firmware | Calibration | Asset |",
+                 "|---|---|---|---|---|---|---|"]
+        for r in rows:
+            cal = "—"
+            if r.get("cal_date") or r.get("cal_due"):
+                cal = r.get("cal_date") or "?"
+                if r.get("cal_due"):
+                    cal += f" → due {r['cal_due']}"
+                if r.get("cal_cert"):
+                    cal += f" ({r['cal_cert']})"
+            cells = [r.get("name"), r.get("manufacturer"), r.get("model"), r.get("serial"),
+                     r.get("firmware"), cal, r.get("asset_tag")]
+            lines.append("| " + " | ".join(str(c) if c else "—" for c in cells) + " |")
+        lines += ["", f"_Acquired with ferroDAC {__version__}._"]
+        return "\n".join(lines)
 
     # -- editor /rec macro: list recordings + export one on demand -----------
     def _list_recordings(self) -> list:
