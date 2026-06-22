@@ -718,6 +718,33 @@ def test_device_qualified_label(qapp):
 
 
 @pytest.mark.ui
+def test_panel_export_items(qapp):
+    """Every plot panel exposes a renderable export_item (chart/spectrum/waterfall, and
+    the combined specwf via its GraphicsLayout); non-plot panels return None."""
+    import os
+    import tempfile
+    from pyqtgraph.exporters import ImageExporter
+    from ferrodac.ui.panels import (ChartPanel, SpectrumPanel, WaterfallPanel,
+                                     SpectrumWaterfallPanel, NumericPanel)
+    d = tempfile.mkdtemp()
+    for name, cls in (("chart", ChartPanel), ("spectrum", SpectrumPanel),
+                      ("waterfall", WaterfallPanel), ("specwf", SpectrumWaterfallPanel)):
+        p = cls()
+        p.resize(400, 240)
+        try:
+            item = p.export_item()
+            assert item is not None, name
+            png = os.path.join(d, name + ".png")
+            ex = ImageExporter(item)
+            ex.parameters()["width"] = 600
+            ex.export(png)
+            assert os.path.exists(png) and os.path.getsize(png) > 0, name
+        finally:
+            p.deleteLater()
+    assert NumericPanel().export_item() is None        # not a plot → nothing to export
+
+
+@pytest.mark.ui
 def test_export_config_dialog(qapp):
     """The export dialog reads back its spec; toggling a per-panel override OFF means
     'use the project default' (None); the project-default form has no override toggle."""

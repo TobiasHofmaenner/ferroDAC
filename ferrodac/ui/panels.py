@@ -89,6 +89,20 @@ class Panel(QWidget):
     def set_state(self, state: dict) -> None:
         """Restore per-panel state from a saved session."""
 
+    def export_item(self):
+        """The pyqtgraph GraphicsItem to hand to ImageExporter for a plot-image
+        export, or None for a panel that has nothing to render (numeric / button /
+        camera / doc). Default: the single plot's item; multi-plot panels override
+        to return their whole layout."""
+        plot = getattr(self, "plot", None)
+        if plot is None:
+            return None
+        if hasattr(plot, "plotItem"):
+            return plot.plotItem
+        if hasattr(plot, "getPlotItem"):
+            return plot.getPlotItem()
+        return None
+
     # -- configuration (⚙) ---------------------------------------------------
     def config_fields(self) -> list:
         """Editable settings as ``[(key, label, kind, value, opts)]`` where kind
@@ -991,6 +1005,10 @@ class SpectrumWaterfallPanel(Panel):
 
     _AXIS_W = 74        # equal left-axis width → the two ViewBoxes align in x
     #                     (wide enough for the waterfall's time labels)
+
+    def export_item(self):
+        # both stacked plots + the colour bar export as ONE figure (the layout item)
+        return self.glw.ci
 
     def __init__(self, parent=None):
         super().__init__(parent)

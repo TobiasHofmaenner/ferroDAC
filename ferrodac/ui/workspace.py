@@ -348,7 +348,8 @@ class Dashboard(QObject):
     def _configure_panel(self, panel: Panel) -> None:
         """Open the panel's settings dialog (the ⚙ on its title bar) and apply
         the result, propagating any new display name to the dock + patch-bay."""
-        exportable = getattr(panel, "plot", None) is not None
+        exportable = (hasattr(panel, "export_item")
+                      and panel.export_item() is not None)
         dlg = PanelConfigDialog(
             panel.title, panel.config_fields(), self.area,
             on_export=(lambda: self._configure_export(panel)) if exportable else None)
@@ -371,10 +372,7 @@ class Dashboard(QObject):
         live preview. Width is capped for snappiness (it only needs to show aspect)."""
         from pyqtgraph.exporters import ImageExporter
         from qtpy.QtGui import QPixmap
-        plot = getattr(panel, "plot", None)
-        pi = getattr(plot, "plotItem", None) if plot is not None else None
-        if pi is None and plot is not None and hasattr(plot, "getPlotItem"):
-            pi = plot.getPlotItem()
+        pi = panel.export_item() if hasattr(panel, "export_item") else None
         if pi is None:
             return None
         try:

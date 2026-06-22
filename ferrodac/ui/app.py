@@ -2803,7 +2803,7 @@ class MainWindow(QMainWindow):
         if m is None or m.t_end is None:
             return []
         charts = [p for p in self.dashboard.panels()
-                  if getattr(p, "plot", None) is not None]
+                  if getattr(p, "export_item", None) and p.export_item() is not None]
         if not charts:
             return []
         os.makedirs(dest_dir, exist_ok=True)
@@ -2822,9 +2822,7 @@ class MainWindow(QMainWindow):
             self.dashboard.zoom_to(m.t, m.t_end)
             QApplication.processEvents()           # flush the re-stream + repaint
             for p in charts:
-                pi = getattr(p.plot, "plotItem", None)
-                if pi is None and hasattr(p.plot, "getPlotItem"):
-                    pi = p.plot.getPlotItem()
+                pi = p.export_item()
                 if pi is None:
                     continue
                 pspec = spec or self.dashboard.export_spec_for(p)   # per-panel resolution
