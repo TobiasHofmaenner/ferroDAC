@@ -62,12 +62,14 @@ let bridge = null;
 let editor = null;
 let docDir = "";          // the open doc's folder — resolves relative image links
 let recordingsCache = [];               // [{id,label,t0,t1}] — the /rec macro's choices
+const recordingsWaiters = [];           // resolvers awaiting a cold-cache fetch
 let pendingRec = null;                  // {id, mode:"list"|"export"} — drives stage 2
 const existingResults = new Map();      // recId → files ALREADY exported (fast scan)
 const existingWaiters = new Map();
 const exportResults = new Map();        // recId → files from a fresh export-now
 const exportWaiters = new Map();
 let processorsCache = [];               // [{kind,label}] — the /proc macro's choices
+const processorsWaiters = [];           // resolvers awaiting a cold-cache fetch
 let awaitingProcInsert = false;         // a picked processor's source is being fetched
 let awaitingDevTable = false;           // the /dev instruments table is being built
 let awaitingMeta = false;               // the /meta front-matter block is being built
@@ -251,6 +253,30 @@ function fileOption(f) {                        // a completion that inserts one
   };
 }
 
+// Resolve a macro's data cache. Always fires a refresh; when the cache is cold
+// (e.g. right after a doc reload reset the page) it AWAITS the fetch so the menu
+// populates on the first keystroke instead of silently showing nothing. A short
+// timeout falls back to whatever we have, so the completion never hangs.
+function whenCache(get, request, waiters, timeoutMs = 1500) {
+  request();
+  if (get().length) return get();              // warm → synchronous (snappy, as before)
+  return new Promise((resolve) => {            // cold → wait for `*Available`
+    let done = false;
+    const finish = () => { if (done) return; done = true; resolve(get()); };
+    waiters.push(finish);
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+function flushWaiters(waiters) {               // a `*Available` arrived → wake the menu
+  waiters.splice(0).forEach((fn) => fn());
+}
+
+// A completion source may answer synchronously or with a Promise — build either way.
+function resolveMenu(data, build) {
+  return data instanceof Promise ? data.then(build) : build(data);
+}
+
 // A single CM6 completion source driving the whole cascade via `pendingRec` state:
 //   /rec → recordings → (existing files + Export-now) → [fresh files] → insert.
 function slashSource(context) {
@@ -284,36 +310,40 @@ function slashSource(context) {
   if (!w || (w.from === w.to && !context.explicit)) return null;
   const cmd = w.text.slice(1).toLowerCase();
   if (cmd === "rec") {
-    if (bridge) bridge.requestRecordings();      // refresh for next time
-    if (!recordingsCache.length) return null;
-    return {
-      from: w.from, filter: false,
-      options: recordingsCache.map((rec) => ({
-        label: "rec: " + rec.label, detail: spanLabel(rec), type: "function",
-        apply: (v, c, from, to) => {
-          v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/rec`
-          pendingRec = { id: rec.id, mode: "list" };
-          existingResults.delete(rec.id);                       // re-scan fresh
-          if (bridge) bridge.requestRecordingExports(rec.id);   // list existing exports
-          startCompletion(v);                                    // → stage 2 (list)
-        },
-      })),
-    };
+    return resolveMenu(
+      whenCache(() => recordingsCache,
+                () => { if (bridge) bridge.requestRecordings(); },
+                recordingsWaiters),
+      (recs) => !recs.length ? null : {
+        from: w.from, filter: false,
+        options: recs.map((rec) => ({
+          label: "rec: " + rec.label, detail: spanLabel(rec), type: "function",
+          apply: (v, c, from, to) => {
+            v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/rec`
+            pendingRec = { id: rec.id, mode: "list" };
+            existingResults.delete(rec.id);                       // re-scan fresh
+            if (bridge) bridge.requestRecordingExports(rec.id);   // list existing exports
+            startCompletion(v);                                    // → stage 2 (list)
+          },
+        })),
+      });
   }
   if (cmd === "proc") {
-    if (bridge) bridge.requestProcessors();
-    if (!processorsCache.length) return null;
-    return {
-      from: w.from, filter: false,
-      options: processorsCache.map((proc) => ({
-        label: "proc: " + proc.label, detail: "source", type: "function",
-        apply: (v, c, from, to) => {
-          v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/proc`
-          awaitingProcInsert = true;
-          if (bridge) bridge.requestProcessorSource(proc.kind);  // inserted on arrival
-        },
-      })),
-    };
+    return resolveMenu(
+      whenCache(() => processorsCache,
+                () => { if (bridge) bridge.requestProcessors(); },
+                processorsWaiters),
+      (procs) => !procs.length ? null : {
+        from: w.from, filter: false,
+        options: procs.map((proc) => ({
+          label: "proc: " + proc.label, detail: "source", type: "function",
+          apply: (v, c, from, to) => {
+            v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/proc`
+            awaitingProcInsert = true;
+            if (bridge) bridge.requestProcessorSource(proc.kind);  // inserted on arrival
+          },
+        })),
+      });
   }
   if (cmd === "dev") {
     return {
@@ -591,6 +621,7 @@ function connect() {
     bridge.docChanged.connect(onIncoming);
     bridge.recordingsAvailable.connect((j) => {
       try { recordingsCache = JSON.parse(j) || []; } catch (e) { recordingsCache = []; }
+      flushWaiters(recordingsWaiters);          // wake a cold-cache /rec menu
     });
     bridge.recordingExports.connect((recId, j) => {        // already-exported files
       let files = []; try { files = JSON.parse(j) || []; } catch (e) { /* none */ }
@@ -603,6 +634,7 @@ function connect() {
     });
     bridge.processorsAvailable.connect((j) => {
       try { processorsCache = JSON.parse(j) || []; } catch (e) { processorsCache = []; }
+      flushWaiters(processorsWaiters);          // wake a cold-cache /proc menu
     });
     bridge.processorSource.connect((kind, src, paperRel) => {  // picked /proc → insert
       if (!awaitingProcInsert) return;
@@ -654,6 +686,29 @@ window.__doc = {
   // /rec macro test hooks
   recordings: () => recordingsCache,
   startCompletion: () => editor && startCompletion(editor),
+  // simulate a just-reloaded page (caches reset) to exercise the cold-cache path
+  _coldCaches: () => { recordingsCache = []; processorsCache = []; },
+  // run the real completion source for "/<cmd>" at the doc end → option labels
+  // (awaits the async cold-cache fetch, like CM6 does). For macro-menu regressions.
+  slashOptions: (cmd) => {
+    if (!editor) return Promise.resolve([]);
+    const L = editor.state.doc.length;
+    const ins = "\n\n/" + cmd;
+    editor.dispatch({ changes: { from: L, insert: ins },
+                      selection: { anchor: L + ins.length } });
+    const pos = editor.state.selection.main.head;
+    const ctx = {                                 // a minimal CompletionContext
+      pos, explicit: true, state: editor.state,
+      matchBefore: (re) => {
+        const line = editor.state.doc.lineAt(pos);
+        const text = line.text.slice(0, pos - line.from);
+        const m = text.match(new RegExp(re.source + "$"));
+        return m ? { from: pos - m[0].length, to: pos, text: m[0] } : null;
+      },
+    };
+    return Promise.resolve(slashSource(ctx))
+      .then((res) => (res && res.options) ? res.options.map((o) => o.label) : []);
+  },
   // type `/rec` at the end with the cursor right after it, then open the menu
   openRecMenu: () => {
     if (!editor) return;

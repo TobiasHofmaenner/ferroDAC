@@ -4,6 +4,7 @@ Spins a real QWebEngine, so it's importorskip-guarded (skips where WebEngine isn
 installed) and marked `ui` (the lightweight CI gate skips Qt).
 """
 
+import json
 import os
 import tempfile
 import threading
@@ -377,6 +378,35 @@ def test_slash_proc_cites_whitepaper(qapp):
         assert _pump(qapp, lambda: "class X" in (_js(qapp, dv.view, "window.__doc.text()") or ""))
         txt = _js(qapp, dv.view, "window.__doc.text()")
         assert "[white paper](papers/p.md)" in txt, txt
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
+def test_slash_proc_cold_cache_still_lists(qapp):
+    """Regression: typing /proc right after a reload (which resets the page caches)
+    still populates the menu — the completion now AWAITS the fetch instead of
+    silently returning nothing on a cold cache."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    procs = [{"kind": "gas", "label": "Gas composition"},
+             {"kind": "cursor", "label": "Cursor"}]
+    dv = DocView(on_list_processors=lambda: procs, on_processor_source=lambda k: "x")
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        assert _pump(qapp, lambda: _js(qapp, dv.view, "window.__doc.processors().length") == 2)
+        # simulate a just-reloaded page, then open /proc on the cold cache
+        dv.view.page().runJavaScript(
+            "window.__doc._coldCaches(); window.__doc._opts = null;"
+            "window.__doc.slashOptions('proc').then(r => window.__doc._opts = r);")
+        assert _pump(qapp, lambda: _js(qapp, dv.view, "window.__doc._opts !== null"))
+        labels = json.loads(_js(qapp, dv.view, "JSON.stringify(window.__doc._opts)"))
+        assert len(labels) == 2 and any("Gas composition" in s for s in labels), labels
     finally:
         dv.deleteLater()
 
