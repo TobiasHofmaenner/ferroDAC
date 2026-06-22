@@ -18,3 +18,7 @@ dist/
 # stubs) — re-include it despite the global dist/ ignore above.
 !ferrodac/ui/web/dist/
 !ferrodac/ui/web/dist/**
+
+# secrets (hub Gitea token etc.)
+server/.env
+.env

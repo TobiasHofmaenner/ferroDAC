@@ -34,13 +34,16 @@ services:
       GITEA_USER: "${GITEA_USER:-ferrodac}"     # the token's OWNER (used in the clone URL)
     volumes:
       - hub-data:/data         # persist the hub's store across restarts
-    depends_on:
-      - gitea
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # so GITEA_URL can be a Gitea on the host
     restart: unless-stopped
 
+  # OPTIONAL bundled Gitea — only starts with `--profile gitea`. If you already run
+  # your own Gitea, DON'T use this (point GITEA_URL at yours); your token is for it.
   gitea:
     image: gitea/gitea:1.22
     container_name: ferrodac-gitea
+    profiles: ["gitea"]
     environment:
       GITEA__server__ROOT_URL: "${GITEA_PUBLIC_URL:-http://localhost:3000}/"
       GITEA__service__DISABLE_REGISTRATION: "true"   # closed: the hub/operator manage users
