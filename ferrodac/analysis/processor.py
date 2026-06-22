@@ -30,8 +30,13 @@ class Processor:
     accepts: str = "trace"       # input source datatype
     id_prefix: str = "proc"      # id/key prefix (keeps ids stable per kind)
 
-    def __init__(self, pid: str, input_key: str):
+    def __init__(self, pid: str, input_key: str = None):
         self.id = pid
+        self.input_key = input_key       # None = unbound; set by routing a source to its input
+
+    def bind_input(self, input_key) -> None:
+        """Bind (or clear, with None) the source feeding this processor. Called when a
+        source is routed to the processor's input port. Override to react to a re-bind."""
         self.input_key = input_key
 
     def outputs(self) -> list[Port]:

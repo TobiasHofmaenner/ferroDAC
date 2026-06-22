@@ -593,8 +593,12 @@ class SourcesPanel(QWidget):
         for port in ports:
             groups.setdefault(port.origin or "other", []).append(port)
         for origin, gports in groups.items():
+            # a processor's outputs group under its name → give that group a Remove
+            proc_id = next((p.proc_id for p in gports if getattr(p, "proc_id", "")), "")
+            action = (("✕ Remove", lambda pid=proc_id: self.dashboard.remove_processor(pid))
+                      if proc_id else None)
             grp = CollapsibleGroup(origin, len(gports), origin in self._collapsed,
-                                   self._on_group_toggle)
+                                   self._on_group_toggle, action=action)
             for port in gports:
                 card = SourceCard(
                     port, color_for(port.key),
@@ -2122,7 +2126,12 @@ class MainWindow(QMainWindow):
             act = add.addAction(f"Add {label}")
             act.triggered.connect(lambda _=False, k=kind: self._add_panel(k))
         add.addSeparator()
-        add.addAction("Processor…", self._add_processor)
+        procmenu = add.addMenu("Processor")
+        from ..analysis import PROCESSOR_TYPES
+        for pkind, pcls in sorted(PROCESSOR_TYPES.items(),
+                                  key=lambda kc: getattr(kc[1], "label", kc[0]).lower()):
+            procmenu.addAction(getattr(pcls, "label", pkind),
+                               lambda _=False, k=pkind: self._add_processor(k))
 
         netmenu = self.menuBar().addMenu("&Cloud")
         self.hub_action = netmenu.addAction("ferroDAC Cloud…", self._open_hub)
@@ -2243,20 +2252,15 @@ class MainWindow(QMainWindow):
             if panel is not None and readme:
                 panel.open(readme)
 
-    def _add_processor(self) -> None:
-        """Add menu ▸ Processor… — instantiate any registered processor (built-in or
-        from a plugin) on a compatible source; its outputs become routable sources."""
-        from .processor_dialog import AddProcessorDialog
-        dlg = AddProcessorDialog(self.dashboard, self)
-        if not dlg.exec():
-            return
-        kind, src = dlg.result()
-        if not kind or not src:
-            return
-        pid = self.dashboard.add_processor(kind, src)
-        label = getattr(type(self.dashboard.processor(pid)), "label", kind)
+    def _add_processor(self, kind: str) -> None:
+        """Add menu ▸ Processor ▸ <kind> — add a processor as a blank routable node.
+        Route a source into its input (in the Sources panel), then route its outputs."""
+        from ..analysis import PROCESSOR_TYPES
+        self.dashboard.add_processor(kind)              # blank — bound by routing
+        label = getattr(PROCESSOR_TYPES.get(kind), "label", kind)
         self.statusBar().showMessage(
-            f"Added {label} on {src} — route its outputs to a Bars panel or chart.", 7000)
+            f"Added {label} — in Sources, route a source into its input, then route "
+            "its outputs onward.", 9000)
 
     def _wire_doc_panels(self) -> None:
         """Give every Document panel's editor the /rec macro services. Doc panels are

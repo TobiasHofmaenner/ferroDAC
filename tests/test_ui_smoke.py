@@ -765,27 +765,31 @@ def test_panel_export_items(qapp):
 
 
 @pytest.mark.ui
-def test_add_processor_dialog(qapp):
-    """The generic creator lists registered processors, filters sources by what each
-    accepts, and instantiating one publishes its outputs as virtual sources."""
-    from ferrodac.ui.processor_dialog import AddProcessorDialog
+def test_processor_node_routing(qapp):
+    """A processor is a routable node: added BLANK (no input), bound by routing a
+    source into its input port, its outputs are virtual sources, and it's removable.
+    (add_processor → ports_changed → the Sources panel rebuild is exercised too.)"""
     from ferrodac.ui.workspace import SourcePort
     w = _mainwindow(qapp)
     try:
         db = w.dashboard
         db._sources["rga/spectrum"] = SourcePort(
             "rga/spectrum", "Spectrum", "trace", "", "dev", "device")
-        dlg = AddProcessorDialog(db, None)
-        kinds = [dlg._kind.itemData(i) for i in range(dlg._kind.count())]
-        assert "gas" in kinds                              # a built-in trace processor
-        dlg._kind.setCurrentIndex(kinds.index("gas"))
-        srcs = [dlg._src.itemData(i) for i in range(dlg._src.count())]
-        assert "rga/spectrum" in srcs                      # the trace source is offered
-        assert dlg.result() == ("gas", "rga/spectrum")
-        dlg.deleteLater()
-        pid = db.add_processor("gas", "rga/spectrum")       # → its outputs are sources now
-        assert db.processor(pid) is not None
-        assert any(k.startswith("gas/") for k in db._sources)
+        pid = db.add_processor("gas")                       # blank — no input bound
+        proc = db.processor(pid)
+        assert proc is not None and proc.input_key is None
+        in_key = db.processor_input_key(pid)
+        assert in_key in db._sinks and db._sinks[in_key].kind == "processor"
+        assert in_key in [k for k, _ in db.compatible_sinks("rga/spectrum")]  # a target
+        db.set_route("rga/spectrum", in_key, True)          # route a source in → binds
+        assert proc.input_key == "rga/spectrum"
+        outs = [sp for sp in db._sources.values() if getattr(sp, "proc_id", "") == pid]
+        assert outs and all(sp.kind == "virtual" for sp in outs)   # outputs tagged + routable
+        db.set_route("rga/spectrum", in_key, False)         # unroute → unbind
+        assert proc.input_key is None
+        db.remove_processor(pid)                            # remove → ports gone
+        assert in_key not in db._sinks and db.processor(pid) is None
+        assert not any(getattr(sp, "proc_id", "") == pid for sp in db._sources.values())
     finally:
         w.close()
 

@@ -56,6 +56,7 @@ class SourcePort:
     kind: str            # "device" | "virtual"
     panel: object = None
     online: bool = True   # False = referenced-but-absent placeholder
+    proc_id: str = ""    # owning processor id, for processor OUTPUT sources
 
     @property
     def label(self) -> str:
@@ -542,10 +543,15 @@ class Dashboard(QObject):
             return self._detectors.get(did)
 
     # -- processors (data-plane transforms) ----------------------------------
-    def add_processor(self, kind: str, input_key: str, pid: str = None,
+    @staticmethod
+    def processor_input_key(pid: str) -> str:
+        return f"procin/{pid}"
+
+    def add_processor(self, kind: str, input_key: str = None, pid: str = None,
                       **params) -> str:
-        """Instantiate a registered Processor bound to `input_key` and register
-        its output ports as virtual sources."""
+        """Instantiate a registered Processor as a routable NODE: an input SINK you
+        route a source into (None = created blank), and its output ports as virtual
+        sources you route onward."""
         cls = PROCESSOR_TYPES[kind]
         if pid is None:
             n = self._proc_counters.get(kind, 0) + 1
@@ -558,20 +564,32 @@ class Dashboard(QObject):
                                                 int(tail))
         proc = cls(pid, input_key, **params)
         self._processors[pid] = proc
-        src = self._sources.get(input_key)
+        suffix = pid[len(cls.id_prefix):] or pid
+        name = f"{cls.label} {suffix}".strip()
+        # the input PORT — a sink that accepts the processor's input dtype (one source)
+        in_key = self.processor_input_key(pid)
+        self._sinks[in_key] = SinkPort(
+            in_key, f"{name} input", cls.accepts, "", name, "processor",
+            accepts=frozenset({cls.accepts}), single_bind=True, sink_id=pid)
+        # the output PORTS — virtual sources, tagged with the owning processor
         for port in proc.outputs():
-            origin = f"{cls.label} · {src.name}" if src is not None else cls.label
-            self._sources[port.key] = SourcePort(port.key, port.name, port.dtype,
-                                                 port.unit or (src.unit if src else ""),
-                                                 origin, "virtual")
+            sp = SourcePort(port.key, port.name, port.dtype, port.unit, name, "virtual")
+            sp.proc_id = pid
+            self._sources[port.key] = sp
             self._routes.setdefault(port.key, set())
         self.ports_changed.emit()
+        if input_key:                       # bound at creation → record it as a route too
+            self.set_route(input_key, in_key, True)
         return pid
 
     def remove_processor(self, pid: str) -> None:
         proc = self._processors.pop(pid, None)
         if proc is None:
             return
+        in_key = self.processor_input_key(pid)
+        self._sinks.pop(in_key, None)
+        for tg in self._routes.values():        # drop any route feeding its input
+            tg.discard(in_key)
         for port in proc.outputs():
             self._sources.pop(port.key, None)
             self._routes.pop(port.key, None)
@@ -929,6 +947,10 @@ class Dashboard(QObject):
             targets.discard(sink_key)
             if sink is not None and sink.kind == "display" and sink.panel is not None:
                 sink.panel.remove_source(source_key)
+            elif sink is not None and sink.kind == "processor":
+                proc = self._processors.get(sink.sink_id)
+                if proc is not None:
+                    proc.bind_input(None)               # unroute → unbind the processor
         self.ports_changed.emit()
 
     def _apply_route(self, source_key: str, sink_key: str) -> None:
@@ -939,6 +961,10 @@ class Dashboard(QObject):
             return
         if sink.kind == "display":
             sink.panel.add_source(source_key, src)
+        elif sink.kind == "processor":
+            proc = self._processors.get(sink.sink_id)
+            if proc is not None:
+                proc.bind_input(source_key)             # route a source in → feed the processor
         elif sink.kind == "device":
             if src.kind == "virtual" and hasattr(src.panel, "set_range") \
                     and sink.dtype == "float":
