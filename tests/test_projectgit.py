@@ -30,6 +30,43 @@ def test_projectrepo_lifecycle(tmp_path):
     assert all(len(h["sha"]) == 40 and h["time"] > 0 for h in hist)
 
 
+def test_projectrepo_push_pull(tmp_path):
+    """Set a remote, push, and pull — round-tripped through a local bare repo (offline)."""
+    import subprocess
+    from ferrodac.core.projectgit import ProjectRepo
+    bare = tmp_path / "remote.git"                       # a bare repo = the "remote"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+
+    a = tmp_path / "a"
+    a.mkdir()
+    ra = ProjectRepo(str(a))
+    (a / "f.txt").write_text("one\n")
+    ra.commit("first")
+    assert ra.remote_url() == ""
+    ra.set_remote(str(bare))
+    assert ra.remote_url() == str(bare)
+    ok, msg = ra.push()
+    assert ok, msg
+
+    b = str(tmp_path / "b")                               # a second checkout of the remote
+    ProjectRepo.clone(str(bare), b)
+    rb = ProjectRepo(b)
+    (tmp_path / "b" / "g.txt").write_text("two\n")
+    assert rb.commit("second")
+    assert rb.push()[0]
+
+    assert ra.pull()[0]                                   # A pulls B's commit
+    msgs = [h["message"] for h in ra.log()]
+    assert "first" in msgs and "second" in msgs
+
+
+def test_projectrepo_remote_op_without_remote(tmp_path):
+    from ferrodac.core.projectgit import ProjectRepo
+    r = ProjectRepo(str(tmp_path / "p"))
+    ok, msg = r.push()
+    assert not ok and "remote" in msg.lower()            # graceful, no crash
+
+
 def test_projectrepo_is_defensive(tmp_path):
     """A commit never raises — a missing dir / odd state just returns None."""
     from ferrodac.core.projectgit import ProjectRepo

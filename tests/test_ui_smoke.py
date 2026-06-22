@@ -797,6 +797,34 @@ def test_project_git_commit_and_history(qapp):
 
 
 @pytest.mark.ui
+def test_history_dialog_remote_push(qapp, tmp_path):
+    """The History dialog shows the remote and pushes to it (offline, a local bare)."""
+    import os
+    import subprocess
+    from ferrodac.core.projectgit import ProjectRepo
+    from ferrodac.ui.history_view import HistoryDialog
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    proj = tmp_path / "p"
+    proj.mkdir()
+    repo = ProjectRepo(str(proj))
+    with open(os.path.join(proj, "a.txt"), "w") as fh:
+        fh.write("x\n")
+    repo.commit("init")
+    repo.set_remote(str(bare))
+    dlg = HistoryDialog(repo, "P", None)
+    try:
+        assert str(bare) in dlg._remote_lbl.text()
+        dlg._push()
+        assert "✔" in dlg._result.text(), dlg._result.text()
+        out = subprocess.run(["git", "-C", str(bare), "log", "--oneline"],
+                             capture_output=True, text=True)
+        assert "init" in out.stdout                        # the remote received the commit
+    finally:
+        dlg.deleteLater()
+
+
+@pytest.mark.ui
 def test_processor_node_routing(qapp):
     """A processor is a routable node: added BLANK (no input), bound by routing a
     source into its input port, its outputs are virtual sources, and it's removable.
