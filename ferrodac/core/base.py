@@ -44,6 +44,11 @@ class BaseDevice(Device):
         hardware_id: Optional[str] = None,
         model: Optional[str] = None,
         options: Sequence[Option] = (),
+        manufacturer: Optional[str] = None,
+        cal_date: Optional[str] = None,
+        cal_due: Optional[str] = None,
+        cal_cert: Optional[str] = None,
+        asset_tag: Optional[str] = None,
     ):
         self._instance_id = instance_id
         self._name = name
@@ -56,6 +61,13 @@ class BaseDevice(Device):
         self._primary_source = primary_source
         self._hardware_id = hardware_id
         self._model = model
+        # Lab-journal provenance a capable device self-reports (the rest stays None
+        # and the user / device DB fills it in). See DeviceDescriptor.
+        self._manufacturer = manufacturer
+        self._cal_date = cal_date
+        self._cal_due = cal_due
+        self._cal_cert = cal_cert
+        self._asset_tag = asset_tag
         self._firmware: Optional[str] = None
         self._status = Status.DISCOVERED
         self._last_error: Optional[str] = None
@@ -120,6 +132,11 @@ class BaseDevice(Device):
             hardware_id=self._hardware_id,
             model=self._model,
             firmware=self._firmware,
+            manufacturer=self._manufacturer,
+            cal_date=self._cal_date,
+            cal_due=self._cal_due,
+            cal_cert=self._cal_cert,
+            asset_tag=self._asset_tag,
             sources=list(self._sources),
             sinks=sinks,
             options=[replace(o, value=self._option_values.get(o.key, o.value))

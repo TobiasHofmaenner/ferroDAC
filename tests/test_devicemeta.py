@@ -41,3 +41,34 @@ def test_device_meta_persists_and_clears(tmp_path):
     assert again.get("SN-1") == {"asset_tag": "X1"}          # only known fields, persisted
     again.set("SN-1", {})                                    # cleared → dropped
     assert DeviceMeta(p).get("SN-1") == {}
+
+
+def test_base_device_accepts_and_reports_provenance():
+    """BaseDevice must accept the lab-journal provenance kwargs (manufacturer,
+    calibration, asset tag) and surface them in describe(). Regression: a driver
+    passing these used to raise in discover() and silently vanish from the scan."""
+    from ferrodac.core.base import BaseDevice
+    from ferrodac.core.device import Interface
+    dev = BaseDevice("i1", "Dev", Interface(kind="sim"), hardware_id="SN-9",
+                     model="M1", manufacturer="Keithley", cal_date="2026-02-01",
+                     cal_due="2027-02-01", cal_cert="C-9", asset_tag="LAB-1")
+    d = dev.describe()
+    assert d.manufacturer == "Keithley" and d.asset_tag == "LAB-1"
+    assert d.cal_date == "2026-02-01" and d.cal_due == "2027-02-01"
+    assert d.cal_cert == "C-9" and d.hardware_id == "SN-9"
+
+
+def test_all_fake_devices_discover_without_raising():
+    """Every discoverable built-in fake device still enumerates — guards the scan
+    against a driver constructor that rejects a descriptor field (see above)."""
+    import inspect
+    import ferrodac.devices.fake as fake
+    from ferrodac.core.device import Device
+    found = 0
+    for _name, cls in inspect.getmembers(fake, inspect.isclass):
+        if issubclass(cls, Device) and cls is not Device \
+                and getattr(cls, "discoverable", False):
+            items = cls.discover()                # must not raise
+            assert isinstance(items, list)
+            found += 1
+    assert found >= 3                              # gauge, thermometer, psu, rga, …
