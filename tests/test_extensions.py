@@ -113,6 +113,12 @@ def test_install_url_from_local_git(tmp_path):
     assert rec["source"] == str(repo) and rec["commit"] == sha and rec["clone"] == dest
 
 
+def test_official_extensions_url():
+    from ferrodac.extensions import OFFICIAL_EXTENSIONS_URL
+    assert OFFICIAL_EXTENSIONS_URL == \
+        "https://github.com/TobiasHofmaenner/ferrodac-extensions"
+
+
 def test_source_and_whitepaper_lookup(tmp_path):
     """After loading, the manager can show a provider's source (read from file, no
     execution) and resolve its white paper — by the provider's kind."""

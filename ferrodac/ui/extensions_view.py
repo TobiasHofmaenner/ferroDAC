@@ -55,8 +55,12 @@ class ExtensionsDialog(QDialog):
         root.addWidget(self._list, 2)
 
         row = QHBoxLayout()
+        official = QPushButton("Browse official…")
+        official.setToolTip("Add from the official ferroDAC extensions repo")
+        official.clicked.connect(self._add_official)
         add = QPushButton("Add from git…")
-        add.clicked.connect(self._add)
+        add.clicked.connect(lambda: self._add())
+        row.addWidget(official)
         self._toggle_btn = QPushButton("Enable / disable")
         self._toggle_btn.clicked.connect(self._toggle)
         rm = QPushButton("Remove")
@@ -161,11 +165,16 @@ class ExtensionsDialog(QDialog):
         QDesktopServices.openUrl(QUrl.fromLocalFile(paper))
 
     # -- actions -------------------------------------------------------------
-    def _add(self):
-        url, ok = QInputDialog.getText(self, "Add extension",
-                                       "Git repo URL (or a local path):")
-        if not ok or not url.strip():
-            return
+    def _add_official(self):
+        from ..extensions import OFFICIAL_EXTENSIONS_URL
+        self._add(OFFICIAL_EXTENSIONS_URL)
+
+    def _add(self, url=None):
+        if not url:
+            url, ok = QInputDialog.getText(self, "Add extension",
+                                           "Git repo URL (or a local path):")
+            if not ok or not url.strip():
+                return
         url = url.strip()
         ref, ok2 = QInputDialog.getText(
             self, "Pin (recommended)", "Commit / tag / branch (blank = default branch):")
