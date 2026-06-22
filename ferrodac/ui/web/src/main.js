@@ -489,11 +489,46 @@ function setMode(m) {
   if (m !== "read" && editor) editor.focus();
 }
 
+// Editor slash commands — shown by the ⓘ button (extend as more land).
+const SLASH_HELP = [
+  { cmd: "/rec", title: "Insert a recording's exports",
+    desc: "Pick a recording → its already-exported plots / CSV (or “⟳ Export now”) → "
+        + "inserts the image (or a link) with a path relative to the doc." },
+  { cmd: "/proc", title: "Insert a processor's source",
+    desc: "Pick a processor in use → drops its source as a python code block, plus a "
+        + "white-paper link if the (plugin) processor ships one." },
+];
+
+function buildMacroHelp() {
+  const pop = $("macrohelp");
+  if (!pop) return;
+  pop.innerHTML =
+    "<div class='mh-head'>Editor slash commands — type <code>/</code> where you want to "
+    + "insert:</div>"
+    + SLASH_HELP.map((c) =>
+        `<div class='mh-row'><code class='mh-cmd'>${c.cmd}</code>`
+        + `<div><b>${c.title}</b><br><span class='mh-desc'>${c.desc}</span></div></div>`)
+      .join("");
+}
+
 function wireToolbar() {
   for (const b of document.querySelectorAll("#toolbar [data-mode]"))
     b.addEventListener("click", () => setMode(b.dataset.mode));
   const rb = $("reload");
   if (rb) rb.addEventListener("click", reloadFromDisk);
+  const hb = $("macrohelp-btn");
+  if (hb) {
+    buildMacroHelp();
+    hb.addEventListener("click", () => {
+      const pop = $("macrohelp");
+      if (pop) pop.hidden = !pop.hidden;
+    });
+    document.addEventListener("click", (e) => {      // click away to dismiss
+      const pop = $("macrohelp");
+      if (pop && !pop.hidden && e.target !== hb && !pop.contains(e.target))
+        pop.hidden = true;
+    });
+  }
 }
 
 // Standalone (no Qt host) → a sample so the bundle is testable on its own.

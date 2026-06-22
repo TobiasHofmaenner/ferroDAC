@@ -299,6 +299,30 @@ def test_slash_macro_lists_and_inserts(qapp):
 
 
 @pytest.mark.ui
+def test_macro_help_popover(qapp):
+    """The ⓘ button reveals a slash-command cheat-sheet (/rec, /proc)."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    dv = DocView()
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        html = _js(qapp, dv.view, "document.getElementById('macrohelp').innerHTML")
+        assert "/rec" in html and "/proc" in html
+        # starts hidden; clicking the ⓘ shows it
+        assert _js(qapp, dv.view, "document.getElementById('macrohelp').hidden") is True
+        dv.view.page().runJavaScript("document.getElementById('macrohelp-btn').click()")
+        assert _pump(qapp, lambda: _js(
+            qapp, dv.view, "document.getElementById('macrohelp').hidden") is False)
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_slash_proc_inserts_source(qapp):
     """The /proc macro: used processors reach the editor; picking one inserts its
     source as a fenced python code block (open science)."""
