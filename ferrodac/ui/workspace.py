@@ -33,7 +33,7 @@ from ..core.trace import Trace
 from ..analysis import PROCESSOR_TYPES
 from ..vision import CVRunner, Detector
 from ..vision.detector import CONFIG_FIELDS
-from .panels import PANEL_TYPES, Panel, PanelConfigDialog
+from .panels import PANEL_TYPES, ExportConfigDialog, Panel, PanelConfigDialog
 
 _SINK_DTYPE = {
     SinkKind.SETPOINT: "float",
@@ -202,6 +202,11 @@ class WorkspaceArea(QMainWindow):
 # --------------------------------------------------------------------------- #
 #  Dashboard / router
 # --------------------------------------------------------------------------- #
+# Built-in plot-export render settings (px + dpi). A project default and per-panel
+# overrides layer on top of this; height 0 = preserve the panel's on-screen aspect.
+EXPORT_DEFAULT = {"width": 1600, "height": 0, "dpi": 96}
+
+
 class Dashboard(QObject):
     ports_changed = Signal()     # ports or routes changed (docks refresh)
 
@@ -230,6 +235,7 @@ class Dashboard(QObject):
         self.graph = DataflowGraph()             # live core model (DESIGN §4.1)
         self._counter = 0
         self.default_sink_id = None              # default chart panel id
+        self.export_default = None               # project-wide plot-export spec; None=built-in
 
         # CV detectors (virtual sources reading a ROI of an image sink)
         self._detectors: dict[str, Detector] = {}
@@ -342,7 +348,10 @@ class Dashboard(QObject):
     def _configure_panel(self, panel: Panel) -> None:
         """Open the panel's settings dialog (the ⚙ on its title bar) and apply
         the result, propagating any new display name to the dock + patch-bay."""
-        dlg = PanelConfigDialog(panel.title, panel.config_fields(), self.area)
+        exportable = getattr(panel, "plot", None) is not None
+        dlg = PanelConfigDialog(
+            panel.title, panel.config_fields(), self.area,
+            on_export=(lambda: self._configure_export(panel)) if exportable else None)
         if not dlg.exec():
             return
         panel.apply_config(dlg.values())
@@ -356,6 +365,52 @@ class Dashboard(QObject):
         if port is not None:
             port.name = panel.title
         self.ports_changed.emit()
+
+    def _render_panel_preview(self, panel, spec):
+        """A panel's CURRENT plot → QPixmap at the spec size, for the export dialog's
+        live preview. Width is capped for snappiness (it only needs to show aspect)."""
+        from pyqtgraph.exporters import ImageExporter
+        from qtpy.QtGui import QPixmap
+        plot = getattr(panel, "plot", None)
+        pi = getattr(plot, "plotItem", None) if plot is not None else None
+        if pi is None and plot is not None and hasattr(plot, "getPlotItem"):
+            pi = plot.getPlotItem()
+        if pi is None:
+            return None
+        try:
+            full = max(1, int(spec.get("width", 1600)))
+            w = min(full, 900)                      # cap the preview render
+            ex = ImageExporter(pi)
+            ex.parameters()["width"] = w
+            h = int(spec.get("height", 0))
+            if h > 0:
+                ex.parameters()["height"] = int(round(h * w / full))
+            img = ex.export(toBytes=True)
+            return QPixmap.fromImage(img) if img is not None else None
+        except Exception:                           # noqa: BLE001
+            return None
+
+    def _configure_export(self, panel) -> None:
+        """Per-panel export override (the 'Export…' button in the ⚙ dialog)."""
+        dlg = ExportConfigDialog(
+            self.export_spec_for(panel),
+            lambda s: self._render_panel_preview(panel, s), self.area,
+            title=f"Export · {panel.title}", overridable=True,
+            overriding=getattr(panel, "export_spec", None) is not None)
+        if dlg.exec():
+            panel.export_spec = dlg.result_spec()   # dict (override) or None (use default)
+
+    def configure_export_default(self) -> None:
+        """Edit the project-wide export default (a sample chart drives the preview)."""
+        sample = next((p for p in self._panels.values()
+                       if getattr(p, "plot", None) is not None), None)
+        base = dict(EXPORT_DEFAULT)
+        base.update(self.export_default or {})
+        render = (lambda s: self._render_panel_preview(sample, s)) if sample else None
+        dlg = ExportConfigDialog(base, render, self.area,
+                                 title="Export defaults · project", overridable=False)
+        if dlg.exec():
+            self.export_default = dlg.result_spec()
 
     def remove_panel(self, pid: str) -> None:
         panel = self._panels.pop(pid, None)
@@ -579,6 +634,8 @@ class Dashboard(QObject):
             st = panel.state() if hasattr(panel, "state") else {}
             if st:
                 entry["state"] = st
+            if getattr(panel, "export_spec", None):    # per-panel render override
+                entry["export_spec"] = panel.export_spec
             panels.append(entry)
         detectors = []
         for det in self._snapshot_detectors():
@@ -592,8 +649,21 @@ class Dashboard(QObject):
         # NOTE: markers/tags are NOT in the layout — they're GLOBAL (one catalog,
         # persisted to tags.json, filtered by the active project lens). A layout is
         # just the dashboard view; switching projects must not swap the tags.
-        return {"panels": panels, "detectors": detectors, "processors": processors,
-                "routes": routes, "default_sink": self.default_sink_id}
+        out = {"panels": panels, "detectors": detectors, "processors": processors,
+               "routes": routes, "default_sink": self.default_sink_id}
+        if self.export_default:
+            out["export_default"] = self.export_default
+        return out
+
+    def export_spec_for(self, panel) -> dict:
+        """Effective plot-export settings for a panel: built-in default ← project
+        default ← per-panel override."""
+        spec = dict(EXPORT_DEFAULT)
+        if self.export_default:
+            spec.update(self.export_default)
+        if getattr(panel, "export_spec", None):
+            spec.update(panel.export_spec)
+        return spec
 
     def clear_layout(self) -> None:
         for pid in list(self._panels):
@@ -610,11 +680,14 @@ class Dashboard(QObject):
         # carries them, so importing a layout / switching projects leaves the tag
         # catalog intact. (One-time migration of legacy embedded markers is done by
         # the app at startup, not here.)
+        self.export_default = data.get("export_default") or None
         for p in data.get("panels", []):
             pid = self.add_panel(p["kind"], pid=p["id"], title=p.get("title"))
             panel = self._panels.get(pid)
             if panel is not None and p.get("state") and hasattr(panel, "set_state"):
                 panel.set_state(p["state"])
+            if panel is not None and p.get("export_spec"):
+                panel.export_spec = p["export_spec"]
         if data.get("default_sink"):
             self.default_sink_id = data["default_sink"]
         for d in data.get("detectors", []):

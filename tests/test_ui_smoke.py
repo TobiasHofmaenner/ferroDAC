@@ -715,3 +715,55 @@ def test_device_qualified_label(qapp):
     # device already in the name → no redundant qualifier; historic → bare
     assert SourcePort("u/v", "PSU 1 Voltage", "float", "V", "PSU 1", "device").label == "PSU 1 Voltage"
     assert SourcePort("h/x", "spectrum", "trace", "", "recorded", "historic").label == "spectrum"
+
+
+@pytest.mark.ui
+def test_export_config_dialog(qapp):
+    """The export dialog reads back its spec; toggling a per-panel override OFF means
+    'use the project default' (None); the project-default form has no override toggle."""
+    from ferrodac.ui.panels import ExportConfigDialog
+    dlg = ExportConfigDialog({"width": 1920, "height": 1080, "dpi": 150},
+                             render_preview=lambda s: None,
+                             overridable=True, overriding=True)
+    try:
+        assert (dlg._w.value(), dlg._h.value(), dlg._dpi.value()) == (1920, 1080, 150)
+        assert dlg.result_spec() == {"width": 1920, "height": 1080, "dpi": 150}
+        dlg._override.setChecked(False)
+        assert dlg.result_spec() is None                  # → fall back to project default
+    finally:
+        dlg.deleteLater()
+    d2 = ExportConfigDialog({"width": 1600, "height": 0, "dpi": 96},
+                            render_preview=lambda s: None, overridable=False)
+    try:
+        assert d2._override is None                        # project default: no toggle
+        assert d2.result_spec() == {"width": 1600, "height": 0, "dpi": 96}
+    finally:
+        d2.deleteLater()
+
+
+@pytest.mark.ui
+def test_export_spec_resolution_and_roundtrip(qapp):
+    """Effective spec = built-in ← project default ← per-panel override, and the
+    layout JSON round-trips both."""
+    from ferrodac.ui.workspace import EXPORT_DEFAULT
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        pid = db.add_panel("chart")
+        panel = db.panel(pid)
+        assert db.export_spec_for(panel) == EXPORT_DEFAULT          # nothing set yet
+        db.export_default = {"width": 2000, "dpi": 200}
+        eff = db.export_spec_for(panel)
+        assert eff["width"] == 2000 and eff["dpi"] == 200 and eff["height"] == 0
+        panel.export_spec = {"width": 3000}                          # per-panel wins
+        eff = db.export_spec_for(panel)
+        assert eff["width"] == 3000 and eff["dpi"] == 200
+        layout = db.export_layout()
+        assert layout["export_default"] == {"width": 2000, "dpi": 200}
+        entry = next(p for p in layout["panels"] if p["id"] == pid)
+        assert entry["export_spec"] == {"width": 3000}
+        db.import_layout(layout)                                     # restores both
+        assert db.export_default == {"width": 2000, "dpi": 200}
+        assert db.panel(pid).export_spec == {"width": 3000}
+    finally:
+        w.close()

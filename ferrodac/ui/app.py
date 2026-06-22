@@ -2114,6 +2114,7 @@ class MainWindow(QMainWindow):
         self.edit_action.toggled.connect(self.dashboard.set_edit_mode)
         self.edit_action.toggled.connect(self._lock_chrome)
         self._lock_chrome(False)                    # Player/Log start locked too
+        view.addAction("Export defaults…", self.dashboard.configure_export_default)
 
         add = self.menuBar().addMenu("&Add")
         for kind, (label, _cls) in PANEL_TYPES.items():
@@ -2805,8 +2806,6 @@ class MainWindow(QMainWindow):
                   if getattr(p, "plot", None) is not None]
         if not charts:
             return []
-        spec = spec or {}
-        width, height = int(spec.get("width", 1600)), int(spec.get("height", 0))
         os.makedirs(dest_dir, exist_ok=True)
         tc = self.time_context
         was_following = tc.following if tc is not None else False
@@ -2828,13 +2827,15 @@ class MainWindow(QMainWindow):
                     pi = p.plot.getPlotItem()
                 if pi is None:
                     continue
+                pspec = spec or self.dashboard.export_spec_for(p)   # per-panel resolution
                 png = os.path.join(dest_dir, f"{p.panel_id}.png")
                 try:
                     exporter = ImageExporter(pi)
-                    exporter.parameters()["width"] = width
-                    if height > 0:
-                        exporter.parameters()["height"] = height
+                    exporter.parameters()["width"] = int(pspec.get("width", 1600))
+                    if int(pspec.get("height", 0)) > 0:
+                        exporter.parameters()["height"] = int(pspec["height"])
                     exporter.export(png)
+                    self._tag_png_dpi(png, int(pspec.get("dpi", 0)))
                     if os.path.exists(png):
                         out.append({"name": getattr(p, "title", "") or p.panel_id,
                                     "abspath": png, "kind": "plot"})
@@ -2853,6 +2854,24 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             self.statusBar().clearMessage()
         return out
+
+    @staticmethod
+    def _tag_png_dpi(png: str, dpi: int) -> None:
+        """Write the DPI into a freshly-exported PNG (ImageExporter sets pixels, not
+        DPI) so consumers like Word/LaTeX place it at the intended physical size."""
+        if dpi <= 0 or not os.path.exists(png):
+            return
+        try:
+            from qtpy.QtGui import QImage
+            img = QImage(png)
+            if img.isNull():
+                return
+            dpm = int(round(dpi / 0.0254))         # dots per metre
+            img.setDotsPerMeterX(dpm)
+            img.setDotsPerMeterY(dpm)
+            img.save(png)
+        except Exception:                          # noqa: BLE001
+            pass
 
     def _export_recording_for_doc(self, rec_id: str) -> list:
         """Export-NOW for the /rec macro: render the recording's CSV + plots fresh into

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import QRect, QRectF, Qt, Signal
-from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen
+from qtpy.QtCore import QRect, QRectF, Qt, QTimer, Signal
+from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -58,6 +58,7 @@ class Panel(QWidget):
         self.panel_id = ""
         self.title = ""
         self._unsub = None
+        self.export_spec = None    # per-panel render-export override {width,height,dpi}; None=use the project default
 
     def add_source(self, key: str, source) -> None: ...
     def remove_source(self, key: str) -> None: ...
@@ -107,7 +108,7 @@ class Panel(QWidget):
 class PanelConfigDialog(QDialog):
     """A generic settings dialog built from a panel's config_fields()."""
 
-    def __init__(self, title, fields, parent=None):
+    def __init__(self, title, fields, parent=None, on_export=None):
         super().__init__(parent)
         self.setWindowTitle(f"Configure · {title}")
         self.setMinimumWidth(280)
@@ -120,6 +121,10 @@ class PanelConfigDialog(QDialog):
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
+        if on_export is not None:                  # plot panels: a sub-dialog for exports
+            btn = bb.addButton("Export…", QDialogButtonBox.ActionRole)
+            btn.setToolTip("Configure how this panel renders to an image export")
+            btn.clicked.connect(lambda: on_export())
         form.addRow(bb)
 
     @staticmethod
@@ -163,6 +168,110 @@ class PanelConfigDialog(QDialog):
             else:
                 out[key] = w.text()
         return out
+
+
+class ExportConfigDialog(QDialog):
+    """Configure plot-export render settings (pixels + DPI) with a LIVE preview.
+    Generic: ``render_preview(spec)`` returns a QPixmap rendered at the given size
+    (the caller knows how — ImageExporter on the panel), or None for a placeholder.
+    Used for a per-panel override (``overridable=True``) or the project default."""
+
+    def __init__(self, spec, render_preview, parent=None, title="Export settings",
+                 overridable=False, overriding=False):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self._render = render_preview
+        spec = spec or {}
+        root = QHBoxLayout(self)
+
+        left = QVBoxLayout()
+        form = QFormLayout()
+        self._w = QSpinBox(); self._w.setRange(64, 10000); self._w.setSingleStep(80)
+        self._w.setSuffix(" px"); self._w.setValue(int(spec.get("width", 1600)))
+        self._h = QSpinBox(); self._h.setRange(0, 10000); self._h.setSingleStep(80)
+        self._h.setSuffix(" px"); self._h.setSpecialValueText("auto")
+        self._h.setValue(int(spec.get("height", 0)))
+        self._dpi = QSpinBox(); self._dpi.setRange(0, 1200); self._dpi.setSingleStep(10)
+        self._dpi.setSuffix(" dpi"); self._dpi.setValue(int(spec.get("dpi", 96)))
+        form.addRow("Width", self._w)
+        form.addRow("Height", self._h)
+        form.addRow("DPI", self._dpi)
+        left.addLayout(form)
+
+        self._override = None
+        if overridable:
+            self._override = QCheckBox("Override the project default")
+            self._override.setChecked(bool(overriding))
+            self._override.toggled.connect(self._on_override)
+            left.addWidget(self._override)
+
+        self._phys = QLabel("")
+        self._phys.setStyleSheet("color:#8b95a4; font-size:11px;")
+        self._phys.setWordWrap(True)
+        left.addWidget(self._phys)
+        left.addStretch(1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        left.addWidget(bb)
+        root.addLayout(left)
+
+        self._preview = QLabel("preview")
+        self._preview.setAlignment(Qt.AlignCenter)
+        self._preview.setMinimumSize(380, 260)
+        self._preview.setStyleSheet("background:#0c0f15; border:1px solid #222a36;")
+        root.addWidget(self._preview, 1)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(180)              # debounce while the user types
+        self._timer.timeout.connect(self._refresh)
+        for sb in (self._w, self._h):
+            sb.valueChanged.connect(lambda _=0: self._timer.start())
+        self._dpi.valueChanged.connect(lambda _=0: self._update_readout())   # text only
+        self._on_override()
+        self._refresh()
+
+    def _on_override(self, *_):
+        on = self._override.isChecked() if self._override is not None else True
+        for sb in (self._w, self._h, self._dpi):
+            sb.setEnabled(on)
+        self._timer.start()
+
+    def _current(self) -> dict:
+        return {"width": self._w.value(), "height": self._h.value(),
+                "dpi": self._dpi.value()}
+
+    def _update_readout(self):
+        s = self._current()
+        dpi = s["dpi"] or 96
+        w_cm = s["width"] / dpi * 2.54
+        if s["height"]:
+            self._phys.setText(f"{s['width']}×{s['height']} px · {s['dpi']} dpi · "
+                               f"≈ {w_cm:.1f}×{s['height'] / dpi * 2.54:.1f} cm")
+        else:
+            self._phys.setText(f"{s['width']} px wide · auto height · {s['dpi']} dpi · "
+                               f"≈ {w_cm:.1f} cm wide")
+
+    def _refresh(self):
+        self._update_readout()
+        pm = None
+        try:
+            pm = self._render(self._current()) if self._render else None
+        except Exception:                          # noqa: BLE001
+            pm = None
+        if isinstance(pm, QPixmap) and not pm.isNull():
+            self._preview.setPixmap(pm.scaled(self._preview.size(), Qt.KeepAspectRatio,
+                                              Qt.SmoothTransformation))
+        else:
+            self._preview.setText("no preview")
+
+    def result_spec(self):
+        """The chosen spec dict, or None when a per-panel override is toggled OFF
+        (meaning: fall back to the project default)."""
+        if self._override is not None and not self._override.isChecked():
+            return None
+        return self._current()
 
 
 class ChartPanel(Panel):
