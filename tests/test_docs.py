@@ -186,6 +186,28 @@ def test_preview_preserves_scroll_on_rerender(qapp):
 
 
 @pytest.mark.ui
+def test_local_image_resolves_to_file_url(qapp):
+    """A relative ![](pic.png) renders with an absolute file:// src under the doc's
+    folder — the preview is served from dist/, so relative srcs would otherwise miss."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "pic.png"), "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n")                # bytes don't matter; we check the src
+    p = os.path.join(d, "R.md")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("# d\n\n![a plot](pic.png)\n")
+    dv = DocView()
+    dv.resize(640, 420)
+    try:
+        dv.open(p)
+        html = _wait_html(qapp, dv.view, "<img")
+        assert "file://" in html and "pic.png" in html, html[:300]
+        assert 'src="pic.png"' not in html, "relative src was not rewritten"
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_collab_reload_from_disk(qapp):
     """In collab, an external .md edit surfaces a reload affordance; reloading applies
     the on-disk text to the LIVE doc (explicit last-writer-wins)."""

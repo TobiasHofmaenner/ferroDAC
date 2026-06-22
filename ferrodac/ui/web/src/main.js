@@ -59,6 +59,7 @@ const $ = (id) => document.getElementById(id);
 
 let bridge = null;
 let editor = null;
+let docDir = "";          // the open doc's folder — resolves relative image links
 let mode = "read";        // read | edit | split
 let lastSynced = "";      // the text the file currently holds (per our knowledge)
 let saveTimer = null;
@@ -118,11 +119,30 @@ async function renderPreview() {
     html = `<pre class="render-error">render error: ${String(e)}</pre>`;
   }
   if (seq !== renderSeq) return;                    // only the latest render wins
+  html = resolveLocalImages(html);
   const doc = $("doc");
   const top = doc.scrollTop;                        // replacing innerHTML resets scroll
   doc.innerHTML = html;
   doc.scrollTop = top;                              // …so put the reader back where they were
   await renderMermaid(doc, seq);
+}
+
+// The preview page is served from dist/, so a relative ![](plots/x.png) would resolve
+// against the BUNDLE, not the .md. Rewrite relative image srcs to an absolute file://
+// under the doc's folder. A <template> parses inertly (no image fetch), so each img
+// loads exactly once, with the right URL.
+function resolveLocalImages(html) {
+  if (!docDir) return html;
+  const tmpl = document.createElement("template");
+  tmpl.innerHTML = html;
+  for (const img of tmpl.content.querySelectorAll("img[src]")) {
+    const src = img.getAttribute("src");
+    if (!src || /^(https?:|data:|file:|blob:|\/\/)/i.test(src)) continue;
+    try {
+      img.setAttribute("src", new URL(src, "file://" + docDir + "/").href);
+    } catch (e) { /* leave the original src */ }
+  }
+  return tmpl.innerHTML;
 }
 
 // Turn ```mermaid fences into rendered SVG. Mermaid is async, so honour the render
@@ -359,6 +379,7 @@ function connect() {
   // eslint-disable-next-line no-undef
   new QWebChannel(qt.webChannelTransport, (channel) => {
     bridge = channel.objects.bridge;
+    bridge.docContext.connect((dir) => { docDir = dir || ""; renderPreview(); });
     bridge.docChanged.connect(onIncoming);
     bridge.collabSeed.connect(enterCollab);
     bridge.collabUpdate.connect((b64) => {

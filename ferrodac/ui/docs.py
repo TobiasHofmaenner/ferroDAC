@@ -24,6 +24,10 @@ if getattr(os, "geteuid", lambda: 1)() == 0:
 from qtpy.QtCore import QFileSystemWatcher, QObject, Qt, QUrl, Signal, Slot
 from qtpy.QtWebChannel import QWebChannel
 from qtpy.QtWebEngineWidgets import QWebEngineView
+try:                                                 # Qt6: settings live in QtWebEngineCore
+    from qtpy.QtWebEngineCore import QWebEngineSettings
+except Exception:                                    # pragma: no cover — binding variance
+    QWebEngineSettings = None
 from qtpy.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -90,6 +94,7 @@ class DocBridge(QObject):
     (external) change. The JS calls ``ready()`` once loaded so there's no race."""
 
     docChanged = Signal(str, str)        # (relpath, text) — Qt → JS (load / external edit)
+    docContext = Signal(str)             # (doc_dir) — Qt → JS, for resolving local images
     saveRequested = Signal(str)          # (text) — JS → Qt (autosave from the editor)
     jsReady = Signal()                   # the JS bridge handshake completed (page ready)
 
@@ -112,15 +117,18 @@ class DocBridge(QObject):
         super().__init__(parent)
         self._relpath = ""
         self._text = ""
+        self._docdir = ""
 
-    def set_doc(self, relpath: str, text: str) -> None:
-        self._relpath, self._text = relpath, text
+    def set_doc(self, relpath: str, text: str, docdir: str = "") -> None:
+        self._relpath, self._text, self._docdir = relpath, text, docdir
+        self.docContext.emit(docdir)
         self.docChanged.emit(relpath, text)
 
     @Slot()
     def ready(self) -> None:
         self.jsReady.emit()                               # JS bridge wired (collab-safe now)
-        self.docChanged.emit(self._relpath, self._text)   # (re)send to a just-loaded page
+        self.docContext.emit(self._docdir)                # (re)send to a just-loaded page
+        self.docChanged.emit(self._relpath, self._text)
 
     @Slot(str)
     def save(self, text: str) -> None:
@@ -205,6 +213,15 @@ class DocView(QWidget):
         root.addLayout(head)
 
         self.view = QWebEngineView()
+        # The preview page is served from dist/ (a file:// URL); let it load the
+        # doc's LOCAL images (relative srcs are rewritten to file:// in the JS). This
+        # is usually the default, but set it explicitly so embedded plots/figures load.
+        try:
+            st = self.view.settings()
+            st.setAttribute(
+                QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        except Exception:                                # noqa: BLE001 — enum/binding variance
+            pass
         self.bridge = DocBridge(self)
         self.bridge.saveRequested.connect(self._write)   # in-app edits → the file
         self.bridge.jsReady.connect(self._on_js_ready)    # gate collab on the JS handshake
@@ -260,7 +277,7 @@ class DocView(QWidget):
             except Exception:            # noqa: BLE001 — unreadable/just-removed
                 pass
         self._mtime_seen = self._file_mtime(self._path)
-        self.bridge.set_doc(os.path.basename(self._path or ""), text)
+        self.bridge.set_doc(os.path.basename(self._path or ""), text, self._dir or "")
         # re-arm watches — an atomic save drops the file watch (the dir watch persists)
         if (self._path and os.path.exists(self._path)
                 and self._path not in self._watcher.files()):
