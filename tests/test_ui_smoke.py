@@ -765,6 +765,56 @@ def test_panel_export_items(qapp):
 
 
 @pytest.mark.ui
+def test_add_processor_dialog(qapp):
+    """The generic creator lists registered processors, filters sources by what each
+    accepts, and instantiating one publishes its outputs as virtual sources."""
+    from ferrodac.ui.processor_dialog import AddProcessorDialog
+    from ferrodac.ui.workspace import SourcePort
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        db._sources["rga/spectrum"] = SourcePort(
+            "rga/spectrum", "Spectrum", "trace", "", "dev", "device")
+        dlg = AddProcessorDialog(db, None)
+        kinds = [dlg._kind.itemData(i) for i in range(dlg._kind.count())]
+        assert "gas" in kinds                              # a built-in trace processor
+        dlg._kind.setCurrentIndex(kinds.index("gas"))
+        srcs = [dlg._src.itemData(i) for i in range(dlg._src.count())]
+        assert "rga/spectrum" in srcs                      # the trace source is offered
+        assert dlg.result() == ("gas", "rga/spectrum")
+        dlg.deleteLater()
+        pid = db.add_processor("gas", "rga/spectrum")       # → its outputs are sources now
+        assert db.processor(pid) is not None
+        assert any(k.startswith("gas/") for k in db._sources)
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_mainwindow_with_extensions(qapp, tmp_path):
+    """The startup seam: MainWindow takes an ExtensionManager and the Extensions menu
+    opens its dialog (main() now wires this — the suite otherwise builds MainWindow
+    directly, so cover it here)."""
+    from ferrodac.core.engine import Engine
+    from ferrodac.core.manager import DeviceManager
+    from ferrodac.core.registry import load_builtin_drivers
+    from ferrodac.extensions import ExtensionManager
+    from ferrodac.ui.app import MainWindow
+    from ferrodac.ui.extensions_view import ExtensionsDialog
+    MainWindow._app_dir = lambda self, _d=str(tmp_path): _d
+    engine = Engine()
+    manager = DeviceManager(load_builtin_drivers(), engine=engine, registry=None)
+    mgr = ExtensionManager(str(tmp_path / "ext"))
+    w = MainWindow(manager, engine, extensions=mgr)
+    try:
+        assert w._extensions is mgr and w._ensure_ext_manager() is mgr
+        dlg = ExtensionsDialog(w._ensure_ext_manager(), w)   # the menu's target builds
+        dlg.deleteLater()
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_export_config_dialog(qapp):
     """The export dialog reads back its spec; toggling a per-panel override OFF means
     'use the project default' (None); the project-default form has no override toggle."""

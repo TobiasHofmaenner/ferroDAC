@@ -2121,6 +2121,8 @@ class MainWindow(QMainWindow):
         for kind, (label, _cls) in PANEL_TYPES.items():
             act = add.addAction(f"Add {label}")
             act.triggered.connect(lambda _=False, k=kind: self._add_panel(k))
+        add.addSeparator()
+        add.addAction("Processor…", self._add_processor)
 
         netmenu = self.menuBar().addMenu("&Cloud")
         self.hub_action = netmenu.addAction("ferroDAC Cloud…", self._open_hub)
@@ -2240,6 +2242,21 @@ class MainWindow(QMainWindow):
             readme = self._active_readme()
             if panel is not None and readme:
                 panel.open(readme)
+
+    def _add_processor(self) -> None:
+        """Add menu ▸ Processor… — instantiate any registered processor (built-in or
+        from a plugin) on a compatible source; its outputs become routable sources."""
+        from .processor_dialog import AddProcessorDialog
+        dlg = AddProcessorDialog(self.dashboard, self)
+        if not dlg.exec():
+            return
+        kind, src = dlg.result()
+        if not kind or not src:
+            return
+        pid = self.dashboard.add_processor(kind, src)
+        label = getattr(type(self.dashboard.processor(pid)), "label", kind)
+        self.statusBar().showMessage(
+            f"Added {label} on {src} — route its outputs to a Bars panel or chart.", 7000)
 
     def _wire_doc_panels(self) -> None:
         """Give every Document panel's editor the /rec macro services. Doc panels are
