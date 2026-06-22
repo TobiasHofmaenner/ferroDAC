@@ -118,8 +118,11 @@ async function renderPreview() {
     html = `<pre class="render-error">render error: ${String(e)}</pre>`;
   }
   if (seq !== renderSeq) return;                    // only the latest render wins
-  $("doc").innerHTML = html;
-  await renderMermaid($("doc"), seq);
+  const doc = $("doc");
+  const top = doc.scrollTop;                        // replacing innerHTML resets scroll
+  doc.innerHTML = html;
+  doc.scrollTop = top;                              // …so put the reader back where they were
+  await renderMermaid(doc, seq);
 }
 
 // Turn ```mermaid fences into rendered SVG. Mermaid is async, so honour the render

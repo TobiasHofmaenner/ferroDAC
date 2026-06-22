@@ -158,6 +158,34 @@ def test_mermaid_renders_to_svg(qapp):
 
 
 @pytest.mark.ui
+def test_preview_preserves_scroll_on_rerender(qapp):
+    """Typing re-renders the preview WITHOUT yanking it back to the top (replacing
+    #doc's innerHTML resets scroll; we restore it)."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "L.md")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("# top\n\n" + "\n\n".join(
+            f"para {i} lorem ipsum dolor sit amet" for i in range(60)) + "\n")
+    dv = DocView()
+    dv.resize(700, 400)
+    try:
+        dv.open(p)
+        _wait_html(qapp, dv.view, "para 59")
+        dv.view.page().runJavaScript(
+            "document.body.dataset.mode='split';"
+            "document.getElementById('doc').scrollTop=800")
+        assert _pump(qapp, lambda: (_js(
+            qapp, dv.view, "document.getElementById('doc').scrollTop") or 0) >= 800)
+        dv.view.page().runJavaScript("window.__doc.insert(' X')")   # edit → re-render
+        _pump(qapp, lambda: False, 0.6)                             # let the async render run
+        final = _js(qapp, dv.view, "document.getElementById('doc').scrollTop") or 0
+        assert final > 100, f"preview jumped to the top on re-render (scrollTop={final})"
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_collab_reload_from_disk(qapp):
     """In collab, an external .md edit surfaces a reload affordance; reloading applies
     the on-disk text to the LIVE doc (explicit last-writer-wins)."""
