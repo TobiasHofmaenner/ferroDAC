@@ -718,6 +718,24 @@ def test_device_qualified_label(qapp):
 
 
 @pytest.mark.ui
+def test_bars_panel_routes_scalars(qapp):
+    """The generic Bars widget shows each routed scalar source as a labeled bar —
+    the gas display's rendering, decoupled from gas (route any floats)."""
+    from ferrodac.ui.panels import BarsPanel
+    p = BarsPanel()
+    p.add_source("a/x", types.SimpleNamespace(name="X", label="X", unit="", dtype="float"))
+    p.add_source("b/y", types.SimpleNamespace(name="Y", label="Y", unit="", dtype="float"))
+    try:
+        p.feed([types.SimpleNamespace(key="a/x", t=1.0, value=3.0, status=0),
+                types.SimpleNamespace(key="b/y", t=1.0, value=7.0, status=0)])
+        assert [float(h) for h in p._view._bars.opts["height"]] == [3.0, 7.0]
+        p.remove_source("a/x")                       # unrouting drops its bar
+        assert [float(h) for h in p._view._bars.opts["height"]] == [7.0]
+    finally:
+        p.deleteLater()
+
+
+@pytest.mark.ui
 def test_panel_export_items(qapp):
     """Every plot panel exposes a renderable export_item (chart/spectrum/waterfall, and
     the combined specwf via its GraphicsLayout); non-plot panels return None."""
@@ -725,10 +743,12 @@ def test_panel_export_items(qapp):
     import tempfile
     from pyqtgraph.exporters import ImageExporter
     from ferrodac.ui.panels import (ChartPanel, SpectrumPanel, WaterfallPanel,
-                                     SpectrumWaterfallPanel, NumericPanel)
+                                     SpectrumWaterfallPanel, BarsPanel,
+                                     CompositionPanel, NumericPanel)
     d = tempfile.mkdtemp()
     for name, cls in (("chart", ChartPanel), ("spectrum", SpectrumPanel),
-                      ("waterfall", WaterfallPanel), ("specwf", SpectrumWaterfallPanel)):
+                      ("waterfall", WaterfallPanel), ("specwf", SpectrumWaterfallPanel),
+                      ("bars", BarsPanel), ("composition", CompositionPanel)):
         p = cls()
         p.resize(400, 240)
         try:

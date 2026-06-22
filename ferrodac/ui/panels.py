@@ -1798,12 +1798,102 @@ class GasConfigDialog(QDialog):
                 "gases": sorted(self._selected) or list(DEFAULT_GASES)}
 
 
+class _BarsView(QWidget):
+    """A reusable labeled bar chart with optional error bars — display only. Fed by
+    the generic BarsPanel (routed scalars) or CompositionPanel (gas outputs)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.plot = pg.PlotWidget(
+            axisItems={"bottom": _VerticalAxis(orientation="bottom")})
+        self.plot.setLabel("left", "value")
+        self.plot.showGrid(y=True, alpha=0.2)
+        self._bars = pg.BarGraphItem(x=[0], height=[0], width=0.6, brush="#4fc3f7")
+        self.plot.addItem(self._bars)
+        self._err = pg.ErrorBarItem(pen=pg.mkPen("#c7d0db"))
+        self.plot.addItem(self._err)
+        lay.addWidget(self.plot)
+
+    def set_bars(self, labels, heights, errors=None, title="", ylabel=None):
+        n = len(labels)
+        x = np.arange(n, dtype=float)
+        h = np.asarray(heights, dtype=float) if n else np.array([])
+        self._bars.setOpts(x=x, height=h, width=0.6)
+        if errors is not None and len(errors):
+            e = np.asarray(errors, dtype=float)
+            self._err.setData(x=x, y=h, top=e, bottom=np.minimum(e, h), beam=0.25)
+        else:
+            self._err.setData(x=np.array([]), y=np.array([]))
+        short = [s if len(s) <= 18 else s[:17] + "…" for s in labels]
+        self.plot.getAxis("bottom").setTicks([list(zip(x.tolist(), short))])
+        if ylabel:
+            self.plot.setLabel("left", ylabel)
+        self.plot.setTitle(title)
+
+    def clear(self):
+        self._bars.setOpts(x=[0], height=[0])
+        self._err.setData(x=np.array([]), y=np.array([]))
+        self.plot.setTitle("")
+
+
+class BarsPanel(Panel):
+    """A generic bar chart: route any scalar (float/bool) sources and each becomes a
+    labeled bar of its latest value. The gas-composition display is one specialisation
+    of this — point it at a Gas processor's per-gas outputs and you get the same bars."""
+
+    kind = "bars"
+    accepts = frozenset({"float", "bool"})
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._view = _BarsView()
+        self.plot = self._view.plot          # so export_item() / exports find the plot
+        lay.addWidget(self._view)
+        self._labels: dict = {}              # key -> bar label
+        self._vals: dict = {}                # key -> latest value
+        self._order: list = []               # routed keys, in routing order
+
+    def add_source(self, key, source):
+        if key not in self._labels:
+            self._order.append(key)
+        self._labels[key] = (getattr(source, "label", None)
+                             or getattr(source, "name", None) or key)
+        self._vals.setdefault(key, 0.0)
+        self._redraw()
+
+    def remove_source(self, key):
+        self._labels.pop(key, None)
+        self._vals.pop(key, None)
+        if key in self._order:
+            self._order.remove(key)
+        self._redraw()
+
+    def feed(self, batch):
+        changed = False
+        for r in batch:
+            if r.key in self._vals and isinstance(r.value, (int, float, bool)):
+                self._vals[r.key] = float(r.value)
+                changed = True
+        if changed:
+            self._redraw()
+
+    def _redraw(self):
+        labels = [self._labels[k] for k in self._order]
+        heights = [self._vals.get(k, 0.0) for k in self._order]
+        self._view.set_bars(labels, heights)
+
+
 class CompositionPanel(Panel):
     """Gas composition: hosts a Dashboard GasAnalyzer on the bound mass-spectrum
     and shows the partial pressures as bars (Monte-Carlo error bars + flagged
-    unresolvable pairs). Because the analyzer is a real processor, it also emits
-    a partial-pressure source and a reconstructed-spectrum source per gas — route
-    a gas's "fit" source back onto the Spectrum panel to see the fit. Single-bind."""
+    unresolvable pairs) via the shared _BarsView. Because the analyzer is a real
+    processor, it also emits a partial-pressure source and a reconstructed-spectrum
+    source per gas — route a gas's "fit" source back onto the Spectrum panel to see
+    the fit, or its partial-pressure source onto a generic Bars panel. Single-bind."""
 
     kind = "composition"
     accepts = frozenset({"trace"})
@@ -1823,14 +1913,10 @@ class CompositionPanel(Panel):
         self._cfg_btn.clicked.connect(self._open_config)
         hdr.addWidget(self._cfg_btn)
         lay.addLayout(hdr)
-        self.plot = pg.PlotWidget(axisItems={"bottom": _VerticalAxis(orientation="bottom")})
-        self.plot.setLabel("left", "partial pressure")
-        self.plot.showGrid(y=True, alpha=0.2)
-        self._bars = pg.BarGraphItem(x=[0], height=[0], width=0.6, brush="#4fc3f7")
-        self.plot.addItem(self._bars)
-        self._err = pg.ErrorBarItem(pen=pg.mkPen("#c7d0db"))
-        self.plot.addItem(self._err)
-        lay.addWidget(self.plot)
+        self._view = _BarsView()
+        self._view.plot.setLabel("left", "partial pressure")
+        self.plot = self._view.plot          # so export_item() / exports find the plot
+        lay.addWidget(self._view)
         self._src_key = None
         self._proc_id = None
         # creation config for the hosted analyzer (+ optional gases)
@@ -1855,8 +1941,7 @@ class CompositionPanel(Panel):
         if key == self._src_key:
             self._src_key = None
             self.cleanup()
-            self._bars.setOpts(x=[0], height=[0])
-            self.plot.setTitle("")
+            self._view.clear()
 
     def cleanup(self):
         if self._proc_id and self._remove is not None:
@@ -1905,22 +1990,15 @@ class CompositionPanel(Panel):
                 and not r.partial for r in batch):
             return
         names = a.gas_names
-        x = np.arange(len(names), dtype=float)
-        h = np.array([max(0.0, a.last_amounts.get(n, 0.0)) for n in names])
-        self._bars.setOpts(x=x, height=h, width=0.6)
-        if a.last_sd:
-            e = np.array([a.last_sd.get(n, 0.0) for n in names])
-            self._err.setData(x=x, y=h, top=e, bottom=np.minimum(e, h), beam=0.25)
-        else:
-            self._err.setData(x=np.array([]), y=np.array([]))
-        labels = [n if len(n) <= 18 else n[:17] + "…" for n in names]
-        self.plot.getAxis("bottom").setTicks([list(zip(x.tolist(), labels))])
-        if a.unit:
-            self.plot.setLabel("left", f"partial pressure [{a.unit}]")
+        heights = [max(0.0, a.last_amounts.get(n, 0.0)) for n in names]
+        errors = [a.last_sd.get(n, 0.0) for n in names] if a.last_sd else None
         flags = "   ⚠ unresolved: " + ", ".join(f"{p[0]}↔{p[1]}"
                                                  for p in a.last_degenerate) \
             if a.last_degenerate else ""
-        self.plot.setTitle(f"fit residual {a.last_residual:.2f}{flags}")
+        self._view.set_bars(
+            names, heights, errors=errors,
+            ylabel=f"partial pressure [{a.unit}]" if a.unit else None,
+            title=f"fit residual {a.last_residual:.2f}{flags}")
 
     def state(self):
         a = self._get(self._proc_id) if (self._get and self._proc_id) else None
@@ -1997,6 +2075,7 @@ PANEL_TYPES = {
     "spectrum": ("Spectrum", SpectrumPanel),
     "waterfall": ("Waterfall", WaterfallPanel),
     "specwf": ("Spectrum + waterfall", SpectrumWaterfallPanel),
+    "bars": ("Bars", BarsPanel),
     "composition": ("Gas composition", CompositionPanel),
     "image": ("Camera view", ImagePanel),
     "slider": ("Slider", SliderPanel),
