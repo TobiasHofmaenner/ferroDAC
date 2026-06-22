@@ -132,6 +132,10 @@ class DocBridge(QObject):
     deviceTable = Signal(str)            # (markdown)
     deviceTableRequested = Signal()
 
+    # Editor macro (/meta): a report front-matter block. Qt → JS / JS → Qt:
+    runMeta = Signal(str)                # (markdown)
+    runMetaRequested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._relpath = ""
@@ -178,6 +182,10 @@ class DocBridge(QObject):
     def requestDeviceTable(self) -> None:
         self.deviceTableRequested.emit()
 
+    @Slot()
+    def requestRunMeta(self) -> None:
+        self.runMetaRequested.emit()
+
     # -- collaboration: JS → Qt (thin re-emit; DocView forwards to the hub) --
     @Slot()
     def collabJoin(self) -> None:
@@ -207,7 +215,8 @@ class DocView(QWidget):
     def __init__(self, on_edit=None, on_configure=None, parent=None,
                  on_list_recordings=None, on_export_recording=None,
                  on_list_recording_exports=None, on_list_processors=None,
-                 on_processor_source=None, on_saved=None, on_device_table=None):
+                 on_processor_source=None, on_saved=None, on_device_table=None,
+                 on_run_meta=None):
         super().__init__(parent)
         self._path = None                # absolute path of the open doc
         self._dir = None                 # its folder (watched too — atomic-save safe)
@@ -221,6 +230,7 @@ class DocView(QWidget):
         self._on_list_processors = on_list_processors   # () -> [{kind,label}]
         self._on_processor_source = on_processor_source  # (kind) -> source str
         self._on_device_table = on_device_table          # () -> instruments markdown
+        self._on_run_meta = on_run_meta                  # () -> report front-matter markdown
         self._collab = None              # a HubController, when a hub+doc is available
         self._doc_id = None              # "<project_id>::<relpath>" for collaboration
         self._collab_on = False          # currently in a live session?
@@ -291,6 +301,7 @@ class DocView(QWidget):
         self.bridge.processorsRequested.connect(self._push_processors)
         self.bridge.procSourceRequested.connect(self._send_processor_source)
         self.bridge.deviceTableRequested.connect(self._send_device_table)
+        self.bridge.runMetaRequested.connect(self._send_run_meta)
         self._channel = QWebChannel(self)
         self._channel.registerObject("bridge", self.bridge)
         self.view.page().setWebChannel(self._channel)
@@ -393,7 +404,8 @@ class DocView(QWidget):
                       on_list_processors=self._on_list_processors,
                       on_processor_source=self._on_processor_source,
                       on_saved=self._on_saved,
-                      on_device_table=self._on_device_table)
+                      on_device_table=self._on_device_table,
+                      on_run_meta=self._on_run_meta)
         win.setWindowFlag(Qt.Window, True)              # owned, but its own OS window
         win.setAttribute(Qt.WA_DeleteOnClose, True)
         win.setWindowTitle(f"{os.path.basename(self._path)} — ferroDAC")
@@ -457,7 +469,8 @@ class DocView(QWidget):
     # -- editor macros (/rec): list recordings + export one on demand --------
     def set_macros(self, on_list_recordings, on_export_recording,
                    on_list_recording_exports=None, on_list_processors=None,
-                   on_processor_source=None, on_device_table=None) -> None:
+                   on_processor_source=None, on_device_table=None,
+                   on_run_meta=None) -> None:
         """Wire the editor macros to the app's services (used by doc panels created via
         the Add menu or a layout, which can't get the callbacks at construction)."""
         self._on_list_recordings = on_list_recordings
@@ -466,6 +479,7 @@ class DocView(QWidget):
         self._on_list_processors = on_list_processors
         self._on_processor_source = on_processor_source
         self._on_device_table = on_device_table
+        self._on_run_meta = on_run_meta
         if self._js_ready:                    # warm the caches if the page is already up
             self._push_recordings()
             self._push_processors()
@@ -498,6 +512,15 @@ class DocView(QWidget):
             except Exception:                 # noqa: BLE001
                 md = ""
         self.bridge.deviceTable.emit(md)
+
+    def _send_run_meta(self) -> None:
+        md = ""
+        if self._on_run_meta is not None:
+            try:
+                md = self._on_run_meta() or ""
+            except Exception:                 # noqa: BLE001
+                md = ""
+        self.bridge.runMeta.emit(md)
 
     def _send_processor_source(self, kind: str) -> None:
         src, paper = "", None

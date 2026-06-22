@@ -2231,6 +2231,7 @@ class MainWindow(QMainWindow):
                                   on_list_processors=self._list_processors,
                                   on_processor_source=self._processor_source,
                                   on_device_table=self._device_journal_markdown,
+                                  on_run_meta=self._run_meta_markdown,
                                   on_saved=lambda: self._schedule_project_commit(
                                       "Edited documents"))
         self.docs_dock.setWidget(self._docs_view)
@@ -2297,7 +2298,8 @@ class MainWindow(QMainWindow):
                                      self._list_recording_exports,
                                      self._list_processors,
                                      self._processor_source,
-                                     self._device_journal_markdown)
+                                     self._device_journal_markdown,
+                                     self._run_meta_markdown)
 
     def _active_readme(self) -> str | None:
         """The active project's README.md path, bootstrapping a starter if missing."""
@@ -2990,6 +2992,56 @@ class MainWindow(QMainWindow):
                      r.get("firmware"), cal, r.get("asset_tag")]
             lines.append("| " + " | ".join(str(c) if c else "—" for c in cells) + " |")
         lines += ["", f"_Acquired with ferroDAC {__version__}._"]
+        return "\n".join(lines)
+
+    def _run_meta_markdown(self) -> str:
+        """A report front-matter block — experiment, date(s), experimenter(s),
+        sample, instruments, recordings, software. For the /meta macro. Folds
+        what it can self-populate; the rest (sample) is a fill-in placeholder."""
+        import datetime as _dt
+        from .. import __version__
+        p = self._project_mgr.active if getattr(self, "_project_mgr", None) else None
+        experiment = (p.name if p is not None else "") or "Experiment"
+
+        # experimenter(s): the user's identity, then anyone who has committed history
+        people = []
+        ident = self._git_identity()
+        if ident:
+            people.append(ident[0])
+        try:
+            repo = self._project_repo()
+            if repo is not None:
+                for row in repo.log(limit=200):
+                    a = (row.get("author") or "").strip()
+                    if a and a not in people:
+                        people.append(a)
+        except Exception:                     # noqa: BLE001
+            pass
+        experimenters = ", ".join(people) if people else "—"
+
+        # date(s): the span the recordings cover, else today
+        recs = self._list_recordings()
+        if recs:
+            d0 = _dt.date.fromtimestamp(min(r["t0"] for r in recs))
+            d1 = _dt.date.fromtimestamp(max(r["t1"] for r in recs))
+            date = d0.isoformat() if d0 == d1 else f"{d0.isoformat()} – {d1.isoformat()}"
+        else:
+            date = _dt.date.today().isoformat()
+
+        devices = self._journal_devices()
+        instruments = ", ".join(d.name for d in devices) if devices else "—"
+
+        rows = [
+            ("Experiment", experiment),
+            ("Date", date),
+            ("Experimenter(s)", experimenters),
+            ("Sample", "—"),                  # fill in (pending sample tracking)
+            ("Instruments", instruments),
+            ("Recordings", str(len(recs)) if recs else "—"),
+            ("Software", f"ferroDAC {__version__}"),
+        ]
+        lines = ["| | |", "|---|---|"]
+        lines += [f"| **{k}** | {v} |" for k, v in rows]
         return "\n".join(lines)
 
     # -- editor /rec macro: list recordings + export one on demand -----------

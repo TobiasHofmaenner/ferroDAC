@@ -1089,3 +1089,29 @@ def test_dev_journal_table_from_curated_sources(qapp):
         assert "LAB-007" in md                        # user metadata merged in
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_meta_front_matter_block(qapp):
+    """/meta app side: a report header that self-populates experiment, instruments
+    (from the curated devices), recordings count and the ferroDAC version."""
+    from ferrodac.core.device import DeviceDescriptor, Interface
+    from ferrodac.ui.workspace import SourcePort
+    w = _mainwindow(qapp)
+    try:
+        descs = [DeviceDescriptor("sim:rga:1", "qms", "RGA", Interface(kind="sim"),
+                                  hardware_id="SIM-RGA-1", model="Q200")]
+        w.manager.active_descriptors = lambda: descs
+        w.dashboard._sources["sim:rga:1/spectrum"] = SourcePort(
+            "sim:rga:1/spectrum", "spectrum", "float", "", "RGA", "device")
+        w.dashboard.set_source_lens({"sim:rga:1/spectrum"})
+
+        md = w._run_meta_markdown()
+        for field in ("**Experiment**", "**Date**", "**Experimenter(s)**",
+                      "**Sample**", "**Instruments**", "**Recordings**", "**Software**"):
+            assert field in md, (field, md)
+        assert "| **Instruments** | RGA |" in md, md
+        assert "ferroDAC" in md
+        assert md.count("| **Recordings** | — |") == 1   # no recordings yet
+    finally:
+        w.close()

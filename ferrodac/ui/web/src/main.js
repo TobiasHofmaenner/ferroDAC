@@ -70,6 +70,7 @@ const exportWaiters = new Map();
 let processorsCache = [];               // [{kind,label}] — the /proc macro's choices
 let awaitingProcInsert = false;         // a picked processor's source is being fetched
 let awaitingDevTable = false;           // the /dev instruments table is being built
+let awaitingMeta = false;               // the /meta front-matter block is being built
 let mode = "read";        // read | edit | split
 let lastSynced = "";      // the text the file currently holds (per our knowledge)
 let saveTimer = null;
@@ -327,11 +328,24 @@ function slashSource(context) {
       }],
     };
   }
+  if (cmd === "meta") {
+    return {
+      from: w.from, filter: false,
+      options: [{
+        label: "meta: Report header", detail: "front matter", type: "function",
+        apply: (v, c, from, to) => {
+          v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/meta`
+          awaitingMeta = true;
+          if (bridge) bridge.requestRunMeta();                 // inserted on arrival
+        },
+      }],
+    };
+  }
   return null;
 }
 
-// Insert the instruments table built by the app (the curated devices' provenance).
-function insertDeviceTable(md) {
+// Insert a Markdown block the app built (the curated devices, the run header, …).
+function insertMarkdownBlock(md) {
   if (!editor || !md) return;
   const block = "\n\n" + md.replace(/\s+$/, "") + "\n";
   const at = editor.state.selection.main.head;
@@ -523,6 +537,9 @@ const SLASH_HELP = [
   { cmd: "/dev", title: "Insert an instruments table",
     desc: "Drops a lab-journal table of the devices behind your curated sources — "
         + "manufacturer, model, serial, firmware, calibration and asset tag." },
+  { cmd: "/meta", title: "Insert a report header",
+    desc: "Drops a front-matter block — experiment, date(s), experimenter(s), "
+        + "sample, instruments, recordings and the ferroDAC version." },
 ];
 
 function buildMacroHelp() {
@@ -595,7 +612,12 @@ function connect() {
     bridge.deviceTable.connect((md) => {                   // picked /dev → insert
       if (!awaitingDevTable) return;
       awaitingDevTable = false;
-      insertDeviceTable(md);
+      insertMarkdownBlock(md);
+    });
+    bridge.runMeta.connect((md) => {                       // picked /meta → insert
+      if (!awaitingMeta) return;
+      awaitingMeta = false;
+      insertMarkdownBlock(md);
     });
     bridge.collabSeed.connect(enterCollab);
     bridge.collabUpdate.connect((b64) => {
@@ -650,6 +672,11 @@ window.__doc = {
   insertDeviceTable: () => {
     awaitingDevTable = true;
     if (bridge) bridge.requestDeviceTable();
+  },
+  // /meta test hook: request the report header → inserted on arrival
+  insertMeta: () => {
+    awaitingMeta = true;
+    if (bridge) bridge.requestRunMeta();
   },
   // compute the stage-2 (list) menu for a recording → result in __doc._lastLabels
   stage2Labels: (recId) => {

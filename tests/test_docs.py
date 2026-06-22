@@ -411,6 +411,35 @@ def test_slash_dev_inserts_instruments_table(qapp):
 
 
 @pytest.mark.ui
+def test_slash_meta_inserts_report_header(qapp):
+    """The /meta macro: the app builds a report front-matter block and the editor
+    drops it at the cursor."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    header = ("| | |\n|---|---|\n"
+              "| **Experiment** | Bakeout run |\n"
+              "| **Date** | 2026-06-23 |\n"
+              "| **Experimenter(s)** | Tobias |\n")
+    dv = DocView(on_run_meta=lambda: header)
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        dv.view.page().runJavaScript("window.__doc.insertMeta()")
+        assert _pump(qapp, lambda: "Bakeout run" in (_js(qapp, dv.view, "window.__doc.text()") or ""))
+        txt = _js(qapp, dv.view, "window.__doc.text()")
+        assert "| **Experiment** | Bakeout run |" in txt, txt
+        # renders as a real table
+        html = _js(qapp, dv.view, "window.__doc.html()")
+        assert "<table" in html and "Experiment" in html
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_slash_macro_lists_existing_and_export_now(qapp):
     """Picking a recording shows its ALREADY-exported files plus an 'Export now' item."""
     from ferrodac.ui.docs import DocView
