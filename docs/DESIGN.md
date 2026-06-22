@@ -721,6 +721,74 @@ filesystem directly, so *where the folder lives* is pluggable:
 In both, the files stay the **human-readable system of record**; the backend
 changes only *where* the folder lives and *who* can reach it, never the format.
 
+### 8.2 Hub = index + coordinator; git as the project substrate (decided 2026-06-22)
+
+§8.1's "server backend" is refined by a hard rule: **the hub never owns the project
+files.** It is an **index + coordinator** over files that live where the *user*
+controls. Three layers, kept strictly separate — the whole point is they must not
+leak into each other, which is exactly what grinds against an external file-sync
+(Nextcloud) that also touches the same bytes:
+
+| Layer | Owner | Contents | Transport |
+|---|---|---|---|
+| **Bytes** | the user's world | reports `.md`, layouts, **exported CSVs**, modest attachments (PDF/CAD) | **git** (below). Measurements are the exception → **Zarr / data plane** (§7.4), never git |
+| **Index** | the hub | which projects exist, metadata, membership, **the git repo URL per project**, references | the existing LWW record sync (Tags/Projects, §7.3 / §8.1) |
+| **Coordination** | the hub | live collab CRDT + presence | the opaque-bytes relay (§10.1) — *transient*, never a file |
+
+**Git is the durable project substrate, and the hub *talks to* a git remote
+(PAT/SSH) — it does not reimplement git hosting.** The backend is pluggable along a
+*dial of how much git the user sees*:
+- **Transparent** — ferroDAC drives a bundled **Gitea** (or hub-managed bare repos);
+  the user gets history/versioning/sync and never types `git`.
+- **Native** — point the hub at existing infra (GitLab/…); a power user works
+  git-natively with their own tools, no folder-sync at all.
+
+…with everything between a *config* choice, not a code path. The only abstraction the
+hub needs is *"a git remote + credentials,"* which makes it host-agnostic by
+construction. This is *mechanism, not policy* (cf. §10.2 / §18.3): expose git as much
+or as little as someone wants.
+
+**Clients are git clients.** Each clones to **local disk** (single-writer `.git` —
+safe), commits its *own* user's work (→ real authorship/`blame`), pushes/pulls; the
+git server mediates merge. The corruption rule: **never put `.git` in a multi-writer
+file-sync** — Nextcloud syncs git's internals partially/out-of-order across writers →
+*silent* corruption (lost objects, conflicted refs). Plain working files in sync are
+fine (visible "conflicted copy" at worst). So if files must *also* appear in a synced
+folder for direct tooling (CAD), the client writes a **`.git`-less working-tree
+checkout** there; the real clone + `.git` stay in app-managed space.
+
+**Commits at meaningful boundaries, not keystrokes.** The CRDT layer absorbs the live
+churn; **git only ever sees settled states.** Triggers: (a) **session quiescence**
+(one commit per settled editing session), (b) **domain events the app knows** —
+recording stopped, tag added, export run, layout saved → auto-generated messages
+("Recorded run 7 (12:03–12:45)"), (c) optional **manual checkpoints** with a human
+message. Auto-messages for the routine; real ones where they matter. The app needn't
+be writing-task-aware — it is *domain*-aware, and that's enough.
+
+**Self-contained repos; redundancy over cross-references.** References are
+**relative, in-repo** (a report → its exported CSV / attachment) — no cross-project,
+no cross-system pointers. A report's data is the **exported CSV committed beside it**,
+not a live link into Zarr or Nextcloud. We accept storing a copy in git (and maybe
+again in Nextcloud) over a pointer that can dangle — *"one copy too many" beats "a
+broken reference."* That keeps the 10-/100-year property airtight: the repo is a
+complete, tool-independent record.
+
+**History is durable; hub turnover is survivable.** The hub keeps the live `.git`,
+but periodically materialises a **`git bundle` (one self-consistent file) into the
+durable store, beside the files** — atomic, safe to sync, re-importable. Re-checking-in
+a project later restores its full history, **continuous across hub generations**.
+So the **durable store (files + bundle + Zarr) is the source of truth and the hub is a
+rebuildable working layer** — wipe the server, point a fresh hub at the store, it
+reconstructs. "The server is optional" (§7.5) made literal.
+
+This **evolves §8.1's server backend** and **relocates §10.1's collab materialisation**
+from server-side/continuous to a *client/quiescent commit*. Cross-world collaborators
+with **no shared filesystem** still get everything: the **git server is the common
+ground** (clone from it), measurements via the data plane, live text via the CRDT relay
+— so "files belong to the user's world" degrades gracefully to "put the bytes on a
+transport everyone can reach," and the hub can *offer* itself as that ground when
+there's no other.
+
 ---
 
 ## 9. Multimodal sources & the media plane
