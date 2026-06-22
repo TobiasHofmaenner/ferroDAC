@@ -2319,8 +2319,11 @@ class MainWindow(QMainWindow):
         if self._docs_view is None:
             return
         p = self._project_mgr.active
-        doc_id = (f"{p.id}::README.md"
-                  if getattr(p, "is_hub", False) and self.hub.connected else None)
+        # collab-eligible if it's a hub project OR a LOCAL working copy of a shared one
+        # (a clone — is_hub is False now, but it's still the same hub doc).
+        on_hub = p is not None and (getattr(p, "is_hub", False)
+                                    or self._project_mgr.is_on_hub(p.id))
+        doc_id = f"{p.id}::README.md" if (on_hub and self.hub.connected) else None
         self._docs_view.set_collab_target(self.hub if doc_id else None, doc_id)
 
     def _lock_chrome(self, editable: bool) -> None:

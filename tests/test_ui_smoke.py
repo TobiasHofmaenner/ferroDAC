@@ -797,6 +797,31 @@ def test_project_git_commit_and_history(qapp):
 
 
 @pytest.mark.ui
+def test_collab_recognises_cloned_hub_project(qapp, tmp_path):
+    """Docs collab must turn on for a LOCAL working copy of a shared project (a clone),
+    not only a ☁ HubProject — the dedup made is_hub False, which used to disable it."""
+    import types
+    pytest.importorskip("qtpy.QtWebEngineWidgets")
+    from ferrodac.core.projects import Project
+    w = _mainwindow(qapp)
+    try:
+        w._ensure_docs_view()
+        rec = {"id": "HUBX", "name": "Shared", "version": 1, "sources": [], "windows": [],
+               "layouts": {}, "deleted": False}
+        w._project_mgr.apply_hub_record(rec)                  # the ☁ cache
+        local = Project(str(tmp_path / "clone"))
+        local.apply_record(rec)
+        w._project_mgr.track(str(tmp_path / "clone"))         # the local working copy
+        w._project_mgr.set_active("HUBX")
+        assert not w._project_mgr.active.is_hub               # it's local now…
+        w.hub._viewer = types.SimpleNamespace(stop=lambda: None)   # pretend connected
+        w._refresh_doc_collab()
+        assert w._docs_view._doc_id == "HUBX::README.md"      # …yet collab is enabled
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_push_on_share(qapp, tmp_path):
     """Sharing commits + (once the hub provisions a repo) pushes the project's content,
     so a collaborator clones the real thing — not an empty repo."""

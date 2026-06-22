@@ -226,3 +226,20 @@ def test_projects_dedup_local_working_copy_over_hub_cache():
     projs = mgr.projects()
     assert len(projs) == 1 and projs[0].is_hub is False     # local working copy wins
     assert mgr.get("X").is_hub is False
+
+
+def test_is_on_hub_recognises_local_working_copy():
+    """A LOCAL clone of a shared project is still 'on the hub' (collab-eligible),
+    even though is_hub is False after the dedup."""
+    d = tempfile.mkdtemp()
+    mgr = ProjectManager(os.path.join(d, "reg.json"), hub_cache_dir=os.path.join(d, "hub"))
+    rec = {"id": "X", "name": "S", "version": 1, "sources": [], "windows": [],
+           "layouts": {}, "deleted": False}
+    mgr.apply_hub_record(rec)
+    assert mgr.is_on_hub("X")
+    local = Project(os.path.join(d, "clone"))
+    local.apply_record(rec)
+    mgr.track(os.path.join(d, "clone"))               # working copy (same id)
+    assert mgr.get("X").is_hub is False               # local copy wins the dedup
+    assert mgr.is_on_hub("X")                          # …but it's still shared on the hub
+    assert not mgr.is_on_hub("nope")

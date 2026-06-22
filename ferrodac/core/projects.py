@@ -429,6 +429,11 @@ class ProjectManager:
         hp = self._hub_by_id.get(pid)
         return getattr(hp, "git_remote", "") if hp is not None else ""
 
+    def is_on_hub(self, pid: str) -> bool:
+        """True if this project is shared on the hub — whether the active copy is the
+        ☁ cache OR a LOCAL working copy (a clone) of the same id (collab-eligible)."""
+        return pid in self._hub_by_id
+
     @property
     def active(self):
         return self.get(self._active)
