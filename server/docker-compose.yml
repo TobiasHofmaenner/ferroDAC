@@ -4,6 +4,16 @@
 #
 # Build context is the repo root (..) so the image can COPY the shared `ferrodac`
 # store engine; the Dockerfile lives here under server/.
+#
+# The `gitea` service is OPTIONAL — the "transparent" git dial (DESIGN §8.2). With it,
+# the hub auto-provisions a repo per project so members never set up git. To enable:
+#   1) docker compose up gitea, open http://localhost:3000, finish first-run install,
+#      create a user `ferrodac`, then an admin/access token for it.
+#   2) put that token in a .env next to this file:  GITEA_TOKEN=<token>
+#      and set GITEA_PUBLIC_URL to an address your CLIENTS can reach (not `gitea:3000`).
+#   3) docker compose up -d  (the hub picks up GITEA_* and switches on the transparent dial).
+# Leave GITEA_TOKEN unset and the hub uses the "native" dial only (users point at their
+# own GitHub/GitLab) — no behaviour change.
 services:
   hub:
     build:
@@ -16,9 +26,33 @@ services:
     environment:
       HUB_GRPC_ADDR: "0.0.0.0:50051"
       HUB_STORE_DIR: "/data/hub.zarr"   # sync target + read tier (§12.1)
+      # transparent git dial (optional — empty GITEA_TOKEN disables it):
+      GITEA_URL: "http://gitea:3000"            # API base (internal docker network)
+      GITEA_PUBLIC_URL: "${GITEA_PUBLIC_URL:-http://localhost:3000}"  # what CLIENTS reach
+      GITEA_TOKEN: "${GITEA_TOKEN:-}"           # an access token for the `ferrodac` user
+      GITEA_ORG: "ferrodac"
+      GITEA_USER: "ferrodac"
     volumes:
       - hub-data:/data         # persist the hub's store across restarts
+    depends_on:
+      - gitea
+    restart: unless-stopped
+
+  gitea:
+    image: gitea/gitea:1.22
+    container_name: ferrodac-gitea
+    environment:
+      GITEA__server__ROOT_URL: "${GITEA_PUBLIC_URL:-http://localhost:3000}/"
+      GITEA__service__DISABLE_REGISTRATION: "true"   # closed: the hub/operator manage users
+      USER_UID: "1000"
+      USER_GID: "1000"
+    volumes:
+      - gitea-data:/data
+    ports:
+      - "3000:3000"            # web UI + HTTP(S) git
+      - "2222:22"              # SSH git (optional)
     restart: unless-stopped
 
 volumes:
   hub-data:
+  gitea-data:

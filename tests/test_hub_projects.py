@@ -99,3 +99,55 @@ def test_no_dir_is_in_memory_only():
     h = Hub()                                    # no projects_dir configured
     assert h.publish_project(_rec("x", "ram", version=1))
     assert len(h.project_snapshot()) == 1        # works in RAM, just not persisted
+
+
+def test_gitea_provision_creates_repo_and_authed_url():
+    """The provisioner ensures the org+repo and returns a token-authed PUBLIC URL."""
+    import urllib.error
+    from hub.gitea import GiteaProvisioner
+    g = GiteaProvisioner("http://gitea:3000", "tok123", org="ferrodac", user="ferrodac",
+                         public_url="https://git.example.com")
+    calls = []
+
+    def fake_api(method, path, body=None):
+        calls.append((method, path, body))
+        if method == "GET" and path.startswith("/repos/"):
+            raise urllib.error.HTTPError(path, 404, "nf", None, None)
+        return 201, {}
+
+    g._api = fake_api
+    url = g.provision("proj-1")
+    assert ("POST", "/orgs", {"username": "ferrodac"}) in calls
+    assert ("POST", "/orgs/ferrodac/repos",
+            {"name": "proj-1", "private": True, "auto_init": False}) in calls
+    assert url == "https://ferrodac:tok123@git.example.com/ferrodac/proj-1.git"
+
+
+def test_gitea_provision_is_defensive():
+    from hub.gitea import GiteaProvisioner
+    g = GiteaProvisioner("http://gitea:3000", "t")
+
+    def boom(*a, **k):
+        raise RuntimeError("gitea down")
+
+    g._api = boom
+    assert g.provision("x") == ""          # any failure → "" (hub leaves git_remote unset)
+
+
+def test_hub_provisions_git_remote_once(tmp_path):
+    """The transparent dial: a project with no remote gets one provisioned (once)."""
+    class FakeGitea:
+        def __init__(self):
+            self.calls = []
+
+        def provision(self, pid):
+            self.calls.append(pid)
+            return f"https://t@git/{pid}.git"
+
+    hub = Hub(projects_dir=str(tmp_path / "p"), gitea=FakeGitea())
+    assert hub.publish_project(_rec("P1", "Proj", version=1))
+    assert hub._projects["P1"].git_remote == "https://t@git/P1.git"
+    rec2 = _rec("P1", "Proj", version=2)
+    rec2.git_remote = "https://t@git/P1.git"        # already carries a remote
+    assert hub.publish_project(rec2)
+    assert hub.gitea.calls == ["P1"]                # provisioned exactly once

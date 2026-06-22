@@ -91,7 +91,8 @@ class DocRoom:
 
 class Hub:
     def __init__(self, tags_path: "str | None" = None,
-                 projects_dir: "str | None" = None) -> None:
+                 projects_dir: "str | None" = None, gitea=None) -> None:
+        self.gitea = gitea                          # transparent dial: auto-provision repos
         self._devices: dict[str, pb.DeviceDescriptor] = {}
         self._subs: set[Subscriber] = set()
         self._watchers: set[asyncio.Queue] = set()
@@ -324,6 +325,13 @@ class Hub:
         if cur is not None and project.version == cur.version \
                 and not project.deleted and not cur.deleted:
             return False                         # idempotent same-version upsert
+        # transparent dial: the first time we see a project with no remote, provision a
+        # git repo in the bundled Gitea and carry its URL into the stored + fanned-out
+        # record, so every member gets a clone URL without setting up git themselves.
+        if (not project.deleted and self.gitea is not None and not project.git_remote):
+            url = self.gitea.provision(project.id)
+            if url:
+                project.git_remote = url
         self._projects[project.id] = project
         if project.deleted:
             self._remove_project_folder(project.id)

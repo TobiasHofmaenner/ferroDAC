@@ -83,8 +83,23 @@ def _projects_dir():
         if store_dir else None
 
 
+def _gitea():
+    """Transparent dial (DESIGN §8.2): if a bundled Gitea is configured, the hub
+    auto-provisions a repo per project. Off unless GITEA_URL + GITEA_TOKEN are set."""
+    url = os.environ.get("GITEA_URL")
+    token = os.environ.get("GITEA_TOKEN")
+    if not url or not token:
+        return None
+    from .gitea import GiteaProvisioner
+    g = GiteaProvisioner(url, token, org=os.environ.get("GITEA_ORG", "ferrodac"),
+                         user=os.environ.get("GITEA_USER", "ferrodac"),
+                         public_url=os.environ.get("GITEA_PUBLIC_URL"))
+    log.info("transparent git: provisioning repos in Gitea at %s (org %s)", url, g.org)
+    return g
+
+
 async def serve() -> None:
-    hub = Hub(tags_path=_tags_path(), projects_dir=_projects_dir())
+    hub = Hub(tags_path=_tags_path(), projects_dir=_projects_dir(), gitea=_gitea())
     server, _ = build_server(hub=hub, store=_open_store(os.environ.get("HUB_STORE_DIR")))
     addr = os.environ.get("HUB_GRPC_ADDR", "0.0.0.0:50051")
     server.add_insecure_port(addr)
