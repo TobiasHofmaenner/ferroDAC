@@ -62,9 +62,11 @@ let bridge = null;
 let editor = null;
 let docDir = "";          // the open doc's folder — resolves relative image links
 let recordingsCache = [];               // [{id,label,t0,t1}] — the /rec macro's choices
-let pendingRec = null;                  // a just-picked recording id (drives stage 2)
-const exportResults = new Map();        // recId → [{name,relpath,kind}] (exported files)
-const exportWaiters = new Map();        // recId → [resolve…] awaiting the export
+let pendingRec = null;                  // {id, mode:"list"|"export"} — drives stage 2
+const existingResults = new Map();      // recId → files ALREADY exported (fast scan)
+const existingWaiters = new Map();
+const exportResults = new Map();        // recId → files from a fresh export-now
+const exportWaiters = new Map();
 let mode = "read";        // read | edit | split
 let lastSynced = "";      // the text the file currently holds (per our knowledge)
 let saveTimer = null;
@@ -209,13 +211,20 @@ function status(s) {
 // ── editor macros: `/rec` → recording → plot/CSV → insert markdown ──────────
 // Exports are on-demand: picking a recording asks Qt to materialise its CSV+plots
 // (into the project's reports/), then we offer those files as the next completions.
-function waitForExport(recId) {
-  if (exportResults.has(recId)) return Promise.resolve(exportResults.get(recId));
+function waitMap(results, waiters, id) {        // resolve from cache or await the signal
+  if (results.has(id)) return Promise.resolve(results.get(id));
   return new Promise((resolve) => {
-    const ws = exportWaiters.get(recId) || [];
+    const ws = waiters.get(id) || [];
     ws.push(resolve);
-    exportWaiters.set(recId, ws);
+    waiters.set(id, ws);
   });
+}
+
+function resolveMap(results, waiters, id, files) {
+  results.set(id, files);
+  const ws = waiters.get(id);
+  waiters.delete(id);
+  if (ws) ws.forEach((r) => r(files));
 }
 
 function spanLabel(rec) {
@@ -229,24 +238,41 @@ function refMarkdown(f) {                      // image embed for plots, plain l
   return f.kind === "plot" ? `![${f.name}](${f.relpath})` : `[${f.name}](${f.relpath})`;
 }
 
-// A single CM6 completion source driving the whole cascade via `pendingRec` state.
+function fileOption(f) {                        // a completion that inserts one file's link
+  return {
+    label: f.name, detail: f.kind,
+    type: f.kind === "plot" ? "text" : "string",
+    apply: (v, c, from, to) =>
+      v.dispatch({ changes: { from, to, insert: refMarkdown(f) } }),
+  };
+}
+
+// A single CM6 completion source driving the whole cascade via `pendingRec` state:
+//   /rec → recordings → (existing files + Export-now) → [fresh files] → insert.
 function slashSource(context) {
-  // Stage 2 — a recording was just picked: offer its exported files (async; the
-  // export may still be running). Clearing pendingRec up front keeps it transient.
+  // Stage 2 — a recording was picked. Clearing pendingRec up front keeps it transient.
   if (pendingRec) {
-    const recId = pendingRec;
+    const { id, mode } = pendingRec;
     pendingRec = null;
-    return waitForExport(recId).then((files) => {
-      if (!files || !files.length) return null;
-      return {
-        from: context.pos, filter: false,
-        options: files.map((f) => ({
-          label: f.name, detail: f.kind,
-          type: f.kind === "plot" ? "text" : "string",
-          apply: (v, c, from, to) =>
-            v.dispatch({ changes: { from, to, insert: refMarkdown(f) } }),
-        })),
-      };
+    if (mode === "export") {                   // awaited a fresh export → pick a file
+      return waitMap(exportResults, exportWaiters, id).then((files) => {
+        if (!files || !files.length) return null;
+        return { from: context.pos, filter: false, options: files.map(fileOption) };
+      });
+    }
+    // mode "list" — already-exported files, plus an Export-now option
+    return waitMap(existingResults, existingWaiters, id).then((files) => {
+      const options = (files || []).map(fileOption);
+      options.push({
+        label: "⟳ Export now", detail: "render fresh", type: "keyword",
+        apply: (v) => {
+          pendingRec = { id, mode: "export" };
+          exportResults.delete(id);            // force a fresh await
+          if (bridge) bridge.requestRecordingExport(id);
+          startCompletion(v);                  // → stage 2 (export)
+        },
+      });
+      return { from: context.pos, filter: false, options };
     });
   }
   // Stage 1 — `/rec` offers the recordings.
@@ -261,9 +287,10 @@ function slashSource(context) {
       label: "rec: " + rec.label, detail: spanLabel(rec), type: "function",
       apply: (v, c, from, to) => {
         v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/rec`
-        pendingRec = rec.id;
-        if (bridge) bridge.requestRecordingExport(rec.id);    // materialise on demand
-        startCompletion(v);                                    // → stage 2
+        pendingRec = { id: rec.id, mode: "list" };
+        existingResults.delete(rec.id);                       // re-scan fresh
+        if (bridge) bridge.requestRecordingExports(rec.id);   // list existing exports
+        startCompletion(v);                                    // → stage 2 (list)
       },
     })),
   };
@@ -453,13 +480,14 @@ function connect() {
     bridge.recordingsAvailable.connect((j) => {
       try { recordingsCache = JSON.parse(j) || []; } catch (e) { recordingsCache = []; }
     });
-    bridge.recordingExported.connect((recId, j) => {
-      let files = [];
-      try { files = JSON.parse(j) || []; } catch (e) { /* none */ }
-      exportResults.set(recId, files);
-      const ws = exportWaiters.get(recId);
-      exportWaiters.delete(recId);
-      if (ws) ws.forEach((r) => r(files));
+    bridge.recordingExports.connect((recId, j) => {        // already-exported files
+      let files = []; try { files = JSON.parse(j) || []; } catch (e) { /* none */ }
+      resolveMap(existingResults, existingWaiters, recId, files);
+    });
+    bridge.recordingExported.connect((recId, j) => {       // a fresh export-now
+      let files = []; try { files = JSON.parse(j) || []; } catch (e) { /* none */ }
+      existingResults.set(recId, files);                  // it now "exists" too
+      resolveMap(exportResults, exportWaiters, recId, files);
     });
     bridge.collabSeed.connect(enterCollab);
     bridge.collabUpdate.connect((b64) => {
@@ -504,10 +532,21 @@ window.__doc = {
                       selection: { anchor: L + 6 } });
     startCompletion(editor);
   },
-  // drive the full export→insert flow for a recording (without the dropdown UI)
+  // compute the stage-2 (list) menu for a recording → result in __doc._lastLabels
+  stage2Labels: (recId) => {
+    window.__doc._lastLabels = null;
+    existingResults.delete(recId);
+    if (bridge) bridge.requestRecordingExports(recId);
+    waitMap(existingResults, existingWaiters, recId).then((files) => {
+      const labels = (files || []).map((f) => f.name);
+      labels.push("⟳ Export now");
+      window.__doc._lastLabels = labels;
+    });
+  },
+  // drive a fresh export→insert flow for a recording (without the dropdown UI)
   insertFirstPlot: async (recId) => {
     if (bridge) bridge.requestRecordingExport(recId);
-    const files = await waitForExport(recId);
+    const files = await waitMap(exportResults, exportWaiters, recId);
     const f = files.find((x) => x.kind === "plot") || files[0];
     if (!f || !editor) return null;
     editor.dispatch(

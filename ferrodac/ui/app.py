@@ -2189,7 +2189,8 @@ class MainWindow(QMainWindow):
         self._docs_view = DocView(on_edit=self._open_doc_external,
                                   on_configure=self._configure_editor,
                                   on_list_recordings=self._list_recordings,
-                                  on_export_recording=self._export_recording_for_doc)
+                                  on_export_recording=self._export_recording_for_doc,
+                                  on_list_recording_exports=self._list_recording_exports)
         self.docs_dock.setWidget(self._docs_view)
         self._open_active_doc()
 
@@ -2240,7 +2241,8 @@ class MainWindow(QMainWindow):
         for panel in self.dashboard.panels():
             if hasattr(panel, "set_doc_macros"):
                 panel.set_doc_macros(self._list_recordings,
-                                     self._export_recording_for_doc)
+                                     self._export_recording_for_doc,
+                                     self._list_recording_exports)
 
     def _active_readme(self) -> str | None:
         """The active project's README.md path, bootstrapping a starter if missing."""
@@ -2722,23 +2724,36 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"Exported {n} source(s) → {dest}", 8000)
 
-    def _export_plots(self, _mid=None):
-        folder = QFileDialog.getExistingDirectory(self, "Export plots to folder")
-        if not folder:
+    def _export_plots(self, mid=None):
+        """The rec-card 🖼 Plots button: render THIS recording's charts (through the
+        processors, via the shared park+ImageExporter helper) into the canonical
+        reports/<run>/plots/ — so the /rec macro finds them — and ALSO copy them to a
+        folder of your choosing. One render, two homes."""
+        m = self.dashboard.markers.get(mid) if mid else None
+        if m is None or m.t_end is None:
+            self.statusBar().showMessage("Select a finished recording to export.", 6000)
             return
-        charts = [p for p in self.dashboard._panels.values()
-                  if getattr(p, "plot", None) is not None]
-        for p in charts:                       # keep the record overlay out of exports
-            if hasattr(p, "set_regions_visible"):
-                p.set_regions_visible(False)
-        n = 0
-        for p in charts:
-            p.plot.grab().save(os.path.join(folder, f"{p.panel_id}.png"))
-            n += 1
-        for p in charts:
-            if hasattr(p, "set_regions_visible"):
-                p.set_regions_visible(True)
-        self.statusBar().showMessage(f"Exported {n} plot(s) → {folder}", 6000)
+        dest = self._recording_run_dir(m)
+        if dest is None:
+            self.statusBar().showMessage("No active project — can't export plots.", 6000)
+            return
+        files = self._render_recording_plots(mid, os.path.join(dest, "plots"))
+        if not files:
+            self.statusBar().showMessage("No charts to export (or the window is empty).", 6000)
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Also save a copy to…")
+        extra = 0
+        if folder:
+            import shutil
+            for f in files:
+                try:
+                    shutil.copy2(f["abspath"], os.path.join(folder, os.path.basename(f["abspath"])))
+                    extra += 1
+                except Exception:              # noqa: BLE001
+                    pass
+        tail = f" (+ copy → {folder})" if extra else ""
+        self.statusBar().showMessage(
+            f"Exported {len(files)} plot(s) → project reports{tail}", 7000)
 
     # -- editor /rec macro: list recordings + export one on demand -----------
     def _list_recordings(self) -> list:
@@ -2751,20 +2766,103 @@ class MainWindow(QMainWindow):
                         "t0": float(m.t), "t1": float(m.t_end)})
         return out
 
-    def _export_recording_for_doc(self, rec_id: str) -> list:
-        """On-demand export (CSV + windowed plots) of a recording into the ACTIVE
-        project's reports/<run>/, for the /rec macro. Returns [{name, abspath, kind}];
-        reuses a prior export (marker.run_dir) when present."""
+    def _recording_run_dir(self, m, create: bool = True):
+        """The canonical reports/<run>/ folder for a recording — shared by the CSV
+        and plot exports (and the /rec macro) so a recording's artifacts land together.
+        Reuses the marker's run_dir if set; else derives <label>_<stamp> under the
+        active project and remembers it on the marker."""
         p = self._project_mgr.active
-        m = self.dashboard.markers.get(rec_id)
-        if p is None or m is None or m.t_end is None or self.resolver is None:
-            return []
+        if p is None:
+            return None
         dest = m.run_dir if (m.run_dir and os.path.isdir(m.run_dir)) else None
         if dest is None:
             label = re.sub(r"[^\w.-]", "_", m.label or "recording").strip("_") or "recording"
             stamp = time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(m.t))
             dest = os.path.join(p.reports_dir, f"{label}_{stamp}")
-        os.makedirs(dest, exist_ok=True)
+        if create:
+            os.makedirs(dest, exist_ok=True)
+            if m.run_dir != dest:
+                try:
+                    self.dashboard.markers.update(m.id, run_dir=dest)
+                except Exception:                  # noqa: BLE001
+                    pass
+        return dest
+
+    def _render_recording_plots(self, rec_id: str, dest_dir: str, spec=None) -> list:
+        """Render a recording's charts to PNGs via the REAL pipeline so the dataflow
+        PROCESSORS apply (charts aren't raw Zarr): park the timeline on the recording —
+        re-streaming the slice through the processor graph into the panels — then
+        ImageExporter the populated plots at the configured resolution (off-screen,
+        independent of on-screen size), and restore the prior view. A deliberate,
+        progress-pumped action. Returns [{name, abspath, kind}]."""
+        from qtpy.QtWidgets import QApplication
+        from qtpy.QtCore import Qt
+        from pyqtgraph.exporters import ImageExporter
+        m = self.dashboard.markers.get(rec_id)
+        if m is None or m.t_end is None:
+            return []
+        charts = [p for p in self.dashboard.panels()
+                  if getattr(p, "plot", None) is not None]
+        if not charts:
+            return []
+        spec = spec or {}
+        width, height = int(spec.get("width", 1600)), int(spec.get("height", 0))
+        os.makedirs(dest_dir, exist_ok=True)
+        tc = self.time_context
+        was_following = tc.following if tc is not None else False
+        prev = tc.window if tc is not None else None
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.statusBar().showMessage("Rendering recording plots…")
+        out = []
+        try:
+            for p in charts:                       # clean figures — no record overlay
+                if hasattr(p, "set_regions_visible"):
+                    p.set_regions_visible(False)
+            if tc is not None:                     # ← LOADS the slice through processors
+                tc.park_window(m.t, m.t_end)
+            self.dashboard.zoom_to(m.t, m.t_end)
+            QApplication.processEvents()           # flush the re-stream + repaint
+            for p in charts:
+                pi = getattr(p.plot, "plotItem", None)
+                if pi is None and hasattr(p.plot, "getPlotItem"):
+                    pi = p.plot.getPlotItem()
+                if pi is None:
+                    continue
+                png = os.path.join(dest_dir, f"{p.panel_id}.png")
+                try:
+                    exporter = ImageExporter(pi)
+                    exporter.parameters()["width"] = width
+                    if height > 0:
+                        exporter.parameters()["height"] = height
+                    exporter.export(png)
+                    if os.path.exists(png):
+                        out.append({"name": getattr(p, "title", "") or p.panel_id,
+                                    "abspath": png, "kind": "plot"})
+                except Exception:                  # noqa: BLE001 — skip a bad panel
+                    pass
+        finally:
+            for p in charts:
+                if hasattr(p, "set_regions_visible"):
+                    p.set_regions_visible(True)
+            if tc is not None:                     # put the user back where they were
+                if was_following:
+                    tc.follow_now()
+                elif prev is not None:
+                    tc.park_window(*prev)
+                    self.dashboard.zoom_to(*prev)
+            QApplication.restoreOverrideCursor()
+            self.statusBar().clearMessage()
+        return out
+
+    def _export_recording_for_doc(self, rec_id: str) -> list:
+        """Export-NOW for the /rec macro: render the recording's CSV + plots fresh into
+        the canonical reports/<run>/. Returns [{name, abspath, kind}]."""
+        m = self.dashboard.markers.get(rec_id)
+        if m is None or m.t_end is None or self.resolver is None:
+            return []
+        dest = self._recording_run_dir(m)
+        if dest is None:
+            return []
         files = []
         from ..store import export_window
         try:
@@ -2775,42 +2873,31 @@ class MainWindow(QMainWindow):
                 files.append({"name": "data.csv", "abspath": csv, "kind": "csv"})
         except Exception:                          # noqa: BLE001
             pass
-        plots_dir = os.path.join(dest, "plots")
-        os.makedirs(plots_dir, exist_ok=True)
-        files += self._grab_recording_plots(plots_dir, m.t, m.t_end)
-        try:
-            self.dashboard.markers.update(rec_id, run_dir=dest)
-        except Exception:                          # noqa: BLE001
-            pass
+        files += self._render_recording_plots(rec_id, os.path.join(dest, "plots"))
         return files
 
-    def _grab_recording_plots(self, plots_dir: str, t0: float, t1: float) -> list:
-        """Render each chart zoomed to [t0,t1] → PNG (reuse of _export_plots' grab),
-        restoring the live view afterward. Returns [{name, abspath, kind}]."""
-        from qtpy.QtWidgets import QApplication
-        charts = [p for p in self.dashboard.panels()
-                  if getattr(p, "plot", None) is not None]
-        prev = self.time_context.window if self.time_context is not None else None
-        for p in charts:
-            if hasattr(p, "set_regions_visible"):
-                p.set_regions_visible(False)
-            if hasattr(p, "zoom_time"):
-                p.zoom_time(t0, t1)
-        QApplication.processEvents()               # let the plots repaint before grabbing
+    def _list_recording_exports(self, rec_id: str) -> list:
+        """The recording's ALREADY-exported files (the /rec macro lists these first,
+        before offering Export-now). Scans the canonical reports/<run>/."""
+        m = self.dashboard.markers.get(rec_id)
+        if m is None:
+            return []
+        dest = self._recording_run_dir(m, create=False)
+        if not dest or not os.path.isdir(dest):
+            return []
+        titles = {p.panel_id: (getattr(p, "title", "") or p.panel_id)
+                  for p in self.dashboard.panels()}
         out = []
-        for p in charts:
-            try:
-                png = os.path.join(plots_dir, f"{p.panel_id}.png")
-                p.plot.grab().save(png)
-                out.append({"name": getattr(p, "title", "") or p.panel_id,
-                            "abspath": png, "kind": "plot"})
-            except Exception:                      # noqa: BLE001
-                pass
-        for p in charts:                           # restore overlays + the live window
-            if hasattr(p, "set_regions_visible"):
-                p.set_regions_visible(True)
-            if prev is not None and hasattr(p, "zoom_time"):
-                p.zoom_time(prev[0], prev[1])
+        csv = os.path.join(dest, "data.csv")
+        if os.path.exists(csv):
+            out.append({"name": "data.csv", "abspath": csv, "kind": "csv"})
+        plots = os.path.join(dest, "plots")
+        if os.path.isdir(plots):
+            for fn in sorted(os.listdir(plots)):
+                if fn.lower().endswith(".png"):
+                    stem = os.path.splitext(fn)[0]
+                    out.append({"name": titles.get(stem, stem),
+                                "abspath": os.path.join(plots, fn), "kind": "plot"})
         return out
 
     def _toggle_record(self):

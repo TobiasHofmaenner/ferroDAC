@@ -225,7 +225,8 @@ def test_macro_bridge_recordings_and_export(qapp):
     recs = [{"id": "rec1", "label": "Bakeout", "t0": 1.0, "t1": 2.0}]
     exp = [{"name": "Pressure", "abspath": png, "kind": "plot"}]
     dv = DocView(on_list_recordings=lambda: recs,
-                 on_export_recording=lambda rid: exp if rid == "rec1" else [])
+                 on_export_recording=lambda rid: exp if rid == "rec1" else [],
+                 on_list_recording_exports=lambda rid: exp if rid == "rec1" else [])
     dv.resize(640, 420)
     try:
         dv.open(doc)
@@ -245,6 +246,14 @@ def test_macro_bridge_recordings_and_export(qapp):
         assert rid == "rec1"
         assert files[0]["relpath"] == "reports/run1/plots/chart-1.png"
         assert files[0]["name"] == "Pressure" and files[0]["kind"] == "plot"
+
+        existing = []                                    # list-existing path
+        dv.bridge.recordingExports.connect(lambda rid, j: existing.append((rid, j)))
+        dv.bridge.requestRecordingExports("rec1")
+        assert _pump(qapp, lambda: bool(existing))
+        rid2, j2 = existing[-1]
+        assert rid2 == "rec1"
+        assert json.loads(j2)[0]["relpath"] == "reports/run1/plots/chart-1.png"
     finally:
         dv.deleteLater()
 
@@ -285,6 +294,41 @@ def test_slash_macro_lists_and_inserts(qapp):
         assert "<img" in html and "file://" in html and "c1.png" in html, html[:300]
         txt = _js(qapp, dv.view, "window.__doc.text()")
         assert "![Pressure](reports/run1/plots/c1.png)" in txt, txt
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
+def test_slash_macro_lists_existing_and_export_now(qapp):
+    """Picking a recording shows its ALREADY-exported files plus an 'Export now' item."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    run = os.path.join(d, "reports", "run1", "plots")
+    os.makedirs(run, exist_ok=True)
+    png = os.path.join(run, "c1.png")
+    with open(png, "wb") as fh:
+        fh.write(b"\x89PNG\r\n")
+    recs = [{"id": "rec1", "label": "Bakeout", "t0": 1.0, "t1": 2.0}]
+    existing = [{"name": "Pressure", "abspath": png, "kind": "plot"}]
+    dv = DocView(on_list_recordings=lambda: recs,
+                 on_export_recording=lambda rid: [],
+                 on_list_recording_exports=lambda rid: existing if rid == "rec1" else [])
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        dv.view.page().runJavaScript("window.__doc.stage2Labels('rec1')")
+        # read via JSON.stringify — runJavaScript mangles a raw array with the ⟳ glyph
+        assert _pump(qapp, lambda: _js(
+            qapp, dv.view, "window.__doc._lastLabels !== null") is True)
+        import json
+        raw = _js(qapp, dv.view, "JSON.stringify(window.__doc._lastLabels)")
+        labels = json.loads(raw) if raw else []
+        assert "Pressure" in labels, labels
+        assert any("Export now" in t for t in labels), labels
     finally:
         dv.deleteLater()
 

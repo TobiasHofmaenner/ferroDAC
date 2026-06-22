@@ -115,10 +115,12 @@ class DocBridge(QObject):
 
     # Editor macros (/rec): list recordings + export one on demand. Qt → JS:
     recordingsAvailable = Signal(str)    # (json [{id, label, t0, t1}])
-    recordingExported = Signal(str, str)  # (rec_id, json [{name, relpath, kind}])
+    recordingExports = Signal(str, str)  # (rec_id, json) — files ALREADY exported
+    recordingExported = Signal(str, str)  # (rec_id, json) — files from a fresh export-now
     # JS → Qt (re-emitted by the slots below; DocView forwards to the app):
     recordingsRequested = Signal()
-    exportRequested = Signal(str)        # (rec_id)
+    exportsRequested = Signal(str)       # (rec_id) — list existing
+    exportRequested = Signal(str)        # (rec_id) — render fresh (export now)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -147,8 +149,12 @@ class DocBridge(QObject):
         self.recordingsRequested.emit()
 
     @Slot(str)
+    def requestRecordingExports(self, rec_id: str) -> None:
+        self.exportsRequested.emit(rec_id)        # list already-exported files
+
+    @Slot(str)
     def requestRecordingExport(self, rec_id: str) -> None:
-        self.exportRequested.emit(rec_id)
+        self.exportRequested.emit(rec_id)         # render a fresh export now
 
     # -- collaboration: JS → Qt (thin re-emit; DocView forwards to the hub) --
     @Slot()
@@ -177,7 +183,8 @@ class DocView(QWidget):
     is just another writer the watcher catches."""
 
     def __init__(self, on_edit=None, on_configure=None, parent=None,
-                 on_list_recordings=None, on_export_recording=None):
+                 on_list_recordings=None, on_export_recording=None,
+                 on_list_recording_exports=None):
         super().__init__(parent)
         self._path = None                # absolute path of the open doc
         self._dir = None                 # its folder (watched too — atomic-save safe)
@@ -185,7 +192,8 @@ class DocView(QWidget):
         self._on_edit = on_edit          # optional override callable(path)
         self._on_configure = on_configure  # optional override callable()
         self._on_list_recordings = on_list_recordings   # () -> [{id,label,t0,t1}]
-        self._on_export_recording = on_export_recording  # (rec_id) -> [{name,abspath,kind}]
+        self._on_export_recording = on_export_recording  # (rec_id) -> fresh [{name,abspath,kind}]
+        self._on_list_recording_exports = on_list_recording_exports  # (rec_id) -> existing
         self._collab = None              # a HubController, when a hub+doc is available
         self._doc_id = None              # "<project_id>::<relpath>" for collaboration
         self._collab_on = False          # currently in a live session?
@@ -251,6 +259,7 @@ class DocView(QWidget):
         self.bridge.snapshotRequested.connect(self._collab_send_snapshot)
         self.bridge.leaveRequested.connect(self._stop_collab)
         self.bridge.recordingsRequested.connect(self._push_recordings)
+        self.bridge.exportsRequested.connect(self._list_recording_exports)
         self.bridge.exportRequested.connect(self._export_recording)
         self._channel = QWebChannel(self)
         self._channel.registerObject("bridge", self.bridge)
@@ -344,7 +353,8 @@ class DocView(QWidget):
         win = DocView(on_edit=self._on_edit, on_configure=self._on_configure,
                       parent=self.window(),
                       on_list_recordings=self._on_list_recordings,
-                      on_export_recording=self._on_export_recording)
+                      on_export_recording=self._on_export_recording,
+                      on_list_recording_exports=self._on_list_recording_exports)
         win.setWindowFlag(Qt.Window, True)              # owned, but its own OS window
         win.setAttribute(Qt.WA_DeleteOnClose, True)
         win.setWindowTitle(f"{os.path.basename(self._path)} — ferroDAC")
@@ -405,11 +415,13 @@ class DocView(QWidget):
             self._start_collab()
 
     # -- editor macros (/rec): list recordings + export one on demand --------
-    def set_macros(self, on_list_recordings, on_export_recording) -> None:
+    def set_macros(self, on_list_recordings, on_export_recording,
+                   on_list_recording_exports=None) -> None:
         """Wire the /rec macro to the app's services (used by doc panels created via
         the Add menu or a layout, which can't get the callbacks at construction)."""
         self._on_list_recordings = on_list_recordings
         self._on_export_recording = on_export_recording
+        self._on_list_recording_exports = on_list_recording_exports
         if self._js_ready:                    # warm the cache if the page is already up
             self._push_recordings()
 
@@ -423,29 +435,44 @@ class DocView(QWidget):
             recs = []
         self.bridge.recordingsAvailable.emit(json.dumps(recs))
 
-    def _export_recording(self, rec_id: str) -> None:
-        """Export a recording on demand (via the app callback) and hand the JS the
-        resulting files with paths RELATIVE to the open doc (portable in-repo links)."""
+    def _emit_files(self, signal, rec_id: str, raw) -> None:
+        """Hand the JS a recording's files with paths RELATIVE to the open doc
+        (portable in-repo links)."""
         import json
         files = []
         base = self._dir or os.getcwd()
+        for f in (raw or []):
+            ap = f.get("abspath")
+            if not ap:
+                continue
+            try:
+                rel = os.path.relpath(ap, base)
+            except Exception:                 # noqa: BLE001 — e.g. different drive (Windows)
+                rel = ap
+            files.append({"name": f.get("name") or os.path.basename(ap),
+                          "relpath": rel.replace(os.sep, "/"),
+                          "kind": f.get("kind", "plot")})
+        signal.emit(rec_id, json.dumps(files))
+
+    def _list_recording_exports(self, rec_id: str) -> None:
+        """The recording's ALREADY-exported files (what the macro lists first)."""
+        raw = []
+        if self._on_list_recording_exports is not None:
+            try:
+                raw = self._on_list_recording_exports(rec_id) or []
+            except Exception:                 # noqa: BLE001
+                raw = []
+        self._emit_files(self.bridge.recordingExports, rec_id, raw)
+
+    def _export_recording(self, rec_id: str) -> None:
+        """Render a FRESH export now (the macro's Export-now option)."""
+        raw = []
         if self._on_export_recording is not None:
             try:
                 raw = self._on_export_recording(rec_id) or []
             except Exception:                 # noqa: BLE001
                 raw = []
-            for f in raw:
-                ap = f.get("abspath")
-                if not ap:
-                    continue
-                try:
-                    rel = os.path.relpath(ap, base)
-                except Exception:             # noqa: BLE001 — e.g. different drive (Windows)
-                    rel = ap
-                files.append({"name": f.get("name") or os.path.basename(ap),
-                              "relpath": rel.replace(os.sep, "/"),
-                              "kind": f.get("kind", "plot")})
-        self.bridge.recordingExported.emit(rec_id, json.dumps(files))
+        self._emit_files(self.bridge.recordingExported, rec_id, raw)
 
     def start_collab(self) -> None:
         """Join the collab session — DEFERRING until the JS bridge handshake completes
