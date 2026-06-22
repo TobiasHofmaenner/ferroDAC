@@ -1942,6 +1942,13 @@ class MainWindow(QMainWindow):
         self._autosave_timer.setInterval(1500)
         self._autosave_timer.timeout.connect(self._do_autosave)
         self.dashboard.ports_changed.connect(self._schedule_autosave)
+        # project git history (DESIGN §8.2): boundary commits are immediate; doc edits
+        # debounce through this timer so a burst of edits → one "settled" commit.
+        self._commit_timer = QTimer(self)
+        self._commit_timer.setSingleShot(True)
+        self._commit_timer.setInterval(15000)
+        self._commit_timer.timeout.connect(self._do_scheduled_commit)
+        self._pending_commit_msg = "Edited documents"
         # tags are GLOBAL — autosaved to tags.json on any change (own debounce)
         self._tag_save_timer = QTimer(self)
         self._tag_save_timer.setSingleShot(True)
@@ -2101,6 +2108,10 @@ class MainWindow(QMainWindow):
         filemenu.addAction("Add Layout…", self._on_add_layout)
         filemenu.addAction("Open Layout…", self._on_open)
 
+        projmenu = self.menuBar().addMenu("&Project")
+        projmenu.addAction("Checkpoint…", self._checkpoint)
+        projmenu.addAction("History…", self._open_history)
+
         view = self.menuBar().addMenu("&View")
         view.addAction(self.projects_dock.toggleViewAction())
         view.addAction(self.explorer_dock.toggleViewAction())
@@ -2208,7 +2219,9 @@ class MainWindow(QMainWindow):
                                   on_export_recording=self._export_recording_for_doc,
                                   on_list_recording_exports=self._list_recording_exports,
                                   on_list_processors=self._list_processors,
-                                  on_processor_source=self._processor_source)
+                                  on_processor_source=self._processor_source,
+                                  on_saved=lambda: self._schedule_project_commit(
+                                      "Edited documents"))
         self.docs_dock.setWidget(self._docs_view)
         self._open_active_doc()
 
@@ -3048,6 +3061,7 @@ class MainWindow(QMainWindow):
         self.dashboard.markers.update(mid, run_dir=dest, comment=f"{n} sources")
         self._refresh_explorer()                   # the new recording card shows up
         self.statusBar().showMessage(f"■ Saved recording: {n} source(s) → {dest}", 8000)
+        self._commit_project(f"Recorded {os.path.basename(dest)}")   # §8.2 boundary commit
 
     def _recover_open_recordings(self) -> None:
         """A recording interrupted by a crash survives as an OPEN REC marker
@@ -3238,6 +3252,52 @@ class MainWindow(QMainWindow):
         self.open_session(path)
         self._refresh_explorer()                   # mark the active layout
 
+    # -- project git history (DESIGN §8.2) -----------------------------------
+    def _project_repo(self):
+        from ..core.projectgit import ProjectRepo
+        p = self._project_mgr.active
+        return ProjectRepo(p.path) if p is not None else None
+
+    def _commit_project(self, message: str) -> None:
+        """Commit the active project's folder at a boundary (recording, layout,
+        checkpoint). Best-effort — never blocks or raises into the UI."""
+        repo = self._project_repo()
+        if repo is None:
+            return
+        sha = repo.commit(message)
+        if sha:
+            self.statusBar().showMessage(f"✔ {message}  ({sha[:8]})", 4000)
+            if getattr(self, "_history_dialog", None) is not None:
+                self._history_dialog.refresh()
+
+    def _schedule_project_commit(self, message: str) -> None:
+        """Debounced commit for churny sources (doc edits) — coalesces a burst."""
+        self._pending_commit_msg = message
+        self._commit_timer.start()
+
+    def _do_scheduled_commit(self) -> None:
+        self._commit_project(self._pending_commit_msg)
+
+    def _checkpoint(self) -> None:
+        """Project ▸ Checkpoint… — a manual, named commit of the project's state."""
+        if self._project_mgr.active is None:
+            return
+        msg, ok = QInputDialog.getText(self, "Checkpoint",
+                                       "Describe this checkpoint:", text="Checkpoint")
+        if ok:
+            self._commit_project(msg.strip() or "Checkpoint")
+
+    def _open_history(self) -> None:
+        from .history_view import HistoryDialog
+        repo = self._project_repo()
+        if repo is None:
+            self.statusBar().showMessage("No active project.", 4000)
+            return
+        self._history_dialog = HistoryDialog(repo, self._project_mgr.active.name, self)
+        self._history_dialog.finished.connect(
+            lambda _=0: setattr(self, "_history_dialog", None))
+        self._history_dialog.show()
+
     def _on_add_layout(self):
         """Create a new named layout in the project's layouts/ — name it, the file
         is made for you (no file picker), and it becomes the live, autosaving one."""
@@ -3260,6 +3320,7 @@ class MainWindow(QMainWindow):
         self._refresh_explorer()
         self._republish_active_if_hub()            # share the named layout if on hub
         self.statusBar().showMessage(f"Added layout “{name}” — it now autosaves", 5000)
+        self._commit_project(f"Layout: {name}")    # §8.2 boundary commit
 
     def _on_open(self):
         start = self._project_mgr.active.layouts_dir if self._project_mgr.active else ""

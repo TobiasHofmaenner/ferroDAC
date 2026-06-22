@@ -765,6 +765,38 @@ def test_panel_export_items(qapp):
 
 
 @pytest.mark.ui
+def test_project_git_commit_and_history(qapp):
+    """Project git history (§8.2): a manual checkpoint commits the active project, the
+    debounced doc-edit commit fires, and the History dialog lists commits."""
+    import os
+    from ferrodac.core.projectgit import ProjectRepo
+    from ferrodac.ui.history_view import HistoryDialog
+    w = _mainwindow(qapp)
+    try:
+        p = w._project_mgr.active
+        w._commit_project("First checkpoint")           # boundary/manual commit
+        repo = ProjectRepo(p.path)
+        assert repo.is_repo()
+        msgs = [h["message"] for h in repo.log()]
+        assert "First checkpoint" in msgs
+        # the debounced doc-edit path commits with its pending message
+        with open(os.path.join(p.path, "notes.md"), "w") as fh:
+            fh.write("# notes\n")
+        w._schedule_project_commit("Edited documents")
+        w._do_scheduled_commit()                         # fire the debounce immediately
+        assert "Edited documents" in [h["message"] for h in repo.log()]
+        # the history dialog lists them (newest first)
+        dlg = HistoryDialog(repo, p.name, None)
+        try:
+            assert dlg._list.count() >= 2
+            assert "Edited documents" in dlg._list.item(0).text()
+        finally:
+            dlg.deleteLater()
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_processor_node_routing(qapp):
     """A processor is a routable node: added BLANK (no input), bound by routing a
     source into its input port, its outputs are virtual sources, and it's removable.

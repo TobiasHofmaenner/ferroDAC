@@ -199,11 +199,12 @@ class DocView(QWidget):
     def __init__(self, on_edit=None, on_configure=None, parent=None,
                  on_list_recordings=None, on_export_recording=None,
                  on_list_recording_exports=None, on_list_processors=None,
-                 on_processor_source=None):
+                 on_processor_source=None, on_saved=None):
         super().__init__(parent)
         self._path = None                # absolute path of the open doc
         self._dir = None                 # its folder (watched too — atomic-save safe)
         self._mtime_seen = None
+        self._on_saved = on_saved        # called after an in-app save (debounced git commit)
         self._on_edit = on_edit          # optional override callable(path)
         self._on_configure = on_configure  # optional override callable()
         self._on_list_recordings = on_list_recordings   # () -> [{id,label,t0,t1}]
@@ -352,6 +353,11 @@ class DocView(QWidget):
             if (self._dir and os.path.isdir(self._dir)
                     and self._dir not in self._watcher.directories()):
                 self._watcher.addPath(self._dir)
+            if self._on_saved is not None:        # e.g. schedule a debounced git commit
+                try:
+                    self._on_saved()
+                except Exception:                # noqa: BLE001
+                    pass
         except Exception:                        # noqa: BLE001
             pass
 
@@ -375,7 +381,8 @@ class DocView(QWidget):
                       on_export_recording=self._on_export_recording,
                       on_list_recording_exports=self._on_list_recording_exports,
                       on_list_processors=self._on_list_processors,
-                      on_processor_source=self._on_processor_source)
+                      on_processor_source=self._on_processor_source,
+                      on_saved=self._on_saved)
         win.setWindowFlag(Qt.Window, True)              # owned, but its own OS window
         win.setAttribute(Qt.WA_DeleteOnClose, True)
         win.setWindowTitle(f"{os.path.basename(self._path)} — ferroDAC")
