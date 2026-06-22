@@ -59,6 +59,16 @@ class Project:
     def description(self) -> str:
         return self.meta.get("description", "")
 
+    @property
+    def git_remote(self) -> str:
+        """The project's shared git repo URL (synced via the hub record). The actual
+        push/pull remote lives in .git/config; this is the indexed, shareable copy."""
+        return self.meta.get("git_remote", "")
+
+    def set_git_remote(self, url: str) -> None:
+        self.meta["git_remote"] = url or ""
+        self.save()
+
     def _load(self) -> None:
         try:
             with open(os.path.join(self.path, _META), encoding="utf-8") as fh:
@@ -273,6 +283,7 @@ class Project:
             "origin_id": self.meta.get("origin_id", ""),
             "version": self.version,
             "deleted": False,
+            "git_remote": self.git_remote,           # §8.2: the hub indexes the repo URL
             "sources": list(self.source_keys()),
             "windows": [{"name": w.get("name", ""),
                          "t0": float(w.get("t0") or 0.0),
@@ -291,6 +302,7 @@ class Project:
         self.meta["description"] = rec.get("description", "")
         self.meta["origin_id"] = rec.get("origin_id", "")
         self.meta["version"] = int(rec.get("version", 1))
+        self.meta["git_remote"] = rec.get("git_remote", "")    # the shared repo URL
         if rec.get("created"):
             self.meta["created"] = rec["created"]
         self.meta.setdefault("favorites", {})["windows"] = [
@@ -404,8 +416,10 @@ class ProjectManager:
 
     # -- queries (LOCAL + HUB merged) ----------------------------------------
     def projects(self) -> list:
-        return sorted(list(self._by_id.values()) + list(self._hub_by_id.values()),
-                      key=lambda p: p.name.lower())
+        # a LOCAL working copy hides the hub CACHE of the same id (you cloned it →
+        # it's your checkout now; the hub entry is just the shared index). §8.2.
+        hub = [p for pid, p in self._hub_by_id.items() if pid not in self._by_id]
+        return sorted(list(self._by_id.values()) + hub, key=lambda p: p.name.lower())
 
     def get(self, pid: str):
         return self._by_id.get(pid) or self._hub_by_id.get(pid)

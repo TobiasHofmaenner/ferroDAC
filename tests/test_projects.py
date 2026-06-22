@@ -196,3 +196,33 @@ def test_hubproject_bump_and_share_to_hub():
     local.add_window("w", 1.0, 5.0)
     shared = mgr.share_to_hub(local.id)
     assert shared["id"] == local.id and shared["windows"][0]["name"] == "w"
+
+
+def test_record_carries_git_remote():
+    """The shared repo URL travels in the project record (§8.2 — the hub indexes it)."""
+    d = tempfile.mkdtemp()
+    p = Project.create(os.path.join(d, "p"), "P")
+    p.set_git_remote("https://example/repo.git")
+    rec = p.to_record()
+    assert rec["git_remote"] == "https://example/repo.git"
+    q = Project(os.path.join(d, "q"))
+    q.apply_record(rec)
+    assert q.git_remote == "https://example/repo.git"
+
+
+def test_projects_dedup_local_working_copy_over_hub_cache():
+    """A LOCAL checkout (same id) hides the hub CACHE entry — your clone is the copy."""
+    d = tempfile.mkdtemp()
+    mgr = ProjectManager(os.path.join(d, "registry.json"),
+                         hub_cache_dir=os.path.join(d, "hub"))
+    rec = {"id": "X", "name": "Shared", "version": 1, "sources": [], "windows": [],
+           "layouts": {}, "deleted": False, "git_remote": "u"}
+    mgr.apply_hub_record(rec)
+    assert len(mgr.projects()) == 1 and mgr.projects()[0].is_hub
+    # materialise a LOCAL folder with the same id (what a clone would have) + track it
+    local = Project(os.path.join(d, "clone"))
+    local.apply_record(rec)
+    mgr.track(os.path.join(d, "clone"))
+    projs = mgr.projects()
+    assert len(projs) == 1 and projs[0].is_hub is False     # local working copy wins
+    assert mgr.get("X").is_hub is False

@@ -18,9 +18,10 @@ def _ago(ts: int) -> str:
 
 
 class HistoryDialog(QDialog):
-    def __init__(self, repo, project_name, parent=None):
+    def __init__(self, repo, project_name, parent=None, on_remote_changed=None):
         super().__init__(parent)
         self.repo = repo
+        self._on_remote_changed = on_remote_changed   # app: persist URL + share if on hub
         self.setWindowTitle(f"History · {project_name}")
         self.resize(620, 480)
         root = QVBoxLayout(self)
@@ -89,7 +90,10 @@ class HistoryDialog(QDialog):
             "Git URL — HTTPS (with a token) or SSH.\nCredentials use your own git setup; "
             "no secrets are stored here.", text=self.repo.remote_url())
         if ok:
-            self.repo.set_remote(url.strip())
+            url = url.strip()
+            self.repo.set_remote(url)
+            if self._on_remote_changed is not None:   # persist + share via the hub record
+                self._on_remote_changed(url)
             self.refresh()
 
     def _push(self):

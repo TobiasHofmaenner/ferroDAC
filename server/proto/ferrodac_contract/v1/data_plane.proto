@@ -384,6 +384,7 @@ message Project {
   repeated string sources = 9;   // curated channel lens (source keys)
   repeated SavedWindow windows = 10;   // bookmarks (saved time-windows)
   map<string, string> layouts = 11;    // named layout -> its session JSON (a blob)
+  string git_remote = 12;              // the project's shared git repo URL (DESIGN §8.2)
 }
 
 message PublishProjectRequest {

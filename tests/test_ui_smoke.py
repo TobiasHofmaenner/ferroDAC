@@ -797,6 +797,43 @@ def test_project_git_commit_and_history(qapp):
 
 
 @pytest.mark.ui
+def test_clone_hub_project(qapp, tmp_path, monkeypatch):
+    """Clone-from-hub: a hub project carrying a git URL → clone its repo to a local
+    working copy, tracked + active, with the hub cache entry deduped away."""
+    import subprocess
+    from qtpy.QtWidgets import QFileDialog
+    from ferrodac.core.projectgit import ProjectRepo
+    from ferrodac.core.projects import Project
+    w = _mainwindow(qapp)
+    try:
+        src = Project.create(str(tmp_path / "src"), "Shared")    # a real project repo
+        sid = src.id
+        rs = ProjectRepo(str(tmp_path / "src"))
+        rs.commit("init")
+        bare = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+        rs.set_remote(str(bare))
+        assert rs.push()[0]
+        # a hub record (same id) pointing at the shared repo
+        w._project_mgr.apply_hub_record(
+            {"id": sid, "name": "Shared", "version": 1, "sources": [], "windows": [],
+             "layouts": {}, "deleted": False, "git_remote": str(bare)})
+        # clone it (the folder picker is monkeypatched to a temp parent)
+        parent = tmp_path / "checkouts"
+        parent.mkdir()
+        monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                            staticmethod(lambda *a, **k: str(parent)))
+        w._clone_hub_project(sid)
+        dest = parent / "Shared"
+        assert (dest / "project.json").exists()                  # cloned working copy
+        assert w._project_mgr.active is not None and not w._project_mgr.active.is_hub
+        shared = [p for p in w._project_mgr.projects() if p.name == "Shared"]
+        assert len(shared) == 1 and not shared[0].is_hub         # deduped to the local copy
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_history_dialog_remote_push(qapp, tmp_path):
     """The History dialog shows the remote and pushes to it (offline, a local bare)."""
     import os

@@ -1561,7 +1561,7 @@ class ProjectsPanel(QWidget):
     can be Shared to the hub from its right-click menu. Reveal the folder."""
 
     def __init__(self, manager, on_activate, on_create_local, on_create_hub,
-                 on_reveal, on_share=None, hub_enabled=None, parent=None):
+                 on_reveal, on_share=None, hub_enabled=None, on_clone=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self._on_activate = on_activate
@@ -1569,6 +1569,7 @@ class ProjectsPanel(QWidget):
         self._on_create_hub = on_create_hub
         self._on_reveal = on_reveal
         self._on_share = on_share
+        self._on_clone = on_clone                       # clone a hub project's git repo
         self._hub_enabled = hub_enabled or (lambda: False)
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1620,16 +1621,22 @@ class ProjectsPanel(QWidget):
 
     def _context_menu(self, pos):
         it = self._list.itemAt(pos)
-        if it is None or self._on_share is None:
+        if it is None:
             return
         p = self.manager.get(it.data(Qt.UserRole))
-        if p is None or getattr(p, "is_hub", False):
-            return                                          # already on the hub
+        if p is None:
+            return
         menu = QMenu(self)
-        act = menu.addAction("☁ Share to hub")
-        act.setEnabled(self._hub_enabled())
-        act.triggered.connect(lambda: self._on_share(p.id))
-        menu.exec(self._list.mapToGlobal(pos))
+        if not getattr(p, "is_hub", False):
+            if self._on_share is not None:
+                act = menu.addAction("☁ Share to hub")
+                act.setEnabled(self._hub_enabled())
+                act.triggered.connect(lambda: self._on_share(p.id))
+        elif self._on_clone is not None and getattr(p, "git_remote", ""):
+            act = menu.addAction("⬇ Clone repository…")    # check out a shared project
+            act.triggered.connect(lambda: self._on_clone(p.id))
+        if menu.actions():
+            menu.exec(self._list.mapToGlobal(pos))
 
     def _activate(self, item):
         if item is None:                        # list cleared mid-signal → ignore
@@ -2022,7 +2029,7 @@ class MainWindow(QMainWindow):
             self._project_mgr, on_activate=self._switch_project,
             on_create_local=self._add_project, on_create_hub=self._add_project_hub,
             on_reveal=self._reveal_project, on_share=self._share_project,
-            hub_enabled=lambda: self.hub.connected)
+            hub_enabled=lambda: self.hub.connected, on_clone=self._clone_hub_project)
         self.projects_dock = QDockWidget("Projects", self)
         self.projects_dock.setObjectName("ProjectsDock")
         self.projects_dock.setWidget(self.projects_panel)
@@ -2582,6 +2589,37 @@ class MainWindow(QMainWindow):
         p = self._project_mgr.active
         if getattr(p, "is_hub", False):
             self.hub.publish_project(p.bump())
+
+    def _clone_hub_project(self, pid: str) -> None:
+        """Check out a shared (hub) project: clone its git repo to a local folder, adopt
+        it as your working copy, and switch to it (§8.2 — your clone IS the checkout)."""
+        from ..core.projectgit import ProjectRepo
+        from ..core.projects import _safe
+        p = self._project_mgr.get(pid)
+        url = getattr(p, "git_remote", "") if p is not None else ""
+        if not url:
+            return
+        parent = QFileDialog.getExistingDirectory(self, "Clone into which folder?")
+        if not parent:
+            return
+        dest = os.path.join(parent, _safe(p.name) or "project")
+        if os.path.exists(dest):
+            QMessageBox.warning(self, "Folder exists",
+                                f"{dest} already exists — choose another folder.")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            ProjectRepo.clone(url, dest)
+        except Exception as exc:                        # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Clone failed", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        local = self._project_mgr.track(dest)
+        self.projects_panel.refresh()
+        self._switch_project(local.id)
+        self.statusBar().showMessage(f"Cloned “{p.name}” → {dest}", 6000)
 
     def _reveal_path(self, path: str) -> None:
         from qtpy.QtCore import QUrl
@@ -3293,7 +3331,13 @@ class MainWindow(QMainWindow):
         if repo is None:
             self.statusBar().showMessage("No active project.", 4000)
             return
-        self._history_dialog = HistoryDialog(repo, self._project_mgr.active.name, self)
+        def on_remote_changed(url):                 # persist the URL + share if on hub
+            p = self._project_mgr.active
+            if p is not None:
+                p.set_git_remote(url)
+                self._republish_active_if_hub()
+        self._history_dialog = HistoryDialog(repo, self._project_mgr.active.name, self,
+                                             on_remote_changed=on_remote_changed)
         self._history_dialog.finished.connect(
             lambda _=0: setattr(self, "_history_dialog", None))
         self._history_dialog.show()
