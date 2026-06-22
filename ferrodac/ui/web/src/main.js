@@ -31,12 +31,17 @@ import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import rehypeStringify from "rehype-stringify";
 
+import mermaid from "mermaid";
+mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+
 const processor = unified()
   .use(remarkParse)
   .use(remarkGfm)
   .use(remarkMath)
   .use(remarkRehype)
-  .use(rehypeHighlight, { detect: true })
+  // ignoreMissing: a ```mermaid (or other unknown) fence passes through untouched
+  // (raw source preserved) instead of throwing — we render mermaid ourselves below.
+  .use(rehypeHighlight, { detect: true, ignoreMissing: true })
   .use(rehypeKatex)
   .use(rehypeStringify);
 
@@ -62,6 +67,7 @@ let collabReady = false;  // have we got our initial state? (gates materialise)
 let ydoc = null;
 let awareness = null;
 let actorName = "";
+let pendingDiskText = null;  // external .md edit awaiting an explicit "reload from disk"
 let matTimer = null;      // debounce: materialise the text → local .md + server snapshot
 
 // base64 ↔ Uint8Array — Yjs updates are binary, the Qt/JS bridge carries strings.
@@ -108,7 +114,31 @@ async function renderPreview() {
   } catch (e) {
     html = `<pre class="render-error">render error: ${String(e)}</pre>`;
   }
-  if (seq === renderSeq) $("doc").innerHTML = html; // only the latest render wins
+  if (seq !== renderSeq) return;                    // only the latest render wins
+  $("doc").innerHTML = html;
+  await renderMermaid($("doc"), seq);
+}
+
+// Turn ```mermaid fences into rendered SVG. Mermaid is async, so honour the render
+// sequence: bail if a newer render started while we were drawing.
+async function renderMermaid(root, seq) {
+  const blocks = root.querySelectorAll("code.language-mermaid, code.lang-mermaid");
+  for (const code of blocks) {
+    if (seq !== renderSeq) return;
+    const src = code.textContent;
+    const host = code.closest("pre") || code;
+    try {
+      const id = "m" + Math.random().toString(36).slice(2);
+      const { svg } = await mermaid.render(id, src);
+      if (seq !== renderSeq) return;
+      const fig = document.createElement("div");
+      fig.className = "mermaid-figure";
+      fig.innerHTML = svg;
+      host.replaceWith(fig);
+    } catch (e) {                                   // invalid diagram → leave the source
+      /* keep the code block as-is */
+    }
+  }
 }
 
 function text() {
@@ -155,7 +185,16 @@ function setEditorText(t) {
 // A document arrived from Qt: the initial load, or an EXTERNAL edit (file-watch).
 function onIncoming(_relpath, incoming) {
   if (collabActive) {                           // the live session is truth, not the file
-    if (incoming !== text()) status("⚠ changed on disk");
+    // Don't auto-merge — an external save is a snapshot that could clobber others'
+    // live edits. Offer an explicit "↻ Reload from disk" instead.
+    if (incoming !== text()) {
+      pendingDiskText = incoming;
+      showReload(true);
+      status("⚠ changed on disk");
+    } else {
+      pendingDiskText = null;
+      showReload(false);
+    }
     return;
   }
   if (incoming === lastSynced) return;          // our own save echoed back — ignore
@@ -236,7 +275,41 @@ function leaveCollab() {
   lastSynced = finalText;
   if (bridge) bridge.save(finalText);            // land the final text in the local .md
   renderPresence([]);
+  pendingDiskText = null;
+  showReload(false);
   status("");
+}
+
+function showReload(on) {
+  const b = $("reload");
+  if (b) b.hidden = !on;
+}
+
+// Explicit "↻ Reload from disk": apply the on-disk text to the LIVE doc (one Yjs
+// transaction, broadcast to peers). Last-writer-wins by the user's choice.
+function reloadFromDisk() {
+  if (pendingDiskText == null || !ydoc) return;
+  applyTextToYText(ydoc.getText("md"), pendingDiskText);
+  pendingDiskText = null;
+  showReload(false);
+  status("collaborating");
+}
+
+// Replace ytext's content with newText via a minimal prefix/suffix diff — keeps the
+// untouched regions (and cursors there) instead of churning the whole doc.
+function applyTextToYText(ytext, newText) {
+  const old = ytext.toString();
+  if (old === newText) return;
+  const m = Math.min(old.length, newText.length);
+  let s = 0;
+  while (s < m && old[s] === newText[s]) s++;
+  let e = 0;
+  while (e < m - s && old[old.length - 1 - e] === newText[newText.length - 1 - e]) e++;
+  ytext.doc.transact(() => {
+    if (old.length - s - e > 0) ytext.delete(s, old.length - s - e);
+    const ins = newText.slice(s, newText.length - e);
+    if (ins) ytext.insert(s, ins);
+  }, "reload");
 }
 
 function setMode(m) {
@@ -250,6 +323,8 @@ function setMode(m) {
 function wireToolbar() {
   for (const b of document.querySelectorAll("#toolbar [data-mode]"))
     b.addEventListener("click", () => setMode(b.dataset.mode));
+  const rb = $("reload");
+  if (rb) rb.addEventListener("click", reloadFromDisk);
 }
 
 // Standalone (no Qt host) → a sample so the bundle is testable on its own.

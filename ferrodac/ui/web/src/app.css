@@ -44,7 +44,16 @@ body { display: flex; flex-direction: column; }
   font-size: 11px; font-weight: 700; color: #0b0b10;
   box-shadow: 0 0 0 1px var(--border);
 }
+#reload {
+  margin-left: 10px;
+  background: #3a2e16; border-color: #6b5418; color: #f0c040;
+}
+#reload:hover { background: #4a3a1e; }
 #status { margin-left: 10px; color: var(--muted); font-size: 11px; }
+
+/* rendered Mermaid diagrams */
+.mermaid-figure { display: flex; justify-content: center; margin: 1em 0; }
+.mermaid-figure svg { max-width: 100%; height: auto; }
 
 /* the two panes (editor | preview) */
 #panes { flex: 1 1 auto; display: flex; min-height: 0; }

@@ -124,6 +124,67 @@ def _pump(qapp, pred, timeout=15.0):
     return False
 
 
+def _js(qapp, webview, expr, timeout=5.0):
+    """Evaluate a JS expression in the page and return the latest result."""
+    out = {"v": None}
+    end = time.time() + timeout
+    while time.time() < end:
+        webview.page().runJavaScript(expr, lambda r: out.__setitem__("v", r))
+        for _ in range(10):
+            qapp.processEvents()
+            time.sleep(0.02)
+        if out["v"] is not None:
+            return out["v"]
+    return out["v"]
+
+
+@pytest.mark.ui
+def test_mermaid_renders_to_svg(qapp):
+    """A ```mermaid fence renders to an inline SVG figure (not a raw code block)."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "M.md")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("# diagram\n\n```mermaid\ngraph TD; A-->B; B-->C\n```\n")
+    dv = DocView()
+    dv.resize(720, 520)
+    try:
+        dv.open(p)
+        html = _wait_html(qapp, dv.view, "mermaid-figure", timeout=30)
+        assert "mermaid-figure" in html, "mermaid fence was not rendered"
+        assert "<svg" in html, "mermaid produced no SVG"
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
+def test_collab_reload_from_disk(qapp):
+    """In collab, an external .md edit surfaces a reload affordance; reloading applies
+    the on-disk text to the LIVE doc (explicit last-writer-wins)."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "R.md")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("# live\n")
+    dv = DocView()
+    dv.resize(700, 420)
+    try:
+        dv.open(p)
+        _wait_html(qapp, dv.view, "live")
+        dv.bridge.collabSeed.emit(True, "", "alice")     # enter collab, seed local "# live"
+        _pump(qapp, lambda: True, 0.5)
+        # an EXTERNAL editor saved the file → Qt pushes the new text in
+        dv.bridge.set_doc("R.md", "# external edit\n")
+        assert _pump(qapp, lambda: _js(
+            qapp, dv.view, "!document.getElementById('reload').hidden") is True), \
+            "reload affordance did not appear on an external change"
+        dv.view.page().runJavaScript("document.getElementById('reload').click()")
+        html = _wait_html(qapp, dv.view, "external edit")
+        assert "external edit" in html, "reload did not apply the on-disk text"
+    finally:
+        dv.deleteLater()
+
+
 @pytest.mark.ui
 def test_collab_two_views_converge_via_yjs(qapp):
     """Two DocViews exchanging one opaque Yjs update converge to identical text

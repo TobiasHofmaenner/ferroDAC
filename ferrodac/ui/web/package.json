@@ -18,6 +18,7 @@
     "highlight.js": "^11",
     "katex": "^0.16",
     "lib0": "^0.2.117",
+    "mermaid": "^11.15.0",
     "rehype-highlight": "^7",
     "rehype-katex": "^7",
     "rehype-stringify": "^10",
