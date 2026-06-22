@@ -73,6 +73,7 @@ class FakeGaugeController(BaseDevice):
                 primary_source="ch1",
                 hardware_id=f"SIM-GAUGE-{tag}",
                 model="SimGauge 6",
+                manufacturer="Ferrovac (sim)",
             ))
         return out
 
@@ -110,6 +111,7 @@ class FakeThermometer(BaseDevice):
                 rate=RateControl(mode=RateMode.FIXED, native_hz=1.0),
                 hardware_id=f"SIM-TEMP-{tag}",
                 model="SimTherm",
+                manufacturer="Ferrovac (sim)",
             ))
         return out
 
@@ -216,6 +218,8 @@ class FakeRGA(BaseDevice):
             primary_source="spectrum",
             hardware_id="SIM-RGA-0001",
             model="SimRGA 1-50",
+            manufacturer="Ferrovac (sim)",
+            cal_date="2026-01-15", cal_due="2027-01-15", cal_cert="CAL-RGA-2026-001",
         )]
 
     def _connect(self) -> None:

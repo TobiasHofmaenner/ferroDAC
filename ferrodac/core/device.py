@@ -127,9 +127,17 @@ class DeviceDescriptor:
     interface: Interface
     uuid: Optional[str] = None   # data-plane identity (None until onboarded)
     status: Status = Status.DISCOVERED
-    hardware_id: Optional[str] = None
+    hardware_id: Optional[str] = None     # serial number (the device's, if it reports one)
     model: Optional[str] = None
     firmware: Optional[str] = None
+    # Lab-journal provenance: a capable instrument (Keithley, …) reports these; humble
+    # ones leave them None and the user fills them in (per-device metadata). A future
+    # device DB enriches the gaps from datasheets.
+    manufacturer: Optional[str] = None
+    cal_date: Optional[str] = None        # ISO date of last calibration
+    cal_due: Optional[str] = None         # ISO date the next calibration is due
+    cal_cert: Optional[str] = None        # calibration certificate reference
+    asset_tag: Optional[str] = None       # internal inventory / asset id
     sources: list = field(default_factory=list)   # list[Source]
     sinks: list = field(default_factory=list)      # list[Sink]
     options: list = field(default_factory=list)    # list[Option]
