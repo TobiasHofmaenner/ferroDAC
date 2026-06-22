@@ -1974,11 +1974,13 @@ class DocPanel(Panel):
             self._view.open(path)
 
     def set_doc_macros(self, on_list_recordings, on_export_recording,
-                       on_list_recording_exports=None) -> None:
-        """Wire the editor's /rec macro to the app's recording services."""
+                       on_list_recording_exports=None, on_list_processors=None,
+                       on_processor_source=None) -> None:
+        """Wire the editor macros (/rec, /proc) to the app's services."""
         if self._view is not None:
             self._view.set_macros(on_list_recordings, on_export_recording,
-                                  on_list_recording_exports)
+                                  on_list_recording_exports, on_list_processors,
+                                  on_processor_source)
 
     def state(self) -> dict:
         return {"path": self._path} if self._path else {}

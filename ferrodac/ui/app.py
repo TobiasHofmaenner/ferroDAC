@@ -2191,7 +2191,9 @@ class MainWindow(QMainWindow):
                                   on_configure=self._configure_editor,
                                   on_list_recordings=self._list_recordings,
                                   on_export_recording=self._export_recording_for_doc,
-                                  on_list_recording_exports=self._list_recording_exports)
+                                  on_list_recording_exports=self._list_recording_exports,
+                                  on_list_processors=self._list_processors,
+                                  on_processor_source=self._processor_source)
         self.docs_dock.setWidget(self._docs_view)
         self._open_active_doc()
 
@@ -2243,7 +2245,9 @@ class MainWindow(QMainWindow):
             if hasattr(panel, "set_doc_macros"):
                 panel.set_doc_macros(self._list_recordings,
                                      self._export_recording_for_doc,
-                                     self._list_recording_exports)
+                                     self._list_recording_exports,
+                                     self._list_processors,
+                                     self._processor_source)
 
     def _active_readme(self) -> str | None:
         """The active project's README.md path, bootstrapping a starter if missing."""
@@ -2755,6 +2759,29 @@ class MainWindow(QMainWindow):
         tail = f" (+ copy → {folder})" if extra else ""
         self.statusBar().showMessage(
             f"Exported {len(files)} plot(s) → project reports{tail}", 7000)
+
+    # -- editor /proc macro: cite a processor's source (open science) --------
+    def _list_processors(self) -> list:
+        """The DISTINCT processor kinds in use (source is per-class, so dedupe by
+        kind) for the editor's /proc macro: [{kind, label}]."""
+        seen = {}
+        for proc in self.dashboard._processors.values():
+            if proc.kind not in seen:
+                seen[proc.kind] = {"kind": proc.kind,
+                                   "label": getattr(type(proc), "label", proc.kind)}
+        return list(seen.values())
+
+    def _processor_source(self, kind: str) -> str:
+        """The source of a used processor's class — so its analysis can be pasted,
+        readable, into a doc (open science)."""
+        import inspect
+        for proc in self.dashboard._processors.values():
+            if proc.kind == kind:
+                try:
+                    return inspect.getsource(type(proc))
+                except Exception:                  # noqa: BLE001 — e.g. C-defined / no source
+                    return ""
+        return ""
 
     # -- editor /rec macro: list recordings + export one on demand -----------
     def _list_recordings(self) -> list:

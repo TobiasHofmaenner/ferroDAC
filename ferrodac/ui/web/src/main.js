@@ -67,6 +67,8 @@ const existingResults = new Map();      // recId → files ALREADY exported (fas
 const existingWaiters = new Map();
 const exportResults = new Map();        // recId → files from a fresh export-now
 const exportWaiters = new Map();
+let processorsCache = [];               // [{kind,label}] — the /proc macro's choices
+let awaitingProcInsert = false;         // a picked processor's source is being fetched
 let mode = "read";        // read | edit | split
 let lastSynced = "";      // the text the file currently holds (per our knowledge)
 let saveTimer = null;
@@ -275,25 +277,55 @@ function slashSource(context) {
       return { from: context.pos, filter: false, options };
     });
   }
-  // Stage 1 — `/rec` offers the recordings.
+  // Stage 1 — a slash command: `/rec` (recordings) or `/proc` (processor source).
   const w = context.matchBefore(/\/(\w*)/);
   if (!w || (w.from === w.to && !context.explicit)) return null;
-  if (w.text.slice(1).toLowerCase() !== "rec") return null;
-  if (bridge) bridge.requestRecordings();      // refresh for next time
-  if (!recordingsCache.length) return null;
-  return {
-    from: w.from, filter: false,
-    options: recordingsCache.map((rec) => ({
-      label: "rec: " + rec.label, detail: spanLabel(rec), type: "function",
-      apply: (v, c, from, to) => {
-        v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/rec`
-        pendingRec = { id: rec.id, mode: "list" };
-        existingResults.delete(rec.id);                       // re-scan fresh
-        if (bridge) bridge.requestRecordingExports(rec.id);   // list existing exports
-        startCompletion(v);                                    // → stage 2 (list)
-      },
-    })),
-  };
+  const cmd = w.text.slice(1).toLowerCase();
+  if (cmd === "rec") {
+    if (bridge) bridge.requestRecordings();      // refresh for next time
+    if (!recordingsCache.length) return null;
+    return {
+      from: w.from, filter: false,
+      options: recordingsCache.map((rec) => ({
+        label: "rec: " + rec.label, detail: spanLabel(rec), type: "function",
+        apply: (v, c, from, to) => {
+          v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/rec`
+          pendingRec = { id: rec.id, mode: "list" };
+          existingResults.delete(rec.id);                       // re-scan fresh
+          if (bridge) bridge.requestRecordingExports(rec.id);   // list existing exports
+          startCompletion(v);                                    // → stage 2 (list)
+        },
+      })),
+    };
+  }
+  if (cmd === "proc") {
+    if (bridge) bridge.requestProcessors();
+    if (!processorsCache.length) return null;
+    return {
+      from: w.from, filter: false,
+      options: processorsCache.map((proc) => ({
+        label: "proc: " + proc.label, detail: "source", type: "function",
+        apply: (v, c, from, to) => {
+          v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/proc`
+          awaitingProcInsert = true;
+          if (bridge) bridge.requestProcessorSource(proc.kind);  // inserted on arrival
+        },
+      })),
+    };
+  }
+  return null;
+}
+
+// Insert a processor's source as a fenced code block (open science — cite the algorithm).
+function insertProcessorSource(kind, src) {
+  if (!editor || !src) return;
+  const proc = processorsCache.find((p) => p.kind === kind);
+  const label = (proc && proc.label) || kind;
+  const block = `\n\n*${label} — processor source:*\n\n\`\`\`python\n`
+    + src.replace(/\s+$/, "") + "\n```\n";
+  const at = editor.state.selection.main.head;
+  editor.dispatch({ changes: { from: at, insert: block },
+                    selection: { anchor: at + block.length } });
 }
 
 function makeEditor(initial) {
@@ -489,6 +521,14 @@ function connect() {
       existingResults.set(recId, files);                  // it now "exists" too
       resolveMap(exportResults, exportWaiters, recId, files);
     });
+    bridge.processorsAvailable.connect((j) => {
+      try { processorsCache = JSON.parse(j) || []; } catch (e) { processorsCache = []; }
+    });
+    bridge.processorSource.connect((kind, src) => {        // picked /proc → insert source
+      if (!awaitingProcInsert) return;
+      awaitingProcInsert = false;
+      insertProcessorSource(kind, src);
+    });
     bridge.collabSeed.connect(enterCollab);
     bridge.collabUpdate.connect((b64) => {
       if (ydoc) Y.applyUpdate(ydoc, b64decode(b64), "remote");
@@ -531,6 +571,12 @@ window.__doc = {
     editor.dispatch({ changes: { from: L, insert: "\n\n/rec" },
                       selection: { anchor: L + 6 } });
     startCompletion(editor);
+  },
+  // /proc test hooks
+  processors: () => processorsCache,
+  insertProcessorSource: (kind) => {            // pick a processor → fetch + insert source
+    awaitingProcInsert = true;
+    if (bridge) bridge.requestProcessorSource(kind);
   },
   // compute the stage-2 (list) menu for a recording → result in __doc._lastLabels
   stage2Labels: (recId) => {

@@ -299,6 +299,37 @@ def test_slash_macro_lists_and_inserts(qapp):
 
 
 @pytest.mark.ui
+def test_slash_proc_inserts_source(qapp):
+    """The /proc macro: used processors reach the editor; picking one inserts its
+    source as a fenced python code block (open science)."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    procs = [{"kind": "gas", "label": "Gas composition"}]
+    src = "class GasAnalyzer(Processor):\n    def process(self, value):\n        return {}\n"
+    dv = DocView(on_list_processors=lambda: procs,
+                 on_processor_source=lambda k: src if k == "gas" else "")
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        assert _pump(qapp, lambda: _js(qapp, dv.view, "window.__doc.processors().length") == 1)
+        dv.view.page().runJavaScript("window.__doc.insertProcessorSource('gas')")
+        txt = None
+        assert _pump(qapp, lambda: "GasAnalyzer" in (_js(qapp, dv.view, "window.__doc.text()") or ""))
+        txt = _js(qapp, dv.view, "window.__doc.text()")
+        assert "```python" in txt and "class GasAnalyzer(Processor):" in txt, txt
+        assert "Gas composition — processor source" in txt, txt
+        # and it renders as a highlighted code block (not raw text)
+        html = _js(qapp, dv.view, "window.__doc.html()")
+        assert "<code" in html and "GasAnalyzer" in html
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_slash_macro_lists_existing_and_export_now(qapp):
     """Picking a recording shows its ALREADY-exported files plus an 'Export now' item."""
     from ferrodac.ui.docs import DocView

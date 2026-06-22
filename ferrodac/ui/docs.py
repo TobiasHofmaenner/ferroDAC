@@ -122,6 +122,12 @@ class DocBridge(QObject):
     exportsRequested = Signal(str)       # (rec_id) — list existing
     exportRequested = Signal(str)        # (rec_id) — render fresh (export now)
 
+    # Editor macro (/proc): cite a used processor's source (open science). Qt → JS:
+    processorsAvailable = Signal(str)    # (json [{kind, label}])
+    processorSource = Signal(str, str)   # (kind, source)
+    processorsRequested = Signal()       # JS → Qt
+    procSourceRequested = Signal(str)    # (kind)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._relpath = ""
@@ -156,6 +162,14 @@ class DocBridge(QObject):
     def requestRecordingExport(self, rec_id: str) -> None:
         self.exportRequested.emit(rec_id)         # render a fresh export now
 
+    @Slot()
+    def requestProcessors(self) -> None:
+        self.processorsRequested.emit()
+
+    @Slot(str)
+    def requestProcessorSource(self, kind: str) -> None:
+        self.procSourceRequested.emit(kind)
+
     # -- collaboration: JS → Qt (thin re-emit; DocView forwards to the hub) --
     @Slot()
     def collabJoin(self) -> None:
@@ -184,7 +198,8 @@ class DocView(QWidget):
 
     def __init__(self, on_edit=None, on_configure=None, parent=None,
                  on_list_recordings=None, on_export_recording=None,
-                 on_list_recording_exports=None):
+                 on_list_recording_exports=None, on_list_processors=None,
+                 on_processor_source=None):
         super().__init__(parent)
         self._path = None                # absolute path of the open doc
         self._dir = None                 # its folder (watched too — atomic-save safe)
@@ -194,6 +209,8 @@ class DocView(QWidget):
         self._on_list_recordings = on_list_recordings   # () -> [{id,label,t0,t1}]
         self._on_export_recording = on_export_recording  # (rec_id) -> fresh [{name,abspath,kind}]
         self._on_list_recording_exports = on_list_recording_exports  # (rec_id) -> existing
+        self._on_list_processors = on_list_processors   # () -> [{kind,label}]
+        self._on_processor_source = on_processor_source  # (kind) -> source str
         self._collab = None              # a HubController, when a hub+doc is available
         self._doc_id = None              # "<project_id>::<relpath>" for collaboration
         self._collab_on = False          # currently in a live session?
@@ -261,6 +278,8 @@ class DocView(QWidget):
         self.bridge.recordingsRequested.connect(self._push_recordings)
         self.bridge.exportsRequested.connect(self._list_recording_exports)
         self.bridge.exportRequested.connect(self._export_recording)
+        self.bridge.processorsRequested.connect(self._push_processors)
+        self.bridge.procSourceRequested.connect(self._send_processor_source)
         self._channel = QWebChannel(self)
         self._channel.registerObject("bridge", self.bridge)
         self.view.page().setWebChannel(self._channel)
@@ -354,7 +373,9 @@ class DocView(QWidget):
                       parent=self.window(),
                       on_list_recordings=self._on_list_recordings,
                       on_export_recording=self._on_export_recording,
-                      on_list_recording_exports=self._on_list_recording_exports)
+                      on_list_recording_exports=self._on_list_recording_exports,
+                      on_list_processors=self._on_list_processors,
+                      on_processor_source=self._on_processor_source)
         win.setWindowFlag(Qt.Window, True)              # owned, but its own OS window
         win.setAttribute(Qt.WA_DeleteOnClose, True)
         win.setWindowTitle(f"{os.path.basename(self._path)} — ferroDAC")
@@ -410,20 +431,25 @@ class DocView(QWidget):
     def _on_js_ready(self) -> None:
         self._js_ready = True
         self._push_recordings()               # seed the /rec macro's cache
+        self._push_processors()               # …and /proc's
         if self._pending_collab:              # a pop-out asked to collab before JS was up
             self._pending_collab = False
             self._start_collab()
 
     # -- editor macros (/rec): list recordings + export one on demand --------
     def set_macros(self, on_list_recordings, on_export_recording,
-                   on_list_recording_exports=None) -> None:
-        """Wire the /rec macro to the app's services (used by doc panels created via
+                   on_list_recording_exports=None, on_list_processors=None,
+                   on_processor_source=None) -> None:
+        """Wire the editor macros to the app's services (used by doc panels created via
         the Add menu or a layout, which can't get the callbacks at construction)."""
         self._on_list_recordings = on_list_recordings
         self._on_export_recording = on_export_recording
         self._on_list_recording_exports = on_list_recording_exports
-        if self._js_ready:                    # warm the cache if the page is already up
+        self._on_list_processors = on_list_processors
+        self._on_processor_source = on_processor_source
+        if self._js_ready:                    # warm the caches if the page is already up
             self._push_recordings()
+            self._push_processors()
 
     def _push_recordings(self) -> None:
         if self._on_list_recordings is None:
@@ -434,6 +460,25 @@ class DocView(QWidget):
         except Exception:                     # noqa: BLE001
             recs = []
         self.bridge.recordingsAvailable.emit(json.dumps(recs))
+
+    def _push_processors(self) -> None:
+        if self._on_list_processors is None:
+            return
+        import json
+        try:
+            procs = self._on_list_processors() or []
+        except Exception:                     # noqa: BLE001
+            procs = []
+        self.bridge.processorsAvailable.emit(json.dumps(procs))
+
+    def _send_processor_source(self, kind: str) -> None:
+        src = ""
+        if self._on_processor_source is not None:
+            try:
+                src = self._on_processor_source(kind) or ""
+            except Exception:                 # noqa: BLE001
+                src = ""
+        self.bridge.processorSource.emit(kind, src)
 
     def _emit_files(self, signal, rec_id: str, raw) -> None:
         """Hand the JS a recording's files with paths RELATIVE to the open doc
