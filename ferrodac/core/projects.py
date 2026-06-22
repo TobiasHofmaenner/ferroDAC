@@ -109,7 +109,33 @@ class Project:
     @property
     def working_path(self) -> str:
         """The autosaved working layout for this project (the live dashboard)."""
-        return os.path.join(self.path, "working.json")
+        return self.file_path("working.json")
+
+    # -- file boundary -------------------------------------------------------
+    # The SINGLE place a project-relative path is resolved to a concrete location.
+    # Everything that touches a project file should go through this (or the dir
+    # accessors), never `project.path` directly — so a future backend (e.g. a git
+    # working tree living elsewhere, DESIGN §8.2) swaps HERE, not across the app.
+    def file_path(self, relpath: str) -> str:
+        return os.path.join(self.path, relpath)
+
+    @property
+    def readme_path(self) -> str:
+        return self.file_path("README.md")
+
+    def ensure_readme(self) -> str | None:
+        """The README path, writing a starter if it's missing. Returns the path, or
+        None if it couldn't be created."""
+        path = self.readme_path
+        if not os.path.exists(path):
+            try:
+                os.makedirs(self.path, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(f"# {self.name}\n\n_Describe this project — what, why, "
+                             "and what you expect to see._\n")
+            except Exception:                        # noqa: BLE001
+                pass
+        return path if os.path.exists(path) else None
 
     # -- curated source selection (a LENS over the catalog, not new data) ----
     @property
@@ -194,6 +220,14 @@ class Project:
                 out.append({"name": name, "path": p,
                             "ext": os.path.splitext(name)[1].lstrip(".").lower()})
         return out
+
+    def import_doc(self, src: str) -> str:
+        """Copy an external file into docs/ (a reference attachment); returns the
+        destination path. The folder stays the source of truth."""
+        import shutil
+        dest = os.path.join(self.docs_dir, os.path.basename(src))
+        shutil.copy2(src, dest)
+        return dest
 
     # -- favourites: saved time-windows (bookmarks) — a nav aid, in the meta --
     def windows(self) -> list:

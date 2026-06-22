@@ -2233,18 +2233,7 @@ class MainWindow(QMainWindow):
     def _active_readme(self) -> str | None:
         """The active project's README.md path, bootstrapping a starter if missing."""
         p = self._project_mgr.active
-        if p is None:
-            return None
-        readme = os.path.join(p.path, "README.md")
-        if not os.path.exists(readme):
-            try:
-                os.makedirs(p.path, exist_ok=True)
-                with open(readme, "w", encoding="utf-8") as fh:
-                    fh.write(f"# {p.name}\n\n_Describe this project — what, why, "
-                             "and what you expect to see._\n")
-            except Exception:            # noqa: BLE001
-                pass
-        return readme if os.path.exists(readme) else None
+        return p.ensure_readme() if p is not None else None
 
     def _open_active_doc(self) -> None:
         """Show the active project's README.md in the Docs dock."""
@@ -2557,7 +2546,7 @@ class MainWindow(QMainWindow):
         paths, _ = QFileDialog.getOpenFileNames(self, "Add document(s) to project")
         for src in paths:
             try:
-                shutil.copy2(src, os.path.join(p.docs_dir, os.path.basename(src)))
+                p.import_doc(src)
             except Exception as exc:                       # noqa: BLE001
                 self.statusBar().showMessage(f"Could not add {os.path.basename(src)}: {exc}", 6000)
         if paths:
