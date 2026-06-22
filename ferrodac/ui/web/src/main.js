@@ -32,7 +32,10 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeStringify from "rehype-stringify";
 
 import mermaid from "mermaid";
-mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+// suppressErrorRendering: don't draw mermaid's "bomb" error SVG (it gets appended to
+// document.body and orphans there); we validate + show a clean inline error instead.
+mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict",
+                     suppressErrorRendering: true });
 
 const processor = unified()
   .use(remarkParse)
@@ -125,18 +128,31 @@ async function renderMermaid(root, seq) {
   const blocks = root.querySelectorAll("code.language-mermaid, code.lang-mermaid");
   for (const code of blocks) {
     if (seq !== renderSeq) return;
-    const src = code.textContent;
+    const src = code.textContent.trim();
     const host = code.closest("pre") || code;
+    const fail = (e) => {
+      if (seq !== renderSeq) return;
+      const err = document.createElement("div");
+      err.className = "mermaid-error";
+      err.textContent = "⚠ mermaid: " + ((e && (e.message || e.str)) || String(e));
+      host.replaceWith(err);
+    };
     try {
-      const id = "m" + Math.random().toString(36).slice(2);
-      const { svg } = await mermaid.render(id, src);
+      await mermaid.parse(src);                     // validate FIRST — no DOM, no orphan bomb
+    } catch (e) {
+      fail(e);
+      continue;
+    }
+    if (seq !== renderSeq) return;
+    try {
+      const { svg } = await mermaid.render("m" + Math.random().toString(36).slice(2), src);
       if (seq !== renderSeq) return;
       const fig = document.createElement("div");
       fig.className = "mermaid-figure";
       fig.innerHTML = svg;
       host.replaceWith(fig);
-    } catch (e) {                                   // invalid diagram → leave the source
-      /* keep the code block as-is */
+    } catch (e) {
+      fail(e);
     }
   }
 }

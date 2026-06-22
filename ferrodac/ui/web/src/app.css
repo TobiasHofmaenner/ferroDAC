@@ -54,6 +54,13 @@ body { display: flex; flex-direction: column; }
 /* rendered Mermaid diagrams */
 .mermaid-figure { display: flex; justify-content: center; margin: 1em 0; }
 .mermaid-figure svg { max-width: 100%; height: auto; }
+.mermaid-error {
+  color: #ff8a8a; background: var(--code-bg);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 12px; margin: 1em 0;
+  font: 12px/1.45 ui-monospace, "JetBrains Mono", Consolas, monospace;
+  white-space: pre-wrap;
+}
 
 /* the two panes (editor | preview) */
 #panes { flex: 1 1 auto; display: flex; min-height: 0; }
