@@ -834,6 +834,31 @@ def test_clone_hub_project(qapp, tmp_path, monkeypatch):
 
 
 @pytest.mark.ui
+def test_git_identity_attributes_commits(qapp):
+    """A configured git identity attributes project commits to the real user."""
+    import os
+    import subprocess
+    from qtpy.QtCore import QSettings
+    w = _mainwindow(qapp)
+    s = QSettings("ferroDAC", "ferroDAC")
+    try:
+        s.setValue("git/name", "Grace Hopper")
+        s.setValue("git/email", "grace@navy.mil")
+        assert w._git_identity() == ("Grace Hopper", "grace@navy.mil")
+        p = w._project_mgr.active
+        with open(os.path.join(p.path, "note.md"), "w") as fh:
+            fh.write("hi\n")
+        w._commit_project("identity test")
+        out = subprocess.run(["git", "-C", p.path, "log", "-1", "--format=%an|%ae"],
+                             capture_output=True, text=True).stdout.strip()
+        assert out == "Grace Hopper|grace@navy.mil"
+    finally:
+        s.remove("git/name")
+        s.remove("git/email")
+        w.close()
+
+
+@pytest.mark.ui
 def test_history_dialog_remote_push(qapp, tmp_path):
     """The History dialog shows the remote and pushes to it (offline, a local bare)."""
     import os

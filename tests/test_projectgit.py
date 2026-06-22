@@ -74,3 +74,17 @@ def test_projectrepo_is_defensive(tmp_path):
     sha = repo.commit("create")                          # inits + commits the empty dir
     # an empty new dir has nothing to commit → None, and no exception
     assert sha is None or len(sha) == 40
+
+
+def test_commit_with_author(tmp_path):
+    """A commit can be attributed to the real user (name + email)."""
+    import subprocess
+    from ferrodac.core.projectgit import ProjectRepo
+    p = tmp_path / "p"
+    p.mkdir()
+    (p / "f.txt").write_text("x\n")
+    repo = ProjectRepo(str(p))
+    assert repo.commit("with author", author=("Ada Lovelace", "ada@example.com"))
+    out = subprocess.run(["git", "-C", str(p), "log", "-1", "--format=%an|%ae"],
+                         capture_output=True, text=True).stdout.strip()
+    assert out == "Ada Lovelace|ada@example.com"

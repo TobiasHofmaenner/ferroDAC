@@ -18,10 +18,12 @@ def _ago(ts: int) -> str:
 
 
 class HistoryDialog(QDialog):
-    def __init__(self, repo, project_name, parent=None, on_remote_changed=None):
+    def __init__(self, repo, project_name, parent=None, on_remote_changed=None,
+                 author=None):
         super().__init__(parent)
         self.repo = repo
         self._on_remote_changed = on_remote_changed   # app: persist URL + share if on hub
+        self._author = author                         # (name, email) for commits, or None
         self.setWindowTitle(f"History · {project_name}")
         self.resize(620, 480)
         root = QVBoxLayout(self)
@@ -30,6 +32,13 @@ class HistoryDialog(QDialog):
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#8b95a4; font-size:11px;")
         root.addWidget(intro)
+
+        who = (f"Commits as: {author[0]} <{author[1]}>" if author else
+               "Commits use this machine's identity — set yours in Project ▸ Git identity…")
+        whol = QLabel(who)
+        whol.setStyleSheet("color:#6b7686; font-size:11px;")
+        whol.setWordWrap(True)
+        root.addWidget(whol)
 
         # remote: push/pull to any git URL (your GitHub/GitLab — auth via your git setup)
         rrow = QHBoxLayout()
@@ -117,5 +126,5 @@ class HistoryDialog(QDialog):
         msg, ok = QInputDialog.getText(self, "Checkpoint", "Describe this checkpoint:",
                                        text="Checkpoint")
         if ok:
-            self.repo.commit(msg.strip() or "Checkpoint")
+            self.repo.commit(msg.strip() or "Checkpoint", author=self._author)
             self.refresh()

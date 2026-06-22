@@ -58,15 +58,19 @@ class ProjectRepo:
         except Exception:                       # noqa: BLE001
             return False
 
-    def commit(self, message: str):
-        """Stage everything and commit if there's anything to commit. Returns the new
-        commit sha, or None (nothing to commit / git unavailable / failure)."""
+    def commit(self, message: str, author=None):
+        """Stage everything and commit if there's anything to commit. `author` is an
+        optional (name, email) attributing the commit to the real user (else the repo's
+        configured identity). Returns the new sha, or None (nothing to commit / failure)."""
         try:
             self.init()
             self._git("add", "-A")
             if not self._git("status", "--porcelain").stdout.strip():
                 return None                     # clean → nothing to record
-            self._git("commit", "-q", "-m", message or "checkpoint")
+            pre = []
+            if author and author[0] and author[1]:
+                pre = ["-c", f"user.name={author[0]}", "-c", f"user.email={author[1]}"]
+            self._git(*pre, "commit", "-q", "-m", message or "checkpoint")
             return self._git("rev-parse", "HEAD").stdout.strip()
         except FileNotFoundError:
             log.warning("git not installed — project history disabled")

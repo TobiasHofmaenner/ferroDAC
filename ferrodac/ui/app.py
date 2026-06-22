@@ -2118,6 +2118,7 @@ class MainWindow(QMainWindow):
         projmenu = self.menuBar().addMenu("&Project")
         projmenu.addAction("Checkpoint…", self._checkpoint)
         projmenu.addAction("History…", self._open_history)
+        projmenu.addAction("Git identity…", self._set_git_identity)
 
         view = self.menuBar().addMenu("&View")
         view.addAction(self.projects_dock.toggleViewAction())
@@ -3296,13 +3297,37 @@ class MainWindow(QMainWindow):
         p = self._project_mgr.active
         return ProjectRepo(p.path) if p is not None else None
 
+    def _git_identity(self):
+        """(name, email) for project commits — the user's, if set, else None (the
+        repo's default identity is used)."""
+        s = QSettings("ferroDAC", "ferroDAC")
+        name = (s.value("git/name", "", type=str) or "").strip()
+        email = (s.value("git/email", "", type=str) or "").strip()
+        return (name, email) if name and email else None
+
+    def _set_git_identity(self) -> None:
+        """Project ▸ Git identity… — who project-history commits are attributed to."""
+        s = QSettings("ferroDAC", "ferroDAC")
+        name, ok = QInputDialog.getText(self, "Git identity",
+                                        "Your name (for project history):",
+                                        text=s.value("git/name", "", type=str) or "")
+        if not ok:
+            return
+        email, ok2 = QInputDialog.getText(self, "Git identity", "Your email:",
+                                          text=s.value("git/email", "", type=str) or "")
+        if not ok2:
+            return
+        s.setValue("git/name", name.strip())
+        s.setValue("git/email", email.strip())
+        self.statusBar().showMessage("Git identity saved — used for project commits.", 5000)
+
     def _commit_project(self, message: str) -> None:
         """Commit the active project's folder at a boundary (recording, layout,
         checkpoint). Best-effort — never blocks or raises into the UI."""
         repo = self._project_repo()
         if repo is None:
             return
-        sha = repo.commit(message)
+        sha = repo.commit(message, author=self._git_identity())
         if sha:
             self.statusBar().showMessage(f"✔ {message}  ({sha[:8]})", 4000)
             if getattr(self, "_history_dialog", None) is not None:
@@ -3337,7 +3362,8 @@ class MainWindow(QMainWindow):
                 p.set_git_remote(url)
                 self._republish_active_if_hub()
         self._history_dialog = HistoryDialog(repo, self._project_mgr.active.name, self,
-                                             on_remote_changed=on_remote_changed)
+                                             on_remote_changed=on_remote_changed,
+                                             author=self._git_identity())
         self._history_dialog.finished.connect(
             lambda _=0: setattr(self, "_history_dialog", None))
         self._history_dialog.show()
