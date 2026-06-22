@@ -4,10 +4,35 @@ Adding a repo clones it, shows a trust gate listing exactly what it provides (so
 can review before trusting), then installs + loads it. Extensions are trusted code you
 opt into: the gate is the safeguard, transparency (source + white papers) is the rest.
 """
-from qtpy.QtCore import Qt
+import os
+
+from qtpy.QtCore import Qt, QUrl
+from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QInputDialog,
                             QLabel, QListWidget, QListWidgetItem, QMessageBox,
-                            QPushButton, QVBoxLayout)
+                            QPlainTextEdit, QPushButton, QVBoxLayout)
+
+from ..extensions import discover_extensions
+from ..extensions.manager import entry_file
+
+
+class _SourceViewer(QDialog):
+    """Read-only view of a provider's source — 'see exactly what is happening'."""
+
+    def __init__(self, title, text, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Source · {title}")
+        self.resize(720, 560)
+        lay = QVBoxLayout(self)
+        view = QPlainTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText(text or "(no source available)")
+        view.setStyleSheet("font-family: monospace; font-size: 12px;")
+        lay.addWidget(view)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(self.reject)
+        bb.accepted.connect(self.accept)
+        lay.addWidget(bb)
 
 
 class ExtensionsDialog(QDialog):
@@ -26,7 +51,8 @@ class ExtensionsDialog(QDialog):
         root.addWidget(intro)
 
         self._list = QListWidget()
-        root.addWidget(self._list, 1)
+        self._list.currentItemChanged.connect(self._on_record_selected)
+        root.addWidget(self._list, 2)
 
         row = QHBoxLayout()
         add = QPushButton("Add from git…")
@@ -40,6 +66,21 @@ class ExtensionsDialog(QDialog):
         row.addWidget(self._toggle_btn)
         row.addWidget(rm)
         root.addLayout(row)
+
+        prov_label = QLabel("Provides")
+        prov_label.setStyleSheet("color:#c7d0db; font-weight:600; margin-top:4px;")
+        root.addWidget(prov_label)
+        self._providers = QListWidget()
+        root.addWidget(self._providers, 1)
+        prow = QHBoxLayout()
+        self._src_btn = QPushButton("Show source")
+        self._src_btn.clicked.connect(self._show_source)
+        self._wp_btn = QPushButton("Show white paper")
+        self._wp_btn.clicked.connect(self._show_whitepaper)
+        prow.addStretch(1)
+        prow.addWidget(self._src_btn)
+        prow.addWidget(self._wp_btn)
+        root.addLayout(prow)
 
         note = QLabel("Processors are available immediately; new widgets and drivers apply "
                       "after a restart.")
@@ -75,6 +116,49 @@ class ExtensionsDialog(QDialog):
     def _selected(self):
         item = self._list.currentItem()
         return item.data(Qt.UserRole) if item else None
+
+    def _on_record_selected(self, *_):
+        """Show the providers of the selected extension (so you can inspect them)."""
+        self._providers.clear()
+        src = self._selected()
+        rec = next((r for r in self.mgr.records() if r.get("source") == src), None)
+        if not rec:
+            return
+        d = rec.get("clone") or rec.get("source")
+        if not d or not os.path.exists(d):
+            return
+        for mf in discover_extensions(d):
+            for p in mf.providers:
+                paper = mf.whitepaper_path(p)
+                item = QListWidgetItem(f"{p.role}: {p.entry}{'  📄' if paper else ''}")
+                item.setData(Qt.UserRole, (mf.root, p.entry, paper))
+                self._providers.addItem(item)
+
+    def _show_source(self):
+        item = self._providers.currentItem()
+        if item is None:
+            return
+        root_dir, entry, _ = item.data(Qt.UserRole)
+        path = entry_file(root_dir, entry)
+        text = ""
+        if path:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+            except OSError as exc:
+                text = f"(could not read {path}: {exc})"
+        _SourceViewer(entry, text, self).exec()
+
+    def _show_whitepaper(self):
+        item = self._providers.currentItem()
+        if item is None:
+            return
+        _root, _entry, paper = item.data(Qt.UserRole)
+        if not paper or not os.path.exists(paper):
+            QMessageBox.information(self, "No white paper",
+                                    "This provider doesn't ship a white paper.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(paper))
 
     # -- actions -------------------------------------------------------------
     def _add(self):

@@ -2788,17 +2788,39 @@ class MainWindow(QMainWindow):
                                    "label": getattr(type(proc), "label", proc.kind)}
         return list(seen.values())
 
-    def _processor_source(self, kind: str) -> str:
+    def _processor_source(self, kind: str) -> dict:
         """The source of a used processor's class — so its analysis can be pasted,
-        readable, into a doc (open science)."""
+        readable, into a doc (open science) — plus, for an extension processor that
+        ships one, its white paper COPIED into the project (so the citation is
+        self-contained). Returns {source, whitepaper-abspath|None}."""
         import inspect
+        src = ""
         for proc in self.dashboard._processors.values():
             if proc.kind == kind:
                 try:
-                    return inspect.getsource(type(proc))
+                    src = inspect.getsource(type(proc))
                 except Exception:                  # noqa: BLE001 — e.g. C-defined / no source
-                    return ""
-        return ""
+                    src = ""
+                break
+        return {"source": src, "whitepaper": self._copy_processor_whitepaper(kind)}
+
+    def _copy_processor_whitepaper(self, kind: str):
+        """If `kind` comes from an extension with a white paper, copy it into the active
+        project's papers/ (idempotent) and return the destination path; else None."""
+        mgr = self._extensions
+        p = self._project_mgr.active
+        if mgr is None or p is None:
+            return None
+        src = mgr.whitepaper_for(kind)
+        if not src or not os.path.exists(src):
+            return None
+        try:
+            dest = os.path.join(p.subdir("papers"), os.path.basename(src))
+            import shutil
+            shutil.copy2(src, dest)
+            return dest
+        except Exception:                          # noqa: BLE001
+            return None
 
     # -- editor /rec macro: list recordings + export one on demand -----------
     def _list_recordings(self) -> list:

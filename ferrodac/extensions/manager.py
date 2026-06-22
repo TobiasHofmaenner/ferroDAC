@@ -53,13 +53,26 @@ def _repo_name(url: str) -> str:
     return re.sub(r"[^\w.-]", "_", base) or "extension"
 
 
-def _import_entry(entry: str) -> None:
-    """Import a ``module:Class`` entry. Importing the module runs its registration
-    side effects; we then verify the class is actually present."""
+def _import_entry(entry: str):
+    """Import a ``module:Class`` entry and return the class. Importing the module runs
+    its registration side effects; we then verify the class is actually present."""
     module, _, cls = entry.partition(":")
     mod = importlib.import_module(module)
-    if cls and not hasattr(mod, cls):
+    if not cls:
+        return None
+    if not hasattr(mod, cls):
         raise ExtensionError(f"{cls!r} not found in {module!r}")
+    return getattr(mod, cls)
+
+
+def entry_file(root: str, entry: str):
+    """The source file for a ``module:Class`` entry under a repo root, WITHOUT importing
+    it (so 'Show source' never executes a disabled extension). None if not found."""
+    rel = entry.split(":")[0].replace(".", os.sep)
+    for cand in (os.path.join(root, rel + ".py"), os.path.join(root, rel, "__init__.py")):
+        if os.path.exists(cand):
+            return cand
+    return None
 
 
 class ExtensionManager:
@@ -68,6 +81,7 @@ class ExtensionManager:
     def __init__(self, root_dir: str):
         self.root = root_dir                   # where clones + installed.json live
         self._loaded: dict = {}                # name -> LoadedExtension
+        self._index: dict = {}                 # kind/driver -> (Manifest, Provider, class)
 
     # -- loading -------------------------------------------------------------
     def load_extension(self, ext_dir: str) -> LoadedExtension:
@@ -93,7 +107,10 @@ class ExtensionManager:
         errors = []
         for p in mf.providers:
             try:
-                _import_entry(p.entry)
+                obj = _import_entry(p.entry)
+                kind = getattr(obj, "kind", None) or getattr(obj, "driver", None)
+                if kind:
+                    self._index[kind] = (mf, p, obj)
             except Exception as exc:           # noqa: BLE001 — one bad provider, not fatal
                 errors.append(f"{p.entry}: {exc}")
                 log.warning("extension %s: provider %s failed: %s", mf.name, p.entry, exc)
@@ -104,6 +121,31 @@ class ExtensionManager:
     @property
     def loaded(self) -> list:
         return list(self._loaded.values())
+
+    # -- provenance lookups (by a provider's kind/driver) --------------------
+    def provider_for(self, kind: str):
+        """(Manifest, Provider, class) for a loaded provider, or None."""
+        return self._index.get(kind)
+
+    def source_for(self, kind: str) -> str:
+        """The provider's source — read from its file (no import/execution)."""
+        rec = self._index.get(kind)
+        if rec is None:
+            return ""
+        mf, p, _ = rec
+        path = entry_file(mf.root, p.entry)
+        if path:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    return fh.read()
+            except OSError:
+                pass
+        return ""
+
+    def whitepaper_for(self, kind: str):
+        """Absolute path to the provider's white paper, or None."""
+        rec = self._index.get(kind)
+        return rec[0].whitepaper_path(rec[1]) if rec else None
 
     # -- persistence (installed.json) ----------------------------------------
     @property

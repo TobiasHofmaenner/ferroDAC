@@ -330,6 +330,34 @@ def test_slash_proc_inserts_source(qapp):
 
 
 @pytest.mark.ui
+def test_slash_proc_cites_whitepaper(qapp):
+    """When a processor's source comes with a white paper, /proc adds a citation link
+    (relative to the doc) alongside the code block."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "papers"))
+    wp = os.path.join(d, "papers", "p.md")
+    with open(wp, "w", encoding="utf-8") as fh:
+        fh.write("# paper")
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    dv = DocView(on_list_processors=lambda: [{"kind": "x", "label": "X Proc"}],
+                 on_processor_source=lambda k: {"source": "class X: pass\n", "whitepaper": wp})
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        assert _pump(qapp, lambda: _js(qapp, dv.view, "window.__doc.processors().length") == 1)
+        dv.view.page().runJavaScript("window.__doc.insertProcessorSource('x')")
+        assert _pump(qapp, lambda: "class X" in (_js(qapp, dv.view, "window.__doc.text()") or ""))
+        txt = _js(qapp, dv.view, "window.__doc.text()")
+        assert "[white paper](papers/p.md)" in txt, txt
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_slash_macro_lists_existing_and_export_now(qapp):
     """Picking a recording shows its ALREADY-exported files plus an 'Export now' item."""
     from ferrodac.ui.docs import DocView

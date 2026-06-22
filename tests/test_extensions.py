@@ -113,6 +113,36 @@ def test_install_url_from_local_git(tmp_path):
     assert rec["source"] == str(repo) and rec["commit"] == sha and rec["clone"] == dest
 
 
+def test_source_and_whitepaper_lookup(tmp_path):
+    """After loading, the manager can show a provider's source (read from file, no
+    execution) and resolve its white paper — by the provider's kind."""
+    from ferrodac.extensions import ExtensionManager
+    mgr = ExtensionManager(str(tmp_path / "root"))
+    mgr.load_repo(EX)                                    # in-tree example: window_integral
+    assert "class WindowIntegral" in mgr.source_for("window_integral")
+    wp = mgr.whitepaper_for("window_integral")
+    assert wp and wp.endswith("integrate.md") and os.path.exists(wp)
+    assert mgr.source_for("nope") == "" and mgr.whitepaper_for("nope") is None
+
+
+@pytest.mark.ui
+def test_extensions_dialog_providers(qapp, tmp_path):
+    from qtpy.QtCore import Qt
+    from ferrodac.extensions import ExtensionManager
+    from ferrodac.ui.extensions_view import ExtensionsDialog
+    mgr = ExtensionManager(str(tmp_path / "root"))
+    mgr.install(EX, enabled=True)                        # records the in-tree example
+    dlg = ExtensionsDialog(mgr, None)
+    try:
+        dlg._list.setCurrentRow(0)                       # selecting → providers populate
+        assert dlg._providers.count() == 1
+        assert "WindowIntegral" in dlg._providers.item(0).text()
+        root_dir, entry, paper = dlg._providers.item(0).data(Qt.UserRole)
+        assert entry.endswith(":WindowIntegral") and paper and os.path.exists(paper)
+    finally:
+        dlg.deleteLater()
+
+
 @pytest.mark.ui
 def test_extensions_dialog_lists_and_toggles(qapp, tmp_path):
     from ferrodac.extensions import ExtensionManager

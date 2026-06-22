@@ -124,7 +124,7 @@ class DocBridge(QObject):
 
     # Editor macro (/proc): cite a used processor's source (open science). Qt → JS:
     processorsAvailable = Signal(str)    # (json [{kind, label}])
-    processorSource = Signal(str, str)   # (kind, source)
+    processorSource = Signal(str, str, str)  # (kind, source, whitepaper_relpath)
     processorsRequested = Signal()       # JS → Qt
     procSourceRequested = Signal(str)    # (kind)
 
@@ -472,13 +472,23 @@ class DocView(QWidget):
         self.bridge.processorsAvailable.emit(json.dumps(procs))
 
     def _send_processor_source(self, kind: str) -> None:
-        src = ""
+        src, paper = "", None
         if self._on_processor_source is not None:
             try:
-                src = self._on_processor_source(kind) or ""
+                res = self._on_processor_source(kind)
             except Exception:                 # noqa: BLE001
-                src = ""
-        self.bridge.processorSource.emit(kind, src)
+                res = None
+            if isinstance(res, dict):         # {source, whitepaper-abspath}
+                src, paper = res.get("source") or "", res.get("whitepaper")
+            else:
+                src = res or ""
+        rel = ""
+        if paper:                             # path relative to the open doc (portable)
+            try:
+                rel = os.path.relpath(paper, self._dir or os.getcwd()).replace(os.sep, "/")
+            except Exception:                 # noqa: BLE001
+                rel = ""
+        self.bridge.processorSource.emit(kind, src, rel)
 
     def _emit_files(self, signal, rec_id: str, raw) -> None:
         """Hand the JS a recording's files with paths RELATIVE to the open doc

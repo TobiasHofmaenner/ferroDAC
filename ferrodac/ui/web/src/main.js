@@ -316,12 +316,14 @@ function slashSource(context) {
   return null;
 }
 
-// Insert a processor's source as a fenced code block (open science — cite the algorithm).
-function insertProcessorSource(kind, src) {
+// Insert a processor's source as a fenced code block (open science — cite the
+// algorithm), plus a link to its white paper when the extension ships one.
+function insertProcessorSource(kind, src, paperRel) {
   if (!editor || !src) return;
   const proc = processorsCache.find((p) => p.kind === kind);
   const label = (proc && proc.label) || kind;
-  const block = `\n\n*${label} — processor source:*\n\n\`\`\`python\n`
+  const cite = paperRel ? ` ([white paper](${paperRel}))` : "";
+  const block = `\n\n*${label} — processor source${cite}:*\n\n\`\`\`python\n`
     + src.replace(/\s+$/, "") + "\n```\n";
   const at = editor.state.selection.main.head;
   editor.dispatch({ changes: { from: at, insert: block },
@@ -524,10 +526,10 @@ function connect() {
     bridge.processorsAvailable.connect((j) => {
       try { processorsCache = JSON.parse(j) || []; } catch (e) { processorsCache = []; }
     });
-    bridge.processorSource.connect((kind, src) => {        // picked /proc → insert source
+    bridge.processorSource.connect((kind, src, paperRel) => {  // picked /proc → insert
       if (!awaitingProcInsert) return;
       awaitingProcInsert = false;
-      insertProcessorSource(kind, src);
+      insertProcessorSource(kind, src, paperRel);
     });
     bridge.collabSeed.connect(enterCollab);
     bridge.collabUpdate.connect((b64) => {
