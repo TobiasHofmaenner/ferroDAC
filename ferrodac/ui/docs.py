@@ -113,6 +113,13 @@ class DocBridge(QObject):
     awarenessRequested = Signal(str)     # (state_b64)
     snapshotRequested = Signal(str)      # (text) — leader materialises the .md
 
+    # Editor macros (/rec): list recordings + export one on demand. Qt → JS:
+    recordingsAvailable = Signal(str)    # (json [{id, label, t0, t1}])
+    recordingExported = Signal(str, str)  # (rec_id, json [{name, relpath, kind}])
+    # JS → Qt (re-emitted by the slots below; DocView forwards to the app):
+    recordingsRequested = Signal()
+    exportRequested = Signal(str)        # (rec_id)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._relpath = ""
@@ -133,6 +140,15 @@ class DocBridge(QObject):
     @Slot(str)
     def save(self, text: str) -> None:
         self.saveRequested.emit(text)
+
+    # -- editor macros: JS → Qt --------------------------------------------
+    @Slot()
+    def requestRecordings(self) -> None:
+        self.recordingsRequested.emit()
+
+    @Slot(str)
+    def requestRecordingExport(self, rec_id: str) -> None:
+        self.exportRequested.emit(rec_id)
 
     # -- collaboration: JS → Qt (thin re-emit; DocView forwards to the hub) --
     @Slot()
@@ -160,13 +176,16 @@ class DocView(QWidget):
     """Renders a project markdown file live; an external editor editing the raw file
     is just another writer the watcher catches."""
 
-    def __init__(self, on_edit=None, on_configure=None, parent=None):
+    def __init__(self, on_edit=None, on_configure=None, parent=None,
+                 on_list_recordings=None, on_export_recording=None):
         super().__init__(parent)
         self._path = None                # absolute path of the open doc
         self._dir = None                 # its folder (watched too — atomic-save safe)
         self._mtime_seen = None
         self._on_edit = on_edit          # optional override callable(path)
         self._on_configure = on_configure  # optional override callable()
+        self._on_list_recordings = on_list_recordings   # () -> [{id,label,t0,t1}]
+        self._on_export_recording = on_export_recording  # (rec_id) -> [{name,abspath,kind}]
         self._collab = None              # a HubController, when a hub+doc is available
         self._doc_id = None              # "<project_id>::<relpath>" for collaboration
         self._collab_on = False          # currently in a live session?
@@ -231,6 +250,8 @@ class DocView(QWidget):
         self.bridge.awarenessRequested.connect(self._collab_send_awareness)
         self.bridge.snapshotRequested.connect(self._collab_send_snapshot)
         self.bridge.leaveRequested.connect(self._stop_collab)
+        self.bridge.recordingsRequested.connect(self._push_recordings)
+        self.bridge.exportRequested.connect(self._export_recording)
         self._channel = QWebChannel(self)
         self._channel.registerObject("bridge", self.bridge)
         self.view.page().setWebChannel(self._channel)
@@ -376,9 +397,45 @@ class DocView(QWidget):
 
     def _on_js_ready(self) -> None:
         self._js_ready = True
+        self._push_recordings()               # seed the /rec macro's cache
         if self._pending_collab:              # a pop-out asked to collab before JS was up
             self._pending_collab = False
             self._start_collab()
+
+    # -- editor macros (/rec): list recordings + export one on demand --------
+    def _push_recordings(self) -> None:
+        if self._on_list_recordings is None:
+            return
+        import json
+        try:
+            recs = self._on_list_recordings() or []
+        except Exception:                     # noqa: BLE001
+            recs = []
+        self.bridge.recordingsAvailable.emit(json.dumps(recs))
+
+    def _export_recording(self, rec_id: str) -> None:
+        """Export a recording on demand (via the app callback) and hand the JS the
+        resulting files with paths RELATIVE to the open doc (portable in-repo links)."""
+        import json
+        files = []
+        base = self._dir or os.getcwd()
+        if self._on_export_recording is not None:
+            try:
+                raw = self._on_export_recording(rec_id) or []
+            except Exception:                 # noqa: BLE001
+                raw = []
+            for f in raw:
+                ap = f.get("abspath")
+                if not ap:
+                    continue
+                try:
+                    rel = os.path.relpath(ap, base)
+                except Exception:             # noqa: BLE001 — e.g. different drive (Windows)
+                    rel = ap
+                files.append({"name": f.get("name") or os.path.basename(ap),
+                              "relpath": rel.replace(os.sep, "/"),
+                              "kind": f.get("kind", "plot")})
+        self.bridge.recordingExported.emit(rec_id, json.dumps(files))
 
     def start_collab(self) -> None:
         """Join the collab session — DEFERRING until the JS bridge handshake completes

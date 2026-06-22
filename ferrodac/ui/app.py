@@ -2187,7 +2187,9 @@ class MainWindow(QMainWindow):
             self.docs_dock.setWidget(ph)
             return
         self._docs_view = DocView(on_edit=self._open_doc_external,
-                                  on_configure=self._configure_editor)
+                                  on_configure=self._configure_editor,
+                                  on_list_recordings=self._list_recordings,
+                                  on_export_recording=self._export_recording_for_doc)
         self.docs_dock.setWidget(self._docs_view)
         self._open_active_doc()
 
@@ -2726,6 +2728,79 @@ class MainWindow(QMainWindow):
             if hasattr(p, "set_regions_visible"):
                 p.set_regions_visible(True)
         self.statusBar().showMessage(f"Exported {n} plot(s) → {folder}", 6000)
+
+    # -- editor /rec macro: list recordings + export one on demand -----------
+    def _list_recordings(self) -> list:
+        """Recordings (closed REC spans) for the editor's /rec macro: id, label, span."""
+        out = []
+        for m in self.dashboard.markers.of_kind(RECORDING):
+            if m.t_end is None:
+                continue
+            out.append({"id": m.id, "label": m.label or "recording",
+                        "t0": float(m.t), "t1": float(m.t_end)})
+        return out
+
+    def _export_recording_for_doc(self, rec_id: str) -> list:
+        """On-demand export (CSV + windowed plots) of a recording into the ACTIVE
+        project's reports/<run>/, for the /rec macro. Returns [{name, abspath, kind}];
+        reuses a prior export (marker.run_dir) when present."""
+        p = self._project_mgr.active
+        m = self.dashboard.markers.get(rec_id)
+        if p is None or m is None or m.t_end is None or self.resolver is None:
+            return []
+        dest = m.run_dir if (m.run_dir and os.path.isdir(m.run_dir)) else None
+        if dest is None:
+            label = re.sub(r"[^\w.-]", "_", m.label or "recording").strip("_") or "recording"
+            stamp = time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(m.t))
+            dest = os.path.join(p.reports_dir, f"{label}_{stamp}")
+        os.makedirs(dest, exist_ok=True)
+        files = []
+        from ..store import export_window
+        try:
+            export_window(dest, self.dashboard.export_sources(), self.resolver,
+                          m.t, m.t_end, tags=self.dashboard.markers.to_list())
+            csv = os.path.join(dest, "data.csv")
+            if os.path.exists(csv):
+                files.append({"name": "data.csv", "abspath": csv, "kind": "csv"})
+        except Exception:                          # noqa: BLE001
+            pass
+        plots_dir = os.path.join(dest, "plots")
+        os.makedirs(plots_dir, exist_ok=True)
+        files += self._grab_recording_plots(plots_dir, m.t, m.t_end)
+        try:
+            self.dashboard.markers.update(rec_id, run_dir=dest)
+        except Exception:                          # noqa: BLE001
+            pass
+        return files
+
+    def _grab_recording_plots(self, plots_dir: str, t0: float, t1: float) -> list:
+        """Render each chart zoomed to [t0,t1] → PNG (reuse of _export_plots' grab),
+        restoring the live view afterward. Returns [{name, abspath, kind}]."""
+        from qtpy.QtWidgets import QApplication
+        charts = [p for p in self.dashboard.panels()
+                  if getattr(p, "plot", None) is not None]
+        prev = self.time_context.window if self.time_context is not None else None
+        for p in charts:
+            if hasattr(p, "set_regions_visible"):
+                p.set_regions_visible(False)
+            if hasattr(p, "zoom_time"):
+                p.zoom_time(t0, t1)
+        QApplication.processEvents()               # let the plots repaint before grabbing
+        out = []
+        for p in charts:
+            try:
+                png = os.path.join(plots_dir, f"{p.panel_id}.png")
+                p.plot.grab().save(png)
+                out.append({"name": getattr(p, "title", "") or p.panel_id,
+                            "abspath": png, "kind": "plot"})
+            except Exception:                      # noqa: BLE001
+                pass
+        for p in charts:                           # restore overlays + the live window
+            if hasattr(p, "set_regions_visible"):
+                p.set_regions_visible(True)
+            if prev is not None and hasattr(p, "zoom_time"):
+                p.zoom_time(prev[0], prev[1])
+        return out
 
     def _toggle_record(self):
         """A recording is just a marked SPAN over the always-on durable store.

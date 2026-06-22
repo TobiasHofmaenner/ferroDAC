@@ -208,6 +208,48 @@ def test_local_image_resolves_to_file_url(qapp):
 
 
 @pytest.mark.ui
+def test_macro_bridge_recordings_and_export(qapp):
+    """The /rec bridge protocol: requestRecordings → recordingsAvailable; an export
+    request → recordingExported with file paths RELATIVE to the open doc."""
+    import json
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    run = os.path.join(d, "reports", "run1", "plots")
+    os.makedirs(run, exist_ok=True)
+    png = os.path.join(run, "chart-1.png")
+    with open(png, "wb") as fh:
+        fh.write(b"\x89PNG\r\n")
+    recs = [{"id": "rec1", "label": "Bakeout", "t0": 1.0, "t1": 2.0}]
+    exp = [{"name": "Pressure", "abspath": png, "kind": "plot"}]
+    dv = DocView(on_list_recordings=lambda: recs,
+                 on_export_recording=lambda rid: exp if rid == "rec1" else [])
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")                 # page loaded + rendered
+        got = []
+        dv.bridge.recordingsAvailable.connect(lambda j: got.append(j))
+        dv.bridge.requestRecordings()
+        assert _pump(qapp, lambda: bool(got))
+        assert json.loads(got[-1])[0]["label"] == "Bakeout"
+
+        out = []
+        dv.bridge.recordingExported.connect(lambda rid, j: out.append((rid, j)))
+        dv.bridge.requestRecordingExport("rec1")
+        assert _pump(qapp, lambda: bool(out))
+        rid, j = out[-1]
+        files = json.loads(j)
+        assert rid == "rec1"
+        assert files[0]["relpath"] == "reports/run1/plots/chart-1.png"
+        assert files[0]["name"] == "Pressure" and files[0]["kind"] == "plot"
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_collab_reload_from_disk(qapp):
     """In collab, an external .md edit surfaces a reload affordance; reloading applies
     the on-disk text to the LIVE doc (explicit last-writer-wins)."""
