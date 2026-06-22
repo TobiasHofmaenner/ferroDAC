@@ -17,6 +17,9 @@ import importlib
 import json
 import logging
 import os
+import re
+import shutil
+import subprocess
 import sys
 
 from .manifest import (API_VERSION, ManifestError, discover_extensions,
@@ -41,6 +44,13 @@ class LoadedExtension:
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+def _repo_name(url: str) -> str:
+    base = url.rstrip("/").split("/")[-1]
+    if base.endswith(".git"):
+        base = base[:-4]
+    return re.sub(r"[^\w.-]", "_", base) or "extension"
 
 
 def _import_entry(entry: str) -> None:
@@ -114,12 +124,68 @@ class ExtensionManager:
             json.dump(records, fh, indent=2)
         os.replace(tmp, self._records_path)
 
-    def install(self, source: str, names=None, enabled: bool = True) -> list:
-        """Record a source (a local repo dir today) + load it now if enabled."""
+    def _record(self, source, clone, commit, names, enabled) -> None:
         recs = [r for r in self.records() if r.get("source") != source]
-        recs.append({"source": source, "enabled": bool(enabled), "names": names})
+        recs.append({"source": source, "clone": clone, "commit": commit,
+                     "enabled": bool(enabled), "names": names})
         self._write(recs)
+
+    def install(self, source: str, names=None, enabled: bool = True) -> list:
+        """Record a LOCAL extension dir + load it now if enabled (no git). For a git
+        repo URL, use install_url (clone + pin)."""
+        self._record(source, None, None, names, enabled)
         return self.load_repo(source, names) if enabled else []
+
+    # -- git install (clone + pin) -------------------------------------------
+    def _git(self, args, cwd=None) -> str:
+        try:
+            return subprocess.run(["git", *args], cwd=cwd, check=True,
+                                  capture_output=True, text=True).stdout
+        except FileNotFoundError as exc:
+            raise ExtensionError("git is not installed") from exc
+        except subprocess.CalledProcessError as exc:
+            raise ExtensionError(
+                f"git {' '.join(args)} failed: {(exc.stderr or '').strip()}") from exc
+
+    def clone(self, url: str, ref: str = None):
+        """Clone (or fetch+update) a repo into the extensions dir and check out a
+        pinned ref. Returns (clone_dir, resolved_commit_sha)."""
+        dest = os.path.join(self.root, "clones", _repo_name(url))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.isdir(os.path.join(dest, ".git")):
+            self._git(["fetch", "--all", "--tags", "--prune"], cwd=dest)
+        else:
+            if os.path.exists(dest):
+                shutil.rmtree(dest, ignore_errors=True)
+            self._git(["clone", url, dest])
+        if ref:
+            self._git(["checkout", ref], cwd=dest)
+        sha = self._git(["rev-parse", "HEAD"], cwd=dest).strip()
+        return dest, sha
+
+    def prepare(self, url: str, ref: str = None):
+        """Clone/update + discover, WITHOUT recording or loading — for the trust gate.
+        Returns (clone_dir, commit_sha, [Manifest])."""
+        dest, sha = self.clone(url, ref)
+        return dest, sha, discover_extensions(dest)
+
+    def install_url(self, url: str, ref: str = None, names=None, enabled: bool = True):
+        """Clone+pin a git repo, record it (source=url, with the resolved commit), and
+        load the (named) extensions. Returns ([LoadedExtension], clone_dir, sha)."""
+        dest, sha = self.clone(url, ref)
+        self._record(url, dest, sha, names, enabled)
+        return (self.load_repo(dest, names) if enabled else []), dest, sha
+
+    def update(self, source: str, ref: str = None) -> str:
+        """Re-pin a git-sourced extension to a new commit/ref; returns the new sha."""
+        recs = self.records()
+        rec = next((r for r in recs if r.get("source") == source), None)
+        if rec is None:
+            raise ExtensionError(f"not installed: {source}")
+        dest, sha = self.clone(source, ref)
+        rec["clone"], rec["commit"] = dest, sha
+        self._write(recs)
+        return sha
 
     def set_enabled(self, source: str, enabled: bool) -> None:
         recs = self.records()
@@ -136,12 +202,12 @@ class ExtensionManager:
         for r in self.records():
             if not r.get("enabled", True):
                 continue
-            src = r.get("source")
-            if not src or not os.path.exists(src):
-                log.warning("extension source missing, skipping: %r", src)
+            d = r.get("clone") or r.get("source")     # git sources load from the clone
+            if not d or not os.path.exists(d):
+                log.warning("extension source missing, skipping: %r", r.get("source"))
                 continue
             try:
-                self.load_repo(src, r.get("names"))
+                self.load_repo(d, r.get("names"))
             except (ExtensionError, ManifestError) as exc:
                 log.warning("extension %r failed to load: %s", src, exc)
             except Exception as exc:               # noqa: BLE001 — never block launch

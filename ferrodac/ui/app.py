@@ -1846,11 +1846,12 @@ class ProjectExplorer(QWidget):
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
     def __init__(self, manager: DeviceManager, engine: Engine, parent=None,
-                 restore_last: bool = True):
+                 restore_last: bool = True, extensions=None):
         super().__init__(parent)
         self.manager = manager
         self.engine = engine
         self._restore_last = restore_last
+        self._extensions = extensions      # ExtensionManager (the Extensions dialog uses it)
         self.setWindowTitle("ferroDAC")
         self.resize(1320, 840)
         self._dialogs: dict[str, ConfigDialog] = {}
@@ -2124,6 +2125,9 @@ class MainWindow(QMainWindow):
         netmenu = self.menuBar().addMenu("&Cloud")
         self.hub_action = netmenu.addAction("ferroDAC Cloud…", self._open_hub)
 
+        extmenu = self.menuBar().addMenu("E&xtensions")
+        extmenu.addAction("Manage extensions…", self._open_extensions)
+
         tb = self.addToolBar("Main")
         self.main_toolbar = tb
         tb.setObjectName("MainToolBar")
@@ -2305,6 +2309,19 @@ class MainWindow(QMainWindow):
         if getattr(self, "projects_panel", None) is not None:
             self.projects_panel.refresh()       # enable/disable the “On the hub…” item
         self._refresh_doc_collab()              # offer/retire the Collaborate toggle
+
+    def _ensure_ext_manager(self):
+        if self._extensions is None:
+            from ..extensions import ExtensionManager
+            cfg = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
+            root = (os.path.join(cfg, "extensions") if cfg else
+                    os.path.join(os.path.expanduser("~"), ".ferrodac", "extensions"))
+            self._extensions = ExtensionManager(root)
+        return self._extensions
+
+    def _open_extensions(self):
+        from .extensions_view import ExtensionsDialog
+        ExtensionsDialog(self._ensure_ext_manager(), self).exec()
 
     def _open_hub(self):
         if not self.hub.available:
@@ -3420,11 +3437,13 @@ def main(argv=None) -> int:
     # processors/widgets/drivers are registered in time (driver_types() then includes
     # extension drivers; the Add menu includes extension widgets). Defensive — a broken
     # extension is logged and skipped, never blocking launch.
+    ext_mgr = None
     try:
         from ..extensions import ExtensionManager
         ext_root = os.path.join(cfg, "extensions") if cfg else \
             os.path.join(os.path.expanduser("~"), ".ferrodac", "extensions")
-        ExtensionManager(ext_root).load_enabled()
+        ext_mgr = ExtensionManager(ext_root)
+        ext_mgr.load_enabled()
     except Exception as exc:                        # noqa: BLE001
         log.warning("extension loading failed: %s", exc)
 
@@ -3433,6 +3452,6 @@ def main(argv=None) -> int:
              ", ".join(getattr(d, "driver", "?") for d in drivers) or "—")
     engine = Engine()
     manager = DeviceManager(drivers, engine=engine, registry=registry)
-    win = MainWindow(manager, engine)
+    win = MainWindow(manager, engine, extensions=ext_mgr)
     win.show()
     return app.exec()

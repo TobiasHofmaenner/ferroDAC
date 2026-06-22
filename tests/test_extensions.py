@@ -91,6 +91,46 @@ def test_load_enabled_survives_a_broken_source(tmp_path):
     ExtensionManager(root).load_enabled()                # must not raise
 
 
+def test_install_url_from_local_git(tmp_path):
+    """install_url clones + pins a git repo (offline, from a local repo) and records
+    the resolved commit, then loads it."""
+    import subprocess
+    from ferrodac.analysis.processor import PROCESSOR_TYPES
+    from ferrodac.extensions import ExtensionManager
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_proc_ext(repo, "git-ext", "git_proc_kind", "git_ext_pkg")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, env=env)
+    mgr = ExtensionManager(str(tmp_path / "root"))
+    loaded, dest, sha = mgr.install_url(str(repo))
+    assert len(sha) == 40 and loaded and loaded[0].ok
+    assert "git_proc_kind" in PROCESSOR_TYPES
+    rec = mgr.records()[0]
+    assert rec["source"] == str(repo) and rec["commit"] == sha and rec["clone"] == dest
+
+
+@pytest.mark.ui
+def test_extensions_dialog_lists_and_toggles(qapp, tmp_path):
+    from ferrodac.extensions import ExtensionManager
+    from ferrodac.ui.extensions_view import ExtensionsDialog
+    mgr = ExtensionManager(str(tmp_path / "root"))
+    mgr._record("https://example.test/repo", "/clones/repo", "abc123def456", None, True)
+    dlg = ExtensionsDialog(mgr, None)
+    try:
+        assert dlg._list.count() == 1
+        assert "example.test/repo" in dlg._list.item(0).text()
+        assert "abc123de" in dlg._list.item(0).text()
+        dlg._list.setCurrentRow(0)
+        dlg._toggle()                                  # disable via the button handler
+        assert mgr.records()[0]["enabled"] is False
+    finally:
+        dlg.deleteLater()
+
+
 @pytest.mark.ui
 def test_load_widget_extension(qapp, tmp_path):
     pkg = tmp_path / "wext_pkg"
