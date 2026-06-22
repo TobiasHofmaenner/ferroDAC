@@ -8,6 +8,7 @@
     "build": "node build.mjs"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6",
     "@codemirror/lang-markdown": "^6",
     "@codemirror/lang-python": "^6",
     "@codemirror/language-data": "^6",

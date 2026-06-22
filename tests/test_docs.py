@@ -250,6 +250,46 @@ def test_macro_bridge_recordings_and_export(qapp):
 
 
 @pytest.mark.ui
+def test_slash_macro_lists_and_inserts(qapp):
+    """End-to-end /rec macro: recordings reach the editor; picking one drives the
+    on-demand export and inserts relative markdown the preview renders as file://."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# d\n")
+    run = os.path.join(d, "reports", "run1", "plots")
+    os.makedirs(run, exist_ok=True)
+    png = os.path.join(run, "c1.png")
+    with open(png, "wb") as fh:
+        fh.write(b"\x89PNG\r\n")
+    recs = [{"id": "rec1", "label": "Bakeout", "t0": 1.0, "t1": 2.0}]
+    exp = [{"name": "Pressure", "abspath": png, "kind": "plot"}]
+    dv = DocView(on_list_recordings=lambda: recs,
+                 on_export_recording=lambda rid: exp if rid == "rec1" else [])
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        # the recordings reached the JS cache (pushed on JS-ready)
+        assert _pump(qapp, lambda: _js(qapp, dv.view, "window.__doc.recordings().length") == 1)
+        # the `/rec` source produces a recording completion in the dropdown
+        dv.view.page().runJavaScript("window.__doc.openRecMenu();")
+        assert _pump(qapp, lambda: _js(
+            qapp, dv.view,
+            "Array.from(document.querySelectorAll('.cm-completionLabel'))"
+            ".some(e => e.textContent.indexOf('Bakeout') >= 0)"))
+        # picking drives the export + inserts the image markdown
+        dv.view.page().runJavaScript("window.__doc.insertFirstPlot('rec1')")
+        html = _wait_html(qapp, dv.view, "Pressure")
+        assert "<img" in html and "file://" in html and "c1.png" in html, html[:300]
+        txt = _js(qapp, dv.view, "window.__doc.text()")
+        assert "![Pressure](reports/run1/plots/c1.png)" in txt, txt
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_collab_reload_from_disk(qapp):
     """In collab, an external .md edit surfaces a reload affordance; reloading applies
     the on-disk text to the LIVE doc (explicit last-writer-wins)."""

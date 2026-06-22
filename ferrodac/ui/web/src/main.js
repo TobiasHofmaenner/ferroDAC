@@ -10,8 +10,9 @@
 
 import { EditorView, basicSetup } from "codemirror";
 import { Compartment } from "@codemirror/state";
-import { markdown } from "@codemirror/lang-markdown";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
+import { startCompletion } from "@codemirror/autocomplete";
 import { oneDark } from "@codemirror/theme-one-dark";
 
 import * as Y from "yjs";
@@ -60,6 +61,10 @@ const $ = (id) => document.getElementById(id);
 let bridge = null;
 let editor = null;
 let docDir = "";          // the open doc's folder — resolves relative image links
+let recordingsCache = [];               // [{id,label,t0,t1}] — the /rec macro's choices
+let pendingRec = null;                  // a just-picked recording id (drives stage 2)
+const exportResults = new Map();        // recId → [{name,relpath,kind}] (exported files)
+const exportWaiters = new Map();        // recId → [resolve…] awaiting the export
 let mode = "read";        // read | edit | split
 let lastSynced = "";      // the text the file currently holds (per our knowledge)
 let saveTimer = null;
@@ -201,6 +206,69 @@ function status(s) {
   if (el) el.textContent = s;
 }
 
+// ── editor macros: `/rec` → recording → plot/CSV → insert markdown ──────────
+// Exports are on-demand: picking a recording asks Qt to materialise its CSV+plots
+// (into the project's reports/), then we offer those files as the next completions.
+function waitForExport(recId) {
+  if (exportResults.has(recId)) return Promise.resolve(exportResults.get(recId));
+  return new Promise((resolve) => {
+    const ws = exportWaiters.get(recId) || [];
+    ws.push(resolve);
+    exportWaiters.set(recId, ws);
+  });
+}
+
+function spanLabel(rec) {
+  try {
+    const when = new Date(rec.t0 * 1000).toLocaleString();
+    return `${when} · ${Math.max(0, rec.t1 - rec.t0).toFixed(0)}s`;
+  } catch (e) { return ""; }
+}
+
+function refMarkdown(f) {                      // image embed for plots, plain link for data
+  return f.kind === "plot" ? `![${f.name}](${f.relpath})` : `[${f.name}](${f.relpath})`;
+}
+
+// A single CM6 completion source driving the whole cascade via `pendingRec` state.
+function slashSource(context) {
+  // Stage 2 — a recording was just picked: offer its exported files (async; the
+  // export may still be running). Clearing pendingRec up front keeps it transient.
+  if (pendingRec) {
+    const recId = pendingRec;
+    pendingRec = null;
+    return waitForExport(recId).then((files) => {
+      if (!files || !files.length) return null;
+      return {
+        from: context.pos, filter: false,
+        options: files.map((f) => ({
+          label: f.name, detail: f.kind,
+          type: f.kind === "plot" ? "text" : "string",
+          apply: (v, c, from, to) =>
+            v.dispatch({ changes: { from, to, insert: refMarkdown(f) } }),
+        })),
+      };
+    });
+  }
+  // Stage 1 — `/rec` offers the recordings.
+  const w = context.matchBefore(/\/(\w*)/);
+  if (!w || (w.from === w.to && !context.explicit)) return null;
+  if (w.text.slice(1).toLowerCase() !== "rec") return null;
+  if (bridge) bridge.requestRecordings();      // refresh for next time
+  if (!recordingsCache.length) return null;
+  return {
+    from: w.from, filter: false,
+    options: recordingsCache.map((rec) => ({
+      label: "rec: " + rec.label, detail: spanLabel(rec), type: "function",
+      apply: (v, c, from, to) => {
+        v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/rec`
+        pendingRec = rec.id;
+        if (bridge) bridge.requestRecordingExport(rec.id);    // materialise on demand
+        startCompletion(v);                                    // → stage 2
+      },
+    })),
+  };
+}
+
 function makeEditor(initial) {
   const onChange = EditorView.updateListener.of((u) => {
     if (!u.docChanged) return;
@@ -211,6 +279,7 @@ function makeEditor(initial) {
   editor = new EditorView({
     doc: initial,
     extensions: [basicSetup, markdown({ codeLanguages: languages }), oneDark,
+                 markdownLanguage.data.of({ autocomplete: slashSource }),  // /rec macro
                  collabCompartment.of([]), onChange],
     parent: $("editor"),
   });
@@ -381,6 +450,17 @@ function connect() {
     bridge = channel.objects.bridge;
     bridge.docContext.connect((dir) => { docDir = dir || ""; renderPreview(); });
     bridge.docChanged.connect(onIncoming);
+    bridge.recordingsAvailable.connect((j) => {
+      try { recordingsCache = JSON.parse(j) || []; } catch (e) { recordingsCache = []; }
+    });
+    bridge.recordingExported.connect((recId, j) => {
+      let files = [];
+      try { files = JSON.parse(j) || []; } catch (e) { /* none */ }
+      exportResults.set(recId, files);
+      const ws = exportWaiters.get(recId);
+      exportWaiters.delete(recId);
+      if (ws) ws.forEach((r) => r(files));
+    });
     bridge.collabSeed.connect(enterCollab);
     bridge.collabUpdate.connect((b64) => {
       if (ydoc) Y.applyUpdate(ydoc, b64decode(b64), "remote");
@@ -413,6 +493,27 @@ window.__doc = {
     { changes: { from: editor.state.doc.length, insert: s } }),
   html: () => $("doc").innerHTML,
   text,
+  // /rec macro test hooks
+  recordings: () => recordingsCache,
+  startCompletion: () => editor && startCompletion(editor),
+  // type `/rec` at the end with the cursor right after it, then open the menu
+  openRecMenu: () => {
+    if (!editor) return;
+    const L = editor.state.doc.length;
+    editor.dispatch({ changes: { from: L, insert: "\n\n/rec" },
+                      selection: { anchor: L + 6 } });
+    startCompletion(editor);
+  },
+  // drive the full export→insert flow for a recording (without the dropdown UI)
+  insertFirstPlot: async (recId) => {
+    if (bridge) bridge.requestRecordingExport(recId);
+    const files = await waitForExport(recId);
+    const f = files.find((x) => x.kind === "plot") || files[0];
+    if (!f || !editor) return null;
+    editor.dispatch(
+      { changes: { from: editor.state.doc.length, insert: "\n\n" + refMarkdown(f) } });
+    return f.relpath;
+  },
 };
 
 window.addEventListener("DOMContentLoaded", connect);
