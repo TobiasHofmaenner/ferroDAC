@@ -136,6 +136,10 @@ class DocBridge(QObject):
     runMeta = Signal(str)                # (markdown)
     runMetaRequested = Signal()
 
+    # Save-to-PDF: JS asks, Qt prints the rendered page, then reports a status line.
+    pdfRequested = Signal()              # JS → Qt
+    pdfExported = Signal(str)            # Qt → JS (a status message; "" clears)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._relpath = ""
@@ -185,6 +189,10 @@ class DocBridge(QObject):
     @Slot()
     def requestRunMeta(self) -> None:
         self.runMetaRequested.emit()
+
+    @Slot()
+    def requestPdf(self) -> None:
+        self.pdfRequested.emit()
 
     # -- collaboration: JS → Qt (thin re-emit; DocView forwards to the hub) --
     @Slot()
@@ -302,9 +310,14 @@ class DocView(QWidget):
         self.bridge.procSourceRequested.connect(self._send_processor_source)
         self.bridge.deviceTableRequested.connect(self._send_device_table)
         self.bridge.runMetaRequested.connect(self._send_run_meta)
+        self.bridge.pdfRequested.connect(self._export_pdf)
         self._channel = QWebChannel(self)
         self._channel.registerObject("bridge", self.bridge)
         self.view.page().setWebChannel(self._channel)
+        try:                                              # report when the PDF lands
+            self.view.page().pdfPrintingFinished.connect(self._on_pdf_finished)
+        except Exception:                                 # noqa: BLE001 — binding variance
+            pass
         self.view.load(QUrl.fromLocalFile(os.path.join(_DIST, "index.html")))
         root.addWidget(self.view, 1)
 
@@ -521,6 +534,38 @@ class DocView(QWidget):
             except Exception:                 # noqa: BLE001
                 md = ""
         self.bridge.runMeta.emit(md)
+
+    # -- save to PDF: render the live preview to a print-friendly PDF ---------
+    def _export_pdf(self) -> None:
+        """Ask for a destination, then print the rendered document. The page's
+        `@media print` rules drop the chrome and lay it out light, so the PDF is a
+        clean report of exactly what the preview shows."""
+        from qtpy.QtWidgets import QFileDialog
+        if self._path:
+            default = os.path.splitext(self._path)[0] + ".pdf"
+        else:
+            default = os.path.join(os.path.expanduser("~"), "document.pdf")
+        path, _ = QFileDialog.getSaveFileName(self, "Save as PDF", default,
+                                              "PDF document (*.pdf)")
+        if not path:
+            self.bridge.pdfExported.emit("")              # cancelled → clear status
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        self.print_pdf(path)
+
+    def print_pdf(self, path: str) -> None:
+        """Render the current preview to `path` (async; result via `pdfExported`)."""
+        self._pdf_path = path
+        self.bridge.pdfExported.emit("saving PDF…")
+        try:
+            self.view.page().printToPdf(path)             # → pdfPrintingFinished
+        except Exception as e:                            # noqa: BLE001
+            self.bridge.pdfExported.emit(f"PDF failed: {e}")
+
+    def _on_pdf_finished(self, path: str, ok: bool) -> None:
+        name = os.path.basename(path or getattr(self, "_pdf_path", "") or "PDF")
+        self.bridge.pdfExported.emit(f"saved {name}" if ok else "PDF export failed")
 
     def _send_processor_source(self, kind: str) -> None:
         src, paper = "", None

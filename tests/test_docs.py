@@ -383,6 +383,32 @@ def test_slash_proc_cites_whitepaper(qapp):
 
 
 @pytest.mark.ui
+def test_save_pdf_renders_file(qapp):
+    """Save as PDF: the rendered document prints to a real PDF (print emulation via
+    QWebEnginePage), and a status line round-trips back to the editor."""
+    from ferrodac.ui.docs import DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "R.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# Report\n\nHello **world**.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")
+    out = os.path.join(d, "R.pdf")
+    dv = DocView()
+    dv.resize(700, 520)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        dv.print_pdf(out)                              # bypass the file dialog
+        assert _pump(qapp, lambda: os.path.exists(out) and os.path.getsize(out) > 0)
+        with open(out, "rb") as fh:
+            assert fh.read(5).startswith(b"%PDF")       # a real PDF
+        # the editor's status shows the result (pdfExported round-trip)
+        assert _pump(qapp, lambda: "saved" in (_js(
+            qapp, dv.view, "document.getElementById('status').textContent") or ""))
+    finally:
+        dv.deleteLater()
+
+
+@pytest.mark.ui
 def test_slash_proc_cold_cache_still_lists(qapp):
     """Regression: typing /proc right after a reload (which resets the page caches)
     still populates the menu — the completion now AWAITS the fetch instead of

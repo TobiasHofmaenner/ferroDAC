@@ -589,6 +589,12 @@ function wireToolbar() {
     b.addEventListener("click", () => setMode(b.dataset.mode));
   const rb = $("reload");
   if (rb) rb.addEventListener("click", reloadFromDisk);
+  const pb = $("savepdf");
+  if (pb) pb.addEventListener("click", () => {
+    renderPreview();                          // make sure the preview is current
+    if (bridge) bridge.requestPdf();          // Qt picks a path + prints (status back)
+    else status("PDF needs the app");
+  });
   const hb = $("macrohelp-btn");
   if (hb) {
     buildMacroHelp();
@@ -651,6 +657,7 @@ function connect() {
       awaitingMeta = false;
       insertMarkdownBlock(md);
     });
+    bridge.pdfExported.connect((msg) => status(msg));      // save-PDF result
     bridge.collabSeed.connect(enterCollab);
     bridge.collabUpdate.connect((b64) => {
       if (ydoc) Y.applyUpdate(ydoc, b64decode(b64), "remote");

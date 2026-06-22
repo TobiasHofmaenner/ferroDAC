@@ -133,3 +133,33 @@ body[data-mode="edit"] #editor { border-right: none; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 6px 12px; }
 .markdown-body input[type="checkbox"] { accent-color: var(--accent); }
 .render-error { color: #ff8a8a; }
+
+/* ── Save as PDF ────────────────────────────────────────────────────────────
+   QWebEnginePage.printToPdf renders with print emulation, so these rules drop
+   the editor chrome and lay the rendered document out as a light report. Code
+   blocks keep their dark syntax theme (legible) — printed exactly via the
+   color-adjust hint so Chromium doesn't strip the backgrounds. */
+@media print {
+  #toolbar, #macrohelp, #presence, #status, #reload, #savepdf,
+  #editor { display: none !important; }
+  html, body { height: auto; background: #fff; color: #1a1a1a; }
+  #panes { display: block; min-height: 0; }
+  #doc { display: block !important; overflow: visible; }
+  .markdown-body { max-width: none; margin: 0; padding: 0 6px; color: #1a1a1a; }
+  .markdown-body h1, .markdown-body h2, .markdown-body h3 {
+    color: #000; border-color: #ccc; break-after: avoid;
+  }
+  .markdown-body a { color: #0645ad; }
+  .markdown-body th, .markdown-body td { border-color: #999; }
+  .markdown-body th {
+    background: #f0f2f5; -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .markdown-body blockquote { color: #555; border-left-color: #ccc; }
+  /* keep code/diagrams/tables/figures whole across page breaks */
+  .markdown-body pre, .markdown-body table,
+  .markdown-body img, .mermaid-figure { break-inside: avoid; }
+  /* print the dark code backgrounds rather than dropping them */
+  .markdown-body code, .markdown-body pre {
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+}
