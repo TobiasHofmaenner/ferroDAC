@@ -1956,6 +1956,8 @@ class MainWindow(QMainWindow):
         self._commit_timer.setInterval(15000)
         self._commit_timer.timeout.connect(self._do_scheduled_commit)
         self._pending_commit_msg = "Edited documents"
+        self._pending_share: dict = {}      # pid -> local path: push its history once the
+        #                                     hub provisions a repo (git_remote arrives)
         # tags are GLOBAL — autosaved to tags.json on any change (own debounce)
         self._tag_save_timer = QTimer(self)
         self._tag_save_timer.setSingleShot(True)
@@ -2575,15 +2577,50 @@ class MainWindow(QMainWindow):
         if not self.hub.connected:
             self.statusBar().showMessage("Connect to a hub first (☁ Hub).", 6000)
             return
+        p = self._project_mgr.get(pid)
+        path = p.path if p is not None else None
+        if path:                                          # commit current content so the
+            try:                                          # provisioned repo has history to hold
+                from ..core.projectgit import ProjectRepo
+                ProjectRepo(path).commit("Shared to hub", author=self._git_identity())
+            except Exception:                             # noqa: BLE001
+                pass
         rec = self._project_mgr.share_to_hub(pid)
         if not rec:
             return
         self._project_mgr.apply_hub_record(rec)           # now a ☁ project (same id)
         self._project_mgr.untrack(pid)                    # drop the local entry
         self.hub.publish_project(rec)
+        if path:                                          # push once the hub provisions a repo
+            self._pending_share[pid] = path
         self.projects_panel.refresh()
         self._refresh_explorer()
-        self.statusBar().showMessage(f"Shared “{rec.get('name')}” to the hub.", 5000)
+        self.statusBar().showMessage(
+            f"Shared “{rec.get('name')}” — provisioning its repo…", 5000)
+
+    def _push_pending_shares(self) -> None:
+        """When the hub provisions a repo for a just-shared project (git_remote arrives
+        via the fan-out), push the project's history into it so collaborators clone the
+        real thing (not an empty repo). No-op in the native dial (no auto-provision)."""
+        if not self._pending_share:
+            return
+        from ..core.projectgit import ProjectRepo
+        for pid, path in list(self._pending_share.items()):
+            url = self._project_mgr.hub_git_remote(pid)
+            if not url:
+                continue                                  # not provisioned (yet / native dial)
+            self._pending_share.pop(pid, None)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+            try:
+                repo = ProjectRepo(path)
+                repo.set_remote(url)
+                ok, msg = repo.push()
+            finally:
+                QApplication.restoreOverrideCursor()
+            self.statusBar().showMessage(
+                "Pushed the shared project to its repo — collaborators can clone it now."
+                if ok else f"Couldn't push the shared project to its repo: {msg}", 8000)
 
     def _republish_active_if_hub(self) -> None:
         """A local edit to a hub project — bump its version and push the record up."""
@@ -2641,6 +2678,7 @@ class MainWindow(QMainWindow):
     def _on_hub_projects_changed(self) -> None:
         """Hub projects arrived / changed / vanished (sync or disconnect) — refresh
         the Projects views. Runs on the GUI thread (queued from the sync)."""
+        self._push_pending_shares()                       # a provisioned repo just echoed back?
         if getattr(self, "projects_panel", None) is not None:
             self.projects_panel.refresh()
         self._refresh_explorer()

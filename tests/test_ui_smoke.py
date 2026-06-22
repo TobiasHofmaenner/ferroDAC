@@ -797,6 +797,42 @@ def test_project_git_commit_and_history(qapp):
 
 
 @pytest.mark.ui
+def test_push_on_share(qapp, tmp_path):
+    """Sharing commits + (once the hub provisions a repo) pushes the project's content,
+    so a collaborator clones the real thing — not an empty repo."""
+    import os
+    import subprocess
+    import types
+    w = _mainwindow(qapp)
+    try:
+        local = w._project_mgr.track(str(tmp_path / "proj"), "ToShare")
+        with open(os.path.join(local.path, "notes.md"), "w") as fh:
+            fh.write("# hi\n")
+        bare = tmp_path / "remote.git"                   # the "provisioned" remote
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+
+        w.hub._viewer = types.SimpleNamespace(stop=lambda: None)   # pretend connected
+        pushed = []
+        w.hub.publish_project = lambda rec: pushed.append(rec)
+        w._share_project(local.id)
+        assert local.id in w._pending_share                # queued to push
+        assert local.id not in w._project_mgr._by_id       # local untracked (now ☁)
+
+        # the hub provisions the repo + echoes the record back with the git_remote
+        rec2 = dict(pushed[-1])
+        rec2["git_remote"] = str(bare)
+        w._project_mgr.apply_hub_record(rec2)
+        w._on_hub_projects_changed()                       # → push the queued content
+
+        assert local.id not in w._pending_share            # pushed + cleared
+        files = subprocess.run(["git", "-C", str(bare), "ls-tree", "-r", "--name-only", "HEAD"],
+                               capture_output=True, text=True).stdout
+        assert "notes.md" in files and "project.json" in files   # the content reached the repo
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_clone_hub_project(qapp, tmp_path, monkeypatch):
     """Clone-from-hub: a hub project carrying a git URL → clone its repo to a local
     working copy, tracked + active, with the hub cache entry deduped away."""

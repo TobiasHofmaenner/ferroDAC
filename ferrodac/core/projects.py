@@ -424,6 +424,11 @@ class ProjectManager:
     def get(self, pid: str):
         return self._by_id.get(pid) or self._hub_by_id.get(pid)
 
+    def hub_git_remote(self, pid: str) -> str:
+        """The git_remote the hub assigned to a project (on its ☁ record), or ""."""
+        hp = self._hub_by_id.get(pid)
+        return getattr(hp, "git_remote", "") if hp is not None else ""
+
     @property
     def active(self):
         return self.get(self._active)
