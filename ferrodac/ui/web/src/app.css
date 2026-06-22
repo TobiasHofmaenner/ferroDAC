@@ -83,6 +83,14 @@ body[data-mode="edit"] #editor { border-right: none; }
 .markdown-body h2 { border-bottom: 1px solid var(--border); padding-bottom: .25em; margin-top: 1.6em; }
 .markdown-body a { color: var(--accent); text-decoration: none; }
 .markdown-body a:hover { text-decoration: underline; }
+/* exported plots are high-res (e.g. 1600px); scale them to the column like GitHub does */
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 14px 0;
+  border-radius: 6px;
+}
 .markdown-body code {
   background: var(--code-bg);
   border: 1px solid var(--border);
