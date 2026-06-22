@@ -1,0 +1,16 @@
+# Optional, but recommended: makes the extension a normal Python package so authors
+# get tests, type-checking, and editor support. ferroDAC loads it by git-clone+import
+# (not pip), so this file is for the AUTHOR's tooling — not required to be loadable.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ferrodac-ext-example"
+version = "0.1.0"
+description = "Reference ferroDAC extension"
+requires-python = ">=3.11"
+dependencies = ["numpy"]
+
+[tool.setuptools.packages.find]
+include = ["ferrodac_ext_example*"]

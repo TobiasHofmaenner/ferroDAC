@@ -1,0 +1,20 @@
+# ferroDAC extension manifest. A plugin repo is a normal Python package that ALSO
+# carries this file. ferroDAC loads the repo by git-clone (pinned commit) → import,
+# and each `entry` below is imported and registered. Every entry may carry a
+# `whitepaper` (PDF/MD) — the algorithm's explanation + references, shown in-app.
+[extension]
+name        = "ferrodac-ext-example"
+version     = "0.1.0"
+api         = 1                          # ferroDAC plugin-API version this targets
+description = "Reference extension: a window-integral processor (trace → scalar)."
+authors     = ["ferroDAC"]
+license     = "MIT"
+homepage    = "https://github.com/TobiasHofmaenner/ferroDAC"
+
+# Each provider is an explicit "module:Class" entry (auditable, listable before import).
+[[processors]]
+entry      = "ferrodac_ext_example.processors.integrate:WindowIntegral"
+whitepaper = "papers/integrate.md"
+
+# [[drivers]]   — a Device subclass:  entry = "pkg.module:MyDriver"
+# [[widgets]]   — a Widget subclass:  entry = "pkg.module:MyWidget", whitepaper = "..."

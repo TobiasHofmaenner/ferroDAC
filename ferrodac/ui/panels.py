@@ -42,81 +42,18 @@ from ..core.markers import RECORDING
 from ..core.trace import Trace
 from ..analysis.library import DEFAULT_GASES, LIBRARY
 from ._common import color_for, fmt
+from .widget import Widget
 
 pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
 
 
-class Panel(QWidget):
-    """Base class: a display panel that shows a routed set of Sources."""
+class Panel(Widget):
+    """Base class for a BUILT-IN display panel = the public `Widget` contract plus
+    any ferroDAC-internal conveniences. Built-ins subclass this; third-party widget
+    plugins subclass `Widget` directly (so internal additions here never leak into
+    the plugin API). `kind` defaults to "panel" for legacy callers."""
 
     kind = "panel"
-    is_input = False
-    routable = True            # False → carries no data port (e.g. a document view)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.panel_id = ""
-        self.title = ""
-        self._unsub = None
-        self.export_spec = None    # per-panel render-export override {width,height,dpi}; None=use the project default
-
-    def add_source(self, key: str, source) -> None: ...
-    def remove_source(self, key: str) -> None: ...
-    def feed(self, batch: list) -> None: ...
-
-    def clear_history(self) -> None:
-        """Drop accumulated display data so the panel can re-experience a new
-        slice from scratch — called by the replay reset when the head jumps
-        (park / scrub / return to live). Default: nothing to clear."""
-
-    def trim_to(self, x_min: float) -> None:
-        """Drop accumulated data older than x_min (relative-time coords) so the
-        live window slides instead of growing. Time-axis panels override."""
-
-    def set_window(self, t0: float, t1: float) -> None:
-        """The shared time window [t0,t1] moved (live growth / scrub). Time-axis
-        panels (waterfall) override to map their Y range to it. Default: ignore."""
-
-    def zoom_time(self, t0: float, t1: float) -> None:
-        """Frame the view on the time window [t0,t1] (Zoom-to-recording / jump-to-
-        tag). Each panel knows which axis is time — charts set X, waterfalls set Y.
-        Default: no-op (panels without a time axis, e.g. a spectrum, ignore it)."""
-
-    def state(self) -> dict:
-        """Per-panel state to persist in a saved session (override as needed)."""
-        return {}
-
-    def set_state(self, state: dict) -> None:
-        """Restore per-panel state from a saved session."""
-
-    def export_item(self):
-        """The pyqtgraph GraphicsItem to hand to ImageExporter for a plot-image
-        export, or None for a panel that has nothing to render (numeric / button /
-        camera / doc). Default: the single plot's item; multi-plot panels override
-        to return their whole layout."""
-        plot = getattr(self, "plot", None)
-        if plot is None:
-            return None
-        if hasattr(plot, "plotItem"):
-            return plot.plotItem
-        if hasattr(plot, "getPlotItem"):
-            return plot.getPlotItem()
-        return None
-
-    # -- configuration (⚙) ---------------------------------------------------
-    def config_fields(self) -> list:
-        """Editable settings as ``[(key, label, kind, value, opts)]`` where kind
-        is text / int / float / bool / choice. Every panel has a display name."""
-        return [("name", "Display name", "text", self.title, {})]
-
-    def apply_config(self, values: dict) -> None:
-        if values.get("name"):
-            self.set_display_name(values["name"])
-
-    def set_display_name(self, name: str) -> None:
-        """Set the panel's name (dock title + patch-bay). Plot panels override to
-        also set the plot title so it appears on exported plots."""
-        self.title = name
 
 
 class PanelConfigDialog(QDialog):

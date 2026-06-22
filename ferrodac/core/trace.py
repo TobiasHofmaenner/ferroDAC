@@ -37,6 +37,34 @@ class Trace:
     def peak(self) -> float:
         return float(self.y.max()) if len(self.y) else float("nan")
 
+    # -- scientific-Python interop (xarray; optional dependency) -------------
+    def to_xarray(self):
+        """A 1-D ``xarray.DataArray`` view (units in attrs). The plugin datatype
+        ``trace`` aligns with xarray's labelled-array model; this is the bridge to
+        the wider analysis ecosystem. xarray is an OPTIONAL dependency — imported
+        lazily, with a clear error if it's absent."""
+        try:
+            import xarray as xr
+        except ImportError as exc:                       # pragma: no cover
+            raise ImportError("Trace.to_xarray() needs the optional 'xarray' "
+                              "package installed.") from exc
+        dim = self.x_label or "x"
+        da = xr.DataArray(self.y, dims=(dim,), coords={dim: self.x},
+                          attrs={"units": self.y_unit, "long_name": self.y_label},
+                          name=self.y_label)
+        da.coords[dim].attrs.update(units=self.x_unit, long_name=self.x_label)
+        return da
+
+    @classmethod
+    def from_xarray(cls, da) -> "Trace":
+        """Build a Trace from a 1-D ``xarray.DataArray`` (the inverse of to_xarray)."""
+        dim = da.dims[0]
+        coord = da.coords[dim]
+        return cls(x=np.asarray(coord.values), y=np.asarray(da.values),
+                   x_label=str(dim), x_unit=str(coord.attrs.get("units", "")),
+                   y_label=str(da.attrs.get("long_name", da.name or "Intensity")),
+                   y_unit=str(da.attrs.get("units", "")))
+
 
 def extract(trace: "Trace", center: float, width: float = 1.0,
             mode: str = "peak") -> float:
