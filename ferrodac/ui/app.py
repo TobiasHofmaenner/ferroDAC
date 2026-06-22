@@ -3416,6 +3416,18 @@ def main(argv=None) -> int:
     cfg = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
     registry = DeviceRegistry(os.path.join(cfg, "registry.json") if cfg else None)
 
+    # Load enabled extensions BEFORE the driver scan + the dashboard build, so their
+    # processors/widgets/drivers are registered in time (driver_types() then includes
+    # extension drivers; the Add menu includes extension widgets). Defensive — a broken
+    # extension is logged and skipped, never blocking launch.
+    try:
+        from ..extensions import ExtensionManager
+        ext_root = os.path.join(cfg, "extensions") if cfg else \
+            os.path.join(os.path.expanduser("~"), ".ferrodac", "extensions")
+        ExtensionManager(ext_root).load_enabled()
+    except Exception as exc:                        # noqa: BLE001
+        log.warning("extension loading failed: %s", exc)
+
     drivers = load_builtin_drivers()
     log.info("loaded %d driver(s): %s", len(drivers),
              ", ".join(getattr(d, "driver", "?") for d in drivers) or "—")

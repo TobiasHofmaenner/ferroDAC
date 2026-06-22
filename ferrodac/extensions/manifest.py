@@ -106,3 +106,25 @@ def load_manifest(path: str) -> Manifest:
         description=str(ext.get("description", "")),
         authors=list(ext.get("authors", [])), license=str(ext.get("license", "")),
         homepage=str(ext.get("homepage", "")), providers=providers, root=root)
+
+
+def discover_extensions(repo_dir: str) -> list:
+    """All extensions in a cloned repo. A manifest at the root = a single-extension
+    repo; otherwise each immediate subdirectory that has a manifest is one extension
+    (a MONOREPO, e.g. github.com/TobiasHofmaenner/ferrodac-extensions). A malformed
+    subdir manifest is skipped, not fatal to the whole repo. Returns [Manifest]."""
+    if os.path.exists(os.path.join(repo_dir, MANIFEST_NAME)):
+        return [load_manifest(repo_dir)]
+    found = []
+    try:
+        names = sorted(os.listdir(repo_dir))
+    except OSError:
+        return []
+    for name in names:
+        sub = os.path.join(repo_dir, name)
+        if os.path.isdir(sub) and os.path.exists(os.path.join(sub, MANIFEST_NAME)):
+            try:
+                found.append(load_manifest(sub))
+            except ManifestError:
+                pass                     # one bad extension shouldn't break the repo
+    return found
