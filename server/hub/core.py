@@ -332,6 +332,8 @@ class Hub:
             url = self.gitea.provision(project.id)
             if url:
                 project.git_remote = url
+                log.info("transparent git: provisioned repo %s/%s for project %r",
+                         getattr(self.gitea, "org", "?"), project.id, project.name)
         self._projects[project.id] = project
         if project.deleted:
             self._remove_project_folder(project.id)
