@@ -47,3 +47,36 @@ def test_unknown_device_and_empty_store_degrade(tmp_path):
     assert st.device_record_at("nope", 1.0) == {}         # unknown → empty, no raise
     assert st.device_records() == []                      # no devices group yet
     assert st.device_ids() == []
+
+
+# -- Phase 2: the StoreWriter freezes device provenance alongside the data ----
+def test_writer_captures_device_record_and_changes(tmp_path):
+    from ferrodac.core.reading import Reading
+    from ferrodac.store.writer import StoreWriter
+    st = _store(tmp_path)
+    w = StoreWriter(st, chunk=1, flush_interval=0.0)      # flush every sample
+    w.set_device_records({"gauge1": {"device_id": "gauge1", "name": "Gauge",
+                                     "cal_due": "2027-01-01"}})
+    w.feed([Reading("gauge1", "ch1", 100.0, 1.0)])        # first flush → record written
+    assert st.device_record_at("gauge1", 150.0)["cal_due"] == "2027-01-01"
+    assert st.device_record_at("gauge1", 150.0)["name"] == "Gauge"
+
+    # recalibrated mid-session → a new snapshot; the change is logged at its data time
+    w.set_device_records({"gauge1": {"device_id": "gauge1", "name": "Gauge",
+                                     "cal_due": "2028-06-01"}})
+    w.feed([Reading("gauge1", "ch1", 200.0, 2.0)])
+    assert st.device_record_at("gauge1", 150.0)["cal_due"] == "2027-01-01"   # before
+    assert st.device_record_at("gauge1", 250.0)["cal_due"] == "2028-06-01"   # after
+
+
+def test_writer_skips_record_for_non_device_sources(tmp_path):
+    """A derived/virtual/ui source (prefix not a known device) is still persisted as
+    data, but gets no device record — no phantom devices in the store."""
+    from ferrodac.core.reading import Reading
+    from ferrodac.store.writer import StoreWriter
+    st = _store(tmp_path)
+    w = StoreWriter(st, chunk=1, flush_interval=0.0)
+    w.set_device_records({"gauge1": {"device_id": "gauge1", "name": "Gauge"}})
+    w.feed([Reading("ui", "slider", 100.0, 0.5)])         # not a known device
+    assert "ui/slider" in st.sources()                    # data still kept
+    assert st.device_ids() == []                          # but no device record

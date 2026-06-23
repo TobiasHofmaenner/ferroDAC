@@ -40,10 +40,42 @@ class StoreWriter:
         self._since_rollup: dict = {}   # key -> samples appended since last rollup
         self._trace_x: dict = {}        # key -> last axis seen (for epoch rolling)
         self._trace_gen: dict = {}      # key -> axis generation (epoch suffix)
+        self._device_records: dict = {}  # device_id -> merged provenance snapshot (pushed
+        #                                  from the GUI thread; captured at flush time)
+        self._device_written: dict = {}  # device_id -> last snapshot persisted (to diff)
         self._unsub = None
         # one epoch per app session, so a restart leaves a real coverage gap (the
         # resolver breaks the line there) instead of bridging stop→resume.
         self._epoch = "s%d" % int(time.time())
+
+    # -- device provenance (snapshot pushed from the GUI thread) -------------
+    def set_device_records(self, records: dict) -> None:
+        """Latest merged provenance per device (id -> {fields}). Built on the GUI
+        thread from descriptors + user metadata; persisted alongside the data on the
+        engine thread at the next flush (so writes stay single-threaded). A single
+        reference swap — safe to call concurrently with feed()."""
+        self._device_records = {str(k): dict(v or {}) for k, v in (records or {}).items()}
+
+    def _capture_device(self, key, t: float) -> None:
+        """At a source's flush, persist/refresh its device's provenance record and
+        append a change-log event for any field that changed. Best-effort: a
+        persistence hiccup must never break acquisition. Skips non-device keys
+        (virtual/derived/ui) — their prefix isn't a known device."""
+        try:
+            did = key.split("/", 1)[0]
+            rec = self._device_records.get(did)
+            if not rec:
+                return
+            prev = self._device_written.get(did)
+            if prev == rec:
+                return
+            self.store.put_device(did, rec)
+            for f, v in rec.items():
+                if prev is None or prev.get(f) != v:
+                    self.store.emit_device_meta(did, float(t), f, v)
+            self._device_written[did] = dict(rec)
+        except Exception:                            # noqa: BLE001 — never block writes
+            pass
 
     # -- lifecycle -----------------------------------------------------------
     def attach(self, engine) -> None:
@@ -93,6 +125,7 @@ class StoreWriter:
         if key not in self._known:
             self.store.add_source(key, name=key, dtype="trace")
             self._known.add(key)
+        self._capture_device(key, t)                 # provenance alongside the data
         self.store.append_trace(key, t, x, trace.y,
                                 epoch=f"{self._epoch}__t{self._trace_gen[key]}")
 
@@ -104,6 +137,7 @@ class StoreWriter:
         if key not in self._known:
             self.store.add_source(key, name=key)
             self._known.add(key)
+        self._capture_device(key, tb[0])             # provenance alongside the data
         self.store.append(key, np.asarray(tb, dtype="f8"),
                           np.asarray(vb, dtype="f8"), epoch=self._epoch)
         n = len(tb)

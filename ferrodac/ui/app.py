@@ -1893,6 +1893,10 @@ class MainWindow(QMainWindow):
             store = ZarrStore(os.path.join(self._app_dir(), "store.zarr"))
             self.store_writer = StoreWriter(store)
             self.store_writer.attach(engine)
+            # freeze device provenance ALONGSIDE the data: push the merged snapshot
+            # (descriptor + user metadata) whenever the active set changes.
+            manager.active_changed.connect(self._push_device_records)
+            self._push_device_records()
             # the read path: one query() over the live RAM ring + the durable store
             self.resolver = Resolver([RamTier(self.history), store])
             # replay spine (DESIGN §7.4): one head + a playback Bus the whole
@@ -2941,6 +2945,27 @@ class MainWindow(QMainWindow):
             return None
 
     # -- editor /dev macro: an "instruments used" table for the lab journal --
+    def _push_device_records(self) -> None:
+        """Push current merged device provenance (descriptor + user metadata) to the
+        store writer, keyed by the data-plane id (uuid|instance_id) — the source-key
+        prefix — so it's frozen alongside the data. Carries all three ids for later
+        reconciliation (uuid / instance_id / serial)."""
+        if getattr(self, "store_writer", None) is None:
+            return
+        from ..core.devicemeta import device_key, merge_device_info
+        meta = self._device_meta()
+        recs = {}
+        for d in self.manager.active_descriptors():
+            did = d.uuid or d.instance_id
+            if not did:
+                continue
+            rec = merge_device_info(d, meta.get(device_key(d)))
+            rec["device_id"] = did
+            rec["uuid"] = d.uuid or ""
+            rec["instance_id"] = d.instance_id or ""
+            recs[did] = rec
+        self.store_writer.set_device_records(recs)
+
     def _device_meta(self):
         if getattr(self, "_devmeta", None) is None:
             from ..core.devicemeta import DeviceMeta
