@@ -591,7 +591,7 @@ class SourcesPanel(QWidget):
             return
         groups: dict[str, list] = {}             # origin -> ports (insertion order)
         for port in ports:
-            groups.setdefault(port.origin or "other", []).append(port)
+            groups.setdefault(port.origin or "Unknown device", []).append(port)
         for origin, gports in groups.items():
             # a processor's outputs group under its name → give that group a Remove
             proc_id = next((p.proc_id for p in gports if getattr(p, "proc_id", "")), "")
@@ -788,7 +788,7 @@ class _SourceCurateDialog(QDialog):
                 continue
             if p.origin != last_origin:             # a light per-device header
                 last_origin = p.origin
-                h = QLabel(p.origin or "other")
+                h = QLabel(p.origin or "Unknown device")
                 h.setStyleSheet("color:#8a93a3; font-weight:700; font-size:11px;")
                 col.addWidget(h)
             cb = QCheckBox(p.name)
