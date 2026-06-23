@@ -3596,25 +3596,25 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     def _historic_sources(self):
-        """Recorded channels (key, name, unit, dtype) routable for replay even
-        with no live device: the local durable store UNIONED with the hub catalog
-        when connected — so a pure viewer can route purely-historic HUB sources
-        onto a chart (served via the resolver's hub read tier). Local wins on key
-        collision; the hub fills what's only remote."""
+        """Recorded channels (key, channel_name, device_name, unit, dtype) routable
+        for replay even with no live device: the local durable store UNIONED with the
+        hub catalog. Device names come from the store's per-device provenance record
+        so historic channels are device-qualified (not bare 'ch1'); unknown → "".
+        Local wins on key collision; the hub fills what's only remote."""
+        from ..core.sourceid import resolve_source
         dtmap = {"scalar": "float", "trace": "trace", "bool": "bool"}
-        out = {}                                    # key -> (label, unit, dtype)
+        out = {}                                    # key -> (channel, device, unit, dtype)
         if self.store_writer is not None:
             st = self.store_writer.store
             for key in st.sources():
-                name, unit, dtype = st.source_meta(key)
-                label = name if (name and name != key) else key.rsplit("/", 1)[-1]
-                out[key] = (label, unit, dtmap.get(dtype, "float"))
+                info = resolve_source(key, store=st)
+                out[key] = (info.channel_name, info.device_name, info.unit, info.dtype)
         if getattr(self, "hub", None) is not None:
             for key, name, unit, dtype in self.hub.hub_sources():
                 if key not in out:
-                    label = name if (name and name != key) else key.rsplit("/", 1)[-1]
-                    out[key] = (label, unit, dtmap.get(dtype, "float"))
-        return [(k, lbl, u, dt) for k, (lbl, u, dt) in out.items()]
+                    channel = name if (name and name != key) else key.rsplit("/", 1)[-1]
+                    out[key] = (channel, "", unit, dtmap.get(dtype, "float"))
+        return [(k, ch, dev, u, dt) for k, (ch, dev, u, dt) in out.items()]
 
     def _tc_live_tick(self) -> None:
         """Advance the head to now while following (live), and slide the live

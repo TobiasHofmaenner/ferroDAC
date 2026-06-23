@@ -65,7 +65,7 @@ class SourcePort:
         'Voltage' channels are told apart): 'Voltage · PSU 1'. The Sources panel
         groups by device, so it keeps the bare `name`."""
         dev = (self.origin or "").strip()
-        if (dev and self.kind in ("device", "remote")
+        if (dev and self.kind in ("device", "remote", "historic")
                 and dev.lower() not in self.name.lower()):
             return f"{self.name} · {dev}"
         return self.name
@@ -770,7 +770,7 @@ class Dashboard(QObject):
         # (local store after a restart; the hub catalog when connected). A
         # historic port that's gone (e.g. hub disconnected) is dropped unless
         # still routed, in which case it survives as an offline placeholder.
-        hist = ({k: (n, u, dt) for k, n, u, dt in self._historic_sources()}
+        hist = ({k: (ch, dev, u, dt) for k, ch, dev, u, dt in self._historic_sources()}
                 if self._historic_sources else {})
         for key in [k for k, p in self._sources.items()
                     if p.kind == "historic" and k not in hist]:
@@ -779,11 +779,13 @@ class Dashboard(QObject):
             else:
                 del self._sources[key]
                 self._routes.pop(key, None)
-        for key, (name, unit, dtype) in hist.items():
+        for key, (channel, device, unit, dtype) in hist.items():
             if key not in self._sources:
+                # origin = the device name from the store's provenance record, so the
+                # port device-qualifies its label and groups under its instrument.
                 self._sources[key] = SourcePort(
-                    key, name or key.rsplit("/", 1)[-1], dtype, unit,
-                    "recorded", "historic", online=False)
+                    key, channel or key.rsplit("/", 1)[-1], dtype, unit,
+                    device, "historic", online=False)
 
         # SINKS: same — a routed-into device sink that vanished stays as an
         # offline placeholder; a live port replaces it.

@@ -712,9 +712,11 @@ def test_docs_dock_renders_active_readme(qapp):
 def test_device_qualified_label(qapp):
     from ferrodac.ui.workspace import SourcePort
     assert SourcePort("u/v", "Voltage", "float", "V", "PSU 1", "device").label == "Voltage · PSU 1"
-    # device already in the name → no redundant qualifier; historic → bare
+    # device already in the name → no redundant qualifier
     assert SourcePort("u/v", "PSU 1 Voltage", "float", "V", "PSU 1", "device").label == "PSU 1 Voltage"
-    assert SourcePort("h/x", "spectrum", "trace", "", "recorded", "historic").label == "spectrum"
+    # historic now device-qualifies from its stored device record; unknown → bare
+    assert SourcePort("h/x", "spectrum", "trace", "", "Sim RGA", "historic").label == "spectrum · Sim RGA"
+    assert SourcePort("h/x", "spectrum", "trace", "", "", "historic").label == "spectrum"
 
 
 @pytest.mark.ui
@@ -1132,5 +1134,26 @@ def test_list_recordings_respects_project_lens(qapp):
         assert {r["label"] for r in w._list_recordings()} == {"A", "U"}   # not "B"
         ms.set_lens(None)                                  # "show all tags" → every rec
         assert {r["label"] for r in w._list_recordings()} == {"A", "B", "U"}
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_historic_source_device_qualified_label(qapp):
+    """End to end: a recorded source with a stored device record surfaces in the
+    dashboard as a historic port whose label is device-qualified ('ch1 · Sim Gauge
+    A'), not the bare 'ch1'. Exercises the store → _historic_sources → SourcePort path."""
+    w = _mainwindow(qapp)
+    try:
+        if w.store_writer is None:
+            pytest.skip("durable store unavailable")
+        st = w.store_writer.store
+        st.add_source("sim:gauge:A/ch1", name="ch1", unit="mbar")
+        st.put_device("sim:gauge:A", {"name": "Sim Gauge A"})
+        st.emit_device_meta("sim:gauge:A", 0.0, "name", "Sim Gauge A")
+        w.dashboard._rebuild_device_ports()                 # pick up the historic source
+        port = w.dashboard._sources.get("sim:gauge:A/ch1")
+        assert port is not None and port.kind == "historic"
+        assert port.label == "ch1 · Sim Gauge A", port.label
     finally:
         w.close()
