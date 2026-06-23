@@ -265,8 +265,11 @@ class Dashboard(QObject):
 
     def source_names(self) -> dict:
         """key -> device-qualified display name, so the Timeline shows the same
-        disambiguated channel names as the chart legends (not the raw IDs)."""
-        return {k: p.label for k, p in self._sources.items() if p.name}
+        disambiguated channel names as the chart legends (not the raw IDs). DERIVED
+        sources (processor outputs, proc_id set) are excluded: they aren't persisted,
+        so they must not appear as historic/Timeline channels."""
+        return {k: p.label for k, p in self._sources.items()
+                if p.name and not getattr(p, "proc_id", "")}
 
     def trim_live(self, t0: float) -> None:
         """Drop live-accumulated data older than t0 (absolute) so the live window

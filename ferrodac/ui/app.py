@@ -2179,13 +2179,14 @@ class MainWindow(QMainWindow):
         tb.addAction(self.hub_action)
 
     def _timeline_sources(self) -> dict:
-        """{key: name} for the Timeline: the dashboard's live/historic sources
-        UNIONED with the hub's catalog (so hub-only history — e.g. after a local
-        wipe — is listed and served via the resolver's hub read tier)."""
-        names = dict(self.dashboard.source_names())
-        if getattr(self, "hub", None) is not None:
-            for key, name, _unit, _dtype in self.hub.hub_sources():
-                names.setdefault(key, name or "")
+        """{key: device-qualified name} for the Timeline: the dashboard's LIVE sources
+        (derived excluded) unioned with the HISTORIC catalog (local store + hub),
+        which now carries the device name so historic channels read 'ch1 · Sim Gauge
+        A', not a bare 'ch1'. Live wins on key collision."""
+        from ..core.sourceid import compose_label
+        names = dict(self.dashboard.source_names())          # live, derived already filtered
+        for key, channel, device, _u, _dt in self._historic_sources():
+            names.setdefault(key, compose_label(channel, device))
         return names
 
     def _open_timeline(self):

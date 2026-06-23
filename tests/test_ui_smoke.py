@@ -1157,3 +1157,29 @@ def test_historic_source_device_qualified_label(qapp):
         assert port.label == "ch1 · Sim Gauge A", port.label
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_timeline_sources_qualified_and_no_derived(qapp):
+    """Timeline source names: historic channels are device-qualified ('ch1 · Sim
+    Gauge A'), and derived (processor-output) sources are excluded — they aren't
+    persisted, so they must not show as historic channels."""
+    from ferrodac.ui.workspace import SourcePort
+    w = _mainwindow(qapp)
+    try:
+        if w.store_writer is None:
+            pytest.skip("durable store unavailable")
+        st = w.store_writer.store
+        st.add_source("sim:gauge:A/ch1", name="ch1", unit="mbar")
+        st.put_device("sim:gauge:A", {"name": "Sim Gauge A"})
+        st.emit_device_meta("sim:gauge:A", 0.0, "name", "Sim Gauge A")
+        dp = SourcePort("gas1/model", "model", "trace", "", "Gas 1", "virtual")
+        dp.proc_id = "gas1"                                  # a processor output
+        w.dashboard._sources["gas1/model"] = dp
+
+        names = w._timeline_sources()
+        assert names.get("sim:gauge:A/ch1") == "ch1 · Sim Gauge A"   # historic qualified
+        assert "gas1/model" not in names                            # derived excluded
+        assert "gas1/model" not in w.dashboard.source_names()
+    finally:
+        w.close()
