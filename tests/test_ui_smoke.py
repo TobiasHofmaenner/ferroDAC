@@ -1115,3 +1115,22 @@ def test_meta_front_matter_block(qapp):
         assert md.count("| **Recordings** | — |") == 1   # no recordings yet
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_list_recordings_respects_project_lens(qapp):
+    """/rec offers only the active project's recordings (the marker lens) plus
+    unfiled ones — never recordings filed under a different project."""
+    from ferrodac.core.tag import RECORDING
+    w = _mainwindow(qapp)
+    try:
+        ms = w.dashboard.markers
+        a = ms.add(100.0, kind=RECORDING, label="A", projects=["pA"]); ms.update(a, t_end=160.0)
+        b = ms.add(200.0, kind=RECORDING, label="B", projects=["pB"]); ms.update(b, t_end=260.0)
+        u = ms.add(300.0, kind=RECORDING, label="U", projects=[]);     ms.update(u, t_end=360.0)
+        ms.set_lens(["pA"])                                # active project = pA
+        assert {r["label"] for r in w._list_recordings()} == {"A", "U"}   # not "B"
+        ms.set_lens(None)                                  # "show all tags" → every rec
+        assert {r["label"] for r in w._list_recordings()} == {"A", "B", "U"}
+    finally:
+        w.close()

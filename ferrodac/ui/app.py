@@ -3046,10 +3046,13 @@ class MainWindow(QMainWindow):
 
     # -- editor /rec macro: list recordings + export one on demand -----------
     def _list_recordings(self) -> list:
-        """Recordings (closed REC spans) for the editor's /rec macro: id, label, span."""
+        """Closed REC spans IN THE ACTIVE PROJECT for the editor's /rec macro:
+        id, label, span. Uses the project lens (`visible()` — the same view as the
+        Events list and Timeline), so a doc only offers its own experiment's
+        recordings, not every recording on the machine."""
         out = []
-        for m in self.dashboard.markers.of_kind(RECORDING):
-            if m.t_end is None:
+        for m in self.dashboard.markers.visible():
+            if m.kind != RECORDING or m.t_end is None:
                 continue
             out.append({"id": m.id, "label": m.label or "recording",
                         "t0": float(m.t), "t1": float(m.t_end)})
