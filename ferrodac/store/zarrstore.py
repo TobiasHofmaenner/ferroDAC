@@ -43,6 +43,8 @@ def _downsample(t, mn, mx, factor):
 
 
 class ZarrStore:
+    _DEVICES = "devices"        # top-level group holding per-device provenance records
+
     def __init__(self, root, mode: str = "a"):
         self.root = zarr.open_group(store=str(root), mode=mode)
 
@@ -68,7 +70,8 @@ class ZarrStore:
         return g
 
     def sources(self) -> list:
-        return [self.root[n].attrs.get("key", n) for n in self.root.group_keys()]
+        return [self.root[n].attrs.get("key", n)
+                for n in self.root.group_keys() if n != self._DEVICES]
 
     def source_dtype(self, uuid) -> str:
         """The stored datatype tag of a source ("scalar" | "trace" | …) — lets
@@ -87,12 +90,66 @@ class ZarrStore:
         except KeyError:
             return "", "", "scalar"
 
+    # -- devices (provenance: identity + metadata change-log, folds to record-at-T)
+    # A per-device record stored ALONGSIDE the data so historic measurements carry
+    # full provenance (which instrument, what calibration). Keyed by the source-key
+    # prefix (uuid|instance_id). `current` is the latest merged snapshot; `meta` is
+    # the change-log [[t, field, value], ...] — the emit_config/config_at pattern at
+    # device granularity, so the record can be folded to "as of time T".
+    def _device(self, device_id):
+        return self.root[self._DEVICES][self._gname(device_id)]
+
+    def put_device(self, device_id, fields: dict) -> None:
+        """Create/refresh a device's identity + current metadata snapshot."""
+        g = self.root.require_group(self._DEVICES).require_group(self._gname(device_id))
+        if "device_id" not in g.attrs:
+            g.attrs["device_id"] = str(device_id)
+            g.attrs["meta"] = []
+        g.attrs["current"] = dict(fields or {})
+
+    def emit_device_meta(self, device_id, t: float, field: str, value) -> None:
+        """Append a metadata change [t, field, value] to a device's change-log."""
+        g = self._device(device_id)
+        ev = list(g.attrs.get("meta", []))
+        ev.append([float(t), str(field), value])
+        g.attrs["meta"] = ev
+
+    def device_record_at(self, device_id, t: float) -> dict:
+        """The device's metadata as of time t: the change-log folded (events with
+        et <= t win). Falls back to the current snapshot when the log is empty or t
+        precedes it. {} for an unknown device (old stores degrade gracefully)."""
+        try:
+            g = self._device(device_id)
+        except KeyError:
+            return {}
+        meta = g.attrs.get("meta", [])
+        rec: dict = {}
+        for et, k, v in meta:
+            if et <= t:
+                rec[k] = v
+        return rec or dict(g.attrs.get("current", {}))
+
+    def device_records(self) -> list:
+        """Current record of every known device — for /dev historic enumeration."""
+        if self._DEVICES not in self.root:
+            return []
+        dg = self.root[self._DEVICES]
+        return [dict(dg[n].attrs.get("current", {})) for n in dg.group_keys()]
+
+    def device_ids(self) -> list:
+        if self._DEVICES not in self.root:
+            return []
+        dg = self.root[self._DEVICES]
+        return [dg[n].attrs.get("device_id", n) for n in dg.group_keys()]
+
     # -- store-and-forward sync (epoch-incremental copy, DESIGN §12.1) --------
     def epoch_lengths(self) -> dict:
         """{(source_key, epoch): n} — per-epoch sample counts. The hub reports
         these as the sync truth; the agent uploads any epoch tail the hub lacks."""
         out = {}
         for n in self.root.group_keys():
+            if n == self._DEVICES:                       # not a source group
+                continue
             g = self.root[n]
             key = g.attrs.get("key", n)
             for ep in g.attrs.get("epochs", []):
