@@ -1183,3 +1183,52 @@ def test_timeline_sources_qualified_and_no_derived(qapp):
         assert "gas1/model" not in w.dashboard.source_names()
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_dev_journal_includes_historic_only_device(qapp):
+    """/dev lists a historic-only device (no longer connected) from the store's frozen
+    provenance record, with its point-in-time metadata (calibration, asset tag)."""
+    w = _mainwindow(qapp)
+    try:
+        if w.store_writer is None:
+            pytest.skip("durable store unavailable")
+        st = w.store_writer.store
+        st.add_source("sim:rga:9/spectrum", name="spectrum", unit="mbar")
+        st.put_device("sim:rga:9", {"name": "Old RGA", "device_id": "sim:rga:9",
+                                    "instance_id": "sim:rga:9", "serial": "RGA-9",
+                                    "model": "Q200", "cal_due": "2027-01-01",
+                                    "asset_tag": "LAB-009"})
+        st.emit_device_meta("sim:rga:9", 0.0, "name", "Old RGA")
+        w.dashboard._rebuild_device_ports()                  # historic port appears
+        w.dashboard.set_source_lens({"sim:rga:9/spectrum"})  # curate it
+        md = w._device_journal_markdown()
+        assert "Old RGA" in md and "RGA-9" in md and "Q200" in md
+        assert "LAB-009" in md and "2027-01-01" in md
+        assert md.count("| Old RGA |") == 1
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_dev_journal_reconciles_live_and_historic(qapp):
+    """A device present BOTH live and in the store (same uuid) appears once in /dev."""
+    from ferrodac.core.device import DeviceDescriptor, Interface
+    from ferrodac.ui.workspace import SourcePort
+    w = _mainwindow(qapp)
+    try:
+        if w.store_writer is None:
+            pytest.skip("durable store unavailable")
+        d = DeviceDescriptor("sim:g:1", "gauge", "Gauge", Interface(kind="sim"),
+                             uuid="uuid-1", hardware_id="SG-1", model="SG6")
+        w.manager.active_descriptors = lambda: [d]
+        w.dashboard._sources["uuid-1/ch1"] = SourcePort(
+            "uuid-1/ch1", "ch1", "float", "", "Gauge", "device")
+        st = w.store_writer.store
+        st.put_device("uuid-1", {"name": "Gauge", "uuid": "uuid-1",
+                                 "instance_id": "sim:g:1", "serial": "SG-1"})
+        w.dashboard.set_source_lens({"uuid-1/ch1"})
+        rows = w._journal_devices()
+        assert len(rows) == 1 and rows[0]["serial"] == "SG-1"
+    finally:
+        w.close()

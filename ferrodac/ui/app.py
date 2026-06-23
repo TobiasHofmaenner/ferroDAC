@@ -2977,32 +2977,56 @@ class MainWindow(QMainWindow):
         return self._devmeta
 
     def _journal_devices(self) -> list:
-        """The unique DEVICES behind the project's curated sources (first-seen order)."""
-        by_id = {}
+        """Resolved journal ROWS for the DEVICES behind the project's curated sources
+        (first-seen order). LIVE descriptors are merged with current user metadata;
+        HISTORIC-only devices (no longer connected) come from the store's frozen
+        provenance record (already merged at record time — point-in-time, per §8.2).
+        Reconciled on uuid/instance_id/serial so a device shown both ways appears once."""
+        from ..core.devicemeta import device_key, merge_device_info
+        meta = self._device_meta()
+        live_by_id = {}
         for d in self.manager.active_descriptors():
-            if d.uuid:
-                by_id[d.uuid] = d
-            by_id[d.instance_id] = d
-        seen, devices = set(), []
-        for p in self.dashboard.visible_source_ports():     # the curated channel lens
-            if getattr(p, "kind", "") != "device":
+            for k in (d.uuid, d.instance_id, getattr(d, "hardware_id", None)):
+                if k:
+                    live_by_id[k] = d
+        store = self.store_writer.store if getattr(self, "store_writer", None) else None
+        hist_by_id = {}
+        if store is not None:
+            for rec in store.device_records():
+                ids = [rec.get("uuid"), rec.get("instance_id"), rec.get("device_id"),
+                       rec.get("serial")]
+                if any(i and i in live_by_id for i in ids):
+                    continue                              # already represented live
+                for k in ids:
+                    if k:
+                        hist_by_id[k] = rec
+        seen, rows = set(), []
+        for p in self.dashboard.visible_source_ports():   # the curated channel lens
+            if getattr(p, "kind", "") not in ("device", "historic", "remote"):
                 continue
-            d = by_id.get(p.key.split("/")[0])              # key = "<device-id>/<source>"
-            if d is not None and d.instance_id not in seen:
-                seen.add(d.instance_id)
-                devices.append(d)
-        return devices
+            did = p.key.split("/")[0]                     # key = "<device-id>/<source>"
+            d = live_by_id.get(did)
+            if d is not None:
+                ident = d.uuid or d.instance_id
+                if ident not in seen:
+                    seen.add(ident)
+                    rows.append(merge_device_info(d, meta.get(device_key(d))))
+                continue
+            rec = hist_by_id.get(did)
+            if rec is not None:
+                ident = rec.get("uuid") or rec.get("instance_id") or did
+                if ident not in seen:
+                    seen.add(ident)
+                    rows.append(dict(rec))                # frozen merged record
+        return rows
 
     def _device_journal_markdown(self) -> str:
-        """A Markdown 'Instruments' table for the curated devices — descriptor fields
-        merged with user metadata (calibration, asset tag, …). For the /dev macro."""
+        """A Markdown 'Instruments' table for the curated devices (live + historic).
+        For the /dev macro."""
         from .. import __version__
-        from ..core.devicemeta import device_key, merge_device_info
-        devices = self._journal_devices()
-        if not devices:
+        rows = self._journal_devices()
+        if not rows:
             return "_No instruments — curate some device channels first._"
-        meta = self._device_meta()
-        rows = [merge_device_info(d, meta.get(device_key(d))) for d in devices]
         lines = ["## Instruments", "",
                  "| Instrument | Manufacturer | Model | Serial | Firmware | Calibration | Asset |",
                  "|---|---|---|---|---|---|---|"]
@@ -3055,7 +3079,7 @@ class MainWindow(QMainWindow):
             date = _dt.date.today().isoformat()
 
         devices = self._journal_devices()
-        instruments = ", ".join(d.name for d in devices) if devices else "—"
+        instruments = ", ".join(d.get("name") or "?" for d in devices) if devices else "—"
 
         rows = [
             ("Experiment", experiment),
