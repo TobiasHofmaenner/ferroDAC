@@ -694,7 +694,13 @@ class TimelineWindow(QtWidgets.QMainWindow):
                 self.ribbon.set_coverage(cov)
 
     def _recenter(self, t):
-        self.tc.park(t + self.tc.width / 2)   # double-click → centre the head on t
+        # double-click → centre a window of the current width on t. Use park_window
+        # (not park): in GROW mode park() only moves the head, leaving the anchor at
+        # launch — so parking into the PAST made window = (min(anchor, head), head)
+        # collapse to (head, head), a zero-width line. park_window sets the back edge
+        # (the anchor when growing) so the window keeps its width.
+        half = max(0.5, self.tc.width / 2)
+        self.tc.park_window(t - half, t + half)
 
     def _fit_to_view(self):
         """Snap the window/head to whatever the ribbon currently shows — navigate

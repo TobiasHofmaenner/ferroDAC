@@ -1232,3 +1232,27 @@ def test_dev_journal_reconciles_live_and_historic(qapp):
         assert len(rows) == 1 and rows[0]["serial"] == "SG-1"
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_timeline_recenter_past_keeps_window_width(qapp):
+    """Double-clicking the finder to jump into the PAST while in grow mode must not
+    collapse the window to a line (regression: park() left the grow-anchor at launch,
+    so parking before it made window = (head, head))."""
+    w = _mainwindow(qapp)
+    try:
+        if w.time_context is None:
+            pytest.skip("durable store unavailable")
+        tc = w.time_context
+        tc.grow = True
+        tc.anchor = tc.head                          # grow from launch (== now)
+        w._open_timeline()
+        qapp.processEvents()
+        tl = w._timeline_win
+        past = tc.head - 3600                         # an hour back
+        tl._recenter(past)                           # the double-click handler
+        t0, t1 = tc.window
+        assert t1 - t0 > 1.0, (t0, t1)               # NOT collapsed to a line
+        assert t0 < past < t1                        # window straddles the click
+    finally:
+        w.close()
