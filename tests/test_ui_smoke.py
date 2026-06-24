@@ -1444,6 +1444,7 @@ def test_config_dialog_renders_text_and_secret_options(qapp):
     """The device config dialog renders Option(kind='text'/'secret') as a line edit
     / masked line edit (so a cloud account's server + key are GUI-editable), and
     editing applies via set_option."""
+    from qtpy.QtCore import QThread
     from qtpy.QtWidgets import QLineEdit
     from ferrodac.ui.app import ConfigDialog
     from ferrodac.devices.shelly_cloud import ShellyCloud
@@ -1458,8 +1459,56 @@ def test_config_dialog_renders_text_and_secret_options(qapp):
         assert server.echoMode() == QLineEdit.Normal       # free text
         assert auth.echoMode() == QLineEdit.Password        # masked secret
         server.setText("host.shelly.cloud")
-        server.editingFinished.emit()                       # apply via set_option
+        server.editingFinished.emit()                       # apply via set_option (async, off-thread)
+        for _ in range(300):                                # let the worker apply + report back
+            if acc._option_values.get("server") == "host.shelly.cloud":
+                break
+            qapp.processEvents(); QThread.msleep(10)
         assert acc._option_values["server"] == "host.shelly.cloud"
         dlg.close()
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_async_config_option_applied_off_gui_thread(qapp):
+    """A device that opts into async_config has set_option applied on a WORKER
+    thread (so a cloud account's network enumeration never freezes the GUI), and
+    the manager re-emits active_changed once it completes."""
+    import threading
+    from qtpy.QtCore import QThread
+    from ferrodac.core.manager import DeviceManager
+
+    gui_thread = QThread.currentThread()
+    seen = {}
+    release = threading.Event()
+
+    class _AsyncDev:
+        instance_id = "async:1"
+        async_config = True
+
+        def set_option(self, key, value):
+            seen["thread"] = QThread.currentThread()
+            release.wait(2.0)                           # block inside set_option
+            seen[key] = value
+
+    mgr = DeviceManager([])
+    dev = _AsyncDev()
+    mgr._active[dev.instance_id] = dev
+    fired = []
+    mgr.active_changed.connect(lambda: fired.append(True))
+    mgr.set_option(dev.instance_id, "auth_key", "secret")   # must return at once...
+    for _ in range(200):                                # ...while the worker sits in set_option
+        if "thread" in seen:
+            break
+        qapp.processEvents(); QThread.msleep(10)
+    assert seen.get("thread") is not None               # the worker reached set_option
+    assert seen["thread"] is not gui_thread             # ...off the GUI thread
+    assert "auth_key" not in seen and not fired         # caller did NOT wait for it (no freeze)
+    release.set()                                       # let the worker finish
+    for _ in range(300):
+        if fired:
+            break
+        qapp.processEvents(); QThread.msleep(10)
+    assert seen.get("auth_key") == "secret"             # the option WAS applied
+    assert fired                                        # ...and the UI refreshed after

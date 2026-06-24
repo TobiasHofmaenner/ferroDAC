@@ -192,9 +192,18 @@ class DeviceManager(QObject):
         device = self._active.get(instance_id) or self._available.get(instance_id)
         if device is None or not hasattr(device, "set_option"):
             return
-        device.set_option(key, value)
-        self.active_changed.emit()
-        self.available_changed.emit()
+
+        def _changed():
+            self.active_changed.emit()
+            self.available_changed.emit()
+
+        if getattr(device, "async_config", False):
+            # set_option may block (cloud enumeration) — apply it off the GUI thread,
+            # then refresh once the worker reports back on the GUI thread.
+            self._run_async(lambda: device.set_option(key, value), on_finished=_changed)
+        else:
+            device.set_option(key, value)
+            _changed()
 
     def rename(self, instance_id: str, name: str) -> None:
         device = self._active.get(instance_id) or self._available.get(instance_id)

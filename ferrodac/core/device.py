@@ -170,6 +170,10 @@ class Device(ABC):
 
     driver: str = "device"
     discoverable: bool = False
+    async_config: bool = False
+    """Set ``True`` when :meth:`set_option` may block (e.g. a cloud account that
+    enumerates over the network). The manager then applies the option on a worker
+    thread so the GUI never freezes, refreshing once it completes."""
 
     @classmethod
     def discover(cls) -> list["Device"]:

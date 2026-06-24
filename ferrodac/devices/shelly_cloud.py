@@ -10,12 +10,17 @@ Control API (no local network needed).
               A full ``https://…`` URL is accepted too — the scheme is stripped.
   Auth key  — the Authorization Cloud Key (masked).
 
-Once both are set the driver pulls ``/device/all_status`` — the WHOLE account in one
-request — and exposes whatever **temperature / humidity** components each device
-reports as channels (``Shelly <id> · Temperature`` / ``· Humidity``). Detecting
-components (rather than allow-listing model codes, which go stale across Gen1/2/3)
-means any temp/humidity sensor just works, and one bulk call per poll cycle keeps
-us well under the cloud's ~1 req/s global rate limit regardless of sensor count.
+Once both are set the driver enumerates the account (``/interface/device/list`` for
+each sensor's name + room + a status snapshot, ``/interface/room/list`` for room
+names) and exposes whatever **temperature / humidity** components each device reports
+as channels named ``<device name> · Temperature (<room>)``. Detecting components
+(rather than allow-listing model codes, which go stale across Gen1/2/3) means any
+temp/humidity sensor just works. Live values then come from ``/device/all_status`` —
+the WHOLE account in ONE request, cached per poll cycle — which keeps us well under
+the cloud's ~1 req/s global rate limit regardless of sensor count.
+
+Enumeration is a couple of (deliberately spaced) network calls, so ``async_config``
+runs it off the GUI thread — configuring the account never freezes the UI.
 """
 
 from __future__ import annotations
@@ -66,6 +71,7 @@ class ShellyCloud(BaseDevice):
 
     driver = "shelly_cloud"
     discoverable = True
+    async_config = True             # set_option enumerates over the network — keep it off the GUI thread
 
     def __init__(self) -> None:
         self._cache: dict = {}          # {device_id: status} — whole account, one cycle
