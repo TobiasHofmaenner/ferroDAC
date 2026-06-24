@@ -118,6 +118,23 @@ class ShellyCloud(BaseDevice):
         self._cache_t = now
         return self._cache
 
+    @staticmethod
+    def _room_names(server: str, auth: str) -> dict:
+        """{sensor_id: room_name} from /interface/room/list — the human-readable names
+        set in the Shelly app (each room maps to its `main_sensor`). Best-effort: on
+        failure, channels fall back to the device id."""
+        try:
+            data = _get(server, "/interface/room/list", {"auth_key": auth})
+        except Exception as exc:         # noqa: BLE001
+            log.warning("Shelly Cloud: room list failed (using ids): %s", exc)
+            return {}
+        out = {}
+        for room in (data.get("rooms") or {}).values():
+            sid, name = room.get("main_sensor"), (room.get("name") or "").strip()
+            if sid and name:
+                out[sid] = name
+        return out
+
     def _refresh_sensors(self) -> None:
         server, auth = self._creds()
         if not server or not auth:
@@ -127,12 +144,13 @@ class ShellyCloud(BaseDevice):
         except Exception as exc:         # noqa: BLE001 — surface WHY (not a silent [])
             log.warning("Shelly Cloud: status fetch failed: %s", exc)
             return
+        names = self._room_names(server, auth)       # friendly room names (id fallback)
         sources, chan = [], {}
         for sid, status in sorted(devices.items()):
+            who = names.get(sid) or f"Shelly {sid[-6:]}"
             for skey, field, unit, label in _components(status):
                 src_id = f"{sid}_{skey.replace(':', '_')}"
-                sources.append(Source(id=src_id, name=f"Shelly {sid[-6:]} · {label}",
-                                      unit=unit))
+                sources.append(Source(id=src_id, name=f"{who} · {label}", unit=unit))
                 chan[src_id] = (sid, skey, field)
         self._chan, self._sources = chan, sources    # poll loop picks up next cycle
         log.info("Shelly Cloud: %d channel(s) across %d device(s)",

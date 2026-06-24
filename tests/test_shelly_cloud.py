@@ -1,23 +1,25 @@
 """Shelly Cloud account driver: always-discoverable, GUI-configurable (server +
-key), then its sensors stream as channels via ONE bulk /device/all_status call.
-No network — the cloud call is stubbed."""
+key), then its sensors stream as channels via ONE bulk /device/all_status call,
+named from /interface/room/list. No network — the cloud calls are stubbed."""
 import ferrodac.devices.shelly_cloud as mod
 from ferrodac.core.device import Source
 from ferrodac.devices.shelly_cloud import ShellyCloud
 
-# what /device/all_status returns (the data payload), keyed by device id:
+# /device/all_status data payload, keyed by device id:
 _BULK = {"devices_status": {
     "aa01": {"temperature:0": {"tC": 22.5}, "humidity:0": {"rh": 41}},   # Gen3 H&T
     "bb02": {"tmp": {"value": 4.1}},                                      # Gen1 temp-only
     "cc03": {"switch:0": {"output": True}},                              # relay → no channels
 }}
+# /interface/room/list — friendly names mapped to each room's main_sensor:
+_ROOMS = {"rooms": {"1": {"name": "Lab", "main_sensor": "aa01"}}}        # bb02 has no room
 
 
 def _stub(monkeypatch, sink=None):
     def fake_get(server, path, params, **_):
         if sink is not None:
             sink.append((server, path))
-        return _BULK
+        return _ROOMS if "room" in path else _BULK
     monkeypatch.setattr(mod, "_get", fake_get)
 
 
@@ -36,7 +38,7 @@ def test_unconfigured_makes_no_call(monkeypatch):
     assert acc.describe().sources == []
 
 
-def test_config_enumerates_and_strips_scheme(monkeypatch):
+def test_config_enumerates_names_and_strips_scheme(monkeypatch):
     acc = ShellyCloud.discover()[0]
     acc._option_values["server"] = "https://x.shelly.cloud/"     # full URL → normalized
     acc._option_values["auth_key"] = "k"
@@ -44,9 +46,10 @@ def test_config_enumerates_and_strips_scheme(monkeypatch):
     _stub(monkeypatch, calls)
     acc._on_option("auth_key", "")                          # enumerate (what set_option does)
     names = [s.name for s in acc.describe().sources]
-    assert names == ["Shelly aa01 · Temperature", "Shelly aa01 · Humidity",
-                     "Shelly bb02 · Temperature"]           # relay cc03 skipped; temp before hum
-    assert calls[0] == ("x.shelly.cloud", "/device/all_status")   # scheme stripped, bulk call
+    assert names == ["Lab · Temperature", "Lab · Humidity",         # room name from room/list
+                     "Shelly bb02 · Temperature"]                   # no room → id fallback
+    assert calls[0] == ("x.shelly.cloud", "/device/all_status")     # scheme stripped, bulk call
+    assert any(p == "/interface/room/list" for _s, p in calls)      # names fetched too
 
 
 def test_read_maps_channel_gen3_and_gen1(monkeypatch):
@@ -62,14 +65,18 @@ def test_read_maps_channel_gen3_and_gen1(monkeypatch):
     assert status == 1 and val != val                            # unknown channel → NaN, error
 
 
-def test_one_bulk_call_per_cycle(monkeypatch):
+def test_one_bulk_status_call_per_cycle(monkeypatch):
     acc = ShellyCloud.discover()[0]
     acc._option_values["server"] = "x"; acc._option_values["auth_key"] = "k"
     acc._rate_hz = 1 / 60
-    calls = []
-    _stub(monkeypatch, calls)
-    acc._refresh_sensors()                                  # 1 bulk fetch (cached)
-    src = {s.id: s for s in acc.describe().sources}
-    for s in src.values():                                  # every channel reads from the cache
+    status_calls = []
+
+    def fake_get(server, path, params, **_):
+        if path == "/device/all_status":
+            status_calls.append(1)
+        return _ROOMS if "room" in path else _BULK
+    monkeypatch.setattr(mod, "_get", fake_get)
+    acc._refresh_sensors()                                  # 1 bulk status fetch (cached)
+    for s in acc.describe().sources:                        # every channel reads from the cache
         acc._read(s)
-    assert len(calls) == 1                                  # ONE cloud call for the whole cycle
+    assert len(status_calls) == 1                           # ONE status call for the whole cycle
