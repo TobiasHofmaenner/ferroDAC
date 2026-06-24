@@ -16,7 +16,8 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain, convert
+from . import (CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain, convert,
+               watch_connectivity)
 
 log = logging.getLogger("hub.agent")
 
@@ -132,9 +133,14 @@ class HubAgent:
 
     async def _session_loop(self) -> None:
         while not self._stop.is_set():
+            watcher = None
             try:
                 async with grpc.aio.insecure_channel(
                         self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
+                    # report the REAL link from the channel state, not from the
+                    # outgoing generator running (which fires even when the hub is down)
+                    watcher = asyncio.ensure_future(
+                        watch_connectivity(ch, self._addr, self._notify))
                     stub = rpc.IngestStub(ch)
                     call = stub.Session(self._outgen())
                     async for _hub_msg in call:
@@ -143,6 +149,9 @@ class HubAgent:
                 break
             except Exception as e:             # hub down / connection lost
                 self._notify(False, f"hub disconnected: {e}")
+            finally:
+                if watcher is not None:
+                    watcher.cancel()
             if self._stop.is_set():
                 break
             try:
@@ -157,8 +166,7 @@ class HubAgent:
             descs = list(self._devices.values())
         for d in descs:                        # (re)announce on every (re)connect
             yield pb.AgentMessage(announce=d)
-        self._notify(True, f"connected to {self._addr}")
-        while True:
+        while True:                            # link state comes from watch_connectivity
             msg = await self._outq.get()
             if msg is None or self._stop.is_set():
                 break

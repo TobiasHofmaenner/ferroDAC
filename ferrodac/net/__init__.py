@@ -62,3 +62,25 @@ def _drain(loop) -> None:
         loop.run_until_complete(loop.shutdown_default_executor())
     except Exception:                       # pragma: no cover — old loop / no executor
         pass
+
+
+async def watch_connectivity(ch, addr, notify) -> None:
+    """Report the REAL gRPC link from a channel's connectivity, so the UI reflects
+    the actual connection (not the optimistic 'we opened a channel' assumption):
+    READY → connected; TRANSIENT_FAILURE/SHUTDOWN → can't reach the hub. Runs as a
+    task the caller cancels when the session ends. `notify(connected, detail)`."""
+    import grpc
+    ready = grpc.ChannelConnectivity.READY
+    down = (grpc.ChannelConnectivity.TRANSIENT_FAILURE,
+            grpc.ChannelConnectivity.SHUTDOWN)
+    last = None
+    ch.get_state(try_to_connect=True)            # nudge the lazy channel to connect
+    while True:
+        st = ch.get_state()
+        if st != last:
+            last = st
+            if st == ready:
+                notify(True, f"connected to {addr}")
+            elif st in down:
+                notify(False, f"cannot reach {addr}")
+        await ch.wait_for_state_change(st)       # raises CancelledError on teardown

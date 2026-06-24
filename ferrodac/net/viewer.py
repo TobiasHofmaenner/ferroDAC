@@ -17,7 +17,7 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import GRPC_CHANNEL_OPTIONS, _drain, convert
+from . import GRPC_CHANNEL_OPTIONS, _drain, convert, watch_connectivity
 
 log = logging.getLogger("hub.viewer")
 
@@ -73,15 +73,17 @@ class HubViewer:
                 async with grpc.aio.insecure_channel(
                         self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
                     v = rpc.ViewerStub(ch)
-                    self._notify(True, f"connected to {self._addr}")
+                    # REAL link from the channel state (not 'we opened a channel')
+                    conn = asyncio.create_task(
+                        watch_connectivity(ch, self._addr, self._notify))
                     watch = asyncio.create_task(self._watch(v))
                     sub = asyncio.create_task(self._subscribe(v))
                     stopper = asyncio.create_task(self._stop.wait())
-                    await asyncio.wait({watch, sub, stopper},
+                    await asyncio.wait({conn, watch, sub, stopper},
                                        return_when=asyncio.FIRST_COMPLETED)
-                    for t in (watch, sub, stopper):
+                    for t in (conn, watch, sub, stopper):
                         t.cancel()
-                    await asyncio.gather(watch, sub, stopper,
+                    await asyncio.gather(conn, watch, sub, stopper,
                                          return_exceptions=True)
             except asyncio.CancelledError:
                 break

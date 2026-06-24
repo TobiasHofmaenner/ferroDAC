@@ -34,7 +34,9 @@ class HubController(QObject):
     _doc_presence = Signal(str, object)   # doc_id, actors list
     status = Signal(str)                  # human status line
     sync_status = Signal(str, str)        # store-sync (state, detail) — §12.1
-    connection_changed = Signal(bool)     # connected ↔ disconnected
+    connection_changed = Signal(bool)     # connected ↔ disconnected (intent/mode)
+    link_state = Signal(str, str)         # REAL gRPC link: connecting|connected|error|
+    #                                       offline + detail (drives the button colour)
 
     def __init__(self, dashboard, engine, manager, parent=None, store=None,
                  resolver=None):
@@ -60,6 +62,7 @@ class HubController(QObject):
         self._agent_unsub = None
         self._tags_wired = False
         self._local: set = set()
+        self._link: dict = {}            # role -> live gRPC connected? (for the button)
         self.addr = ""
         # These signals are emitted from raw (non-QThread) gRPC worker threads;
         # force QueuedConnection so the slots ALWAYS run on the GUI thread. With
@@ -109,6 +112,8 @@ class HubController(QObject):
         from ..net.viewer import HubViewer
         self.disconnect()
         self.addr = addr
+        self._link = {}                            # fresh link: "connecting" until a role reports
+        self.link_state.emit("connecting", f"connecting to {addr} …")
         self._update_local()
         aid = f"ferrodac@{socket.gethostname()}"
         self._aid = aid
@@ -222,9 +227,11 @@ class HubController(QObject):
             if self._on_projects is not None:
                 self._on_projects()
         self.dashboard.clear_remote_devices()
+        self._link = {}
         if self.addr:
             self.status.emit("ferroDAC Cloud: disconnected")
             self.sync_status.emit("offline", "")
+            self.link_state.emit("offline", "")
             self.connection_changed.emit(False)
         self.addr = ""
 
@@ -387,7 +394,22 @@ class HubController(QObject):
             self.dashboard.set_remote_offline(dev.uuid)
 
     def _state_cb(self, role):
-        return lambda connected, detail: self.status.emit(f"Cloud {role}: {detail}")
+        """Per-role gRPC state callback (fires on a worker thread). Surfaces the
+        status line AND the REAL aggregate link state — so the UI reflects the
+        actual connection, not the optimistic 'we started a thread' assumption."""
+        def cb(connected, detail):
+            self.status.emit(f"Cloud {role}: {detail}")
+            self._link[role] = bool(connected)
+            self.link_state.emit(self._overall_link(), detail)
+        return cb
+
+    def _overall_link(self) -> str:
+        # only the PRIMARY roles the user connected as define the link (agent/viewer);
+        # the always-on tag/project/doc channels don't gate the button.
+        primary = [self._link[r] for r in ("agent", "viewer") if r in self._link]
+        if not primary:
+            return "connecting"                # started, no primary role has reported yet
+        return "connected" if any(primary) else "error"
 
 
 class ConnectHubDialog(QDialog):

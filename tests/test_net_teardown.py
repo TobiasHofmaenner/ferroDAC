@@ -27,3 +27,29 @@ def test_drain_shuts_down_default_executor():
     loop.close()
     worker.join(timeout=5)
     assert not worker.is_alive(), "default-executor worker leaked (blocks exit)"
+
+
+def test_agent_reports_failure_for_a_dead_hub():
+    """The agent's link state reflects the REAL channel: connecting to a dead port
+    reports connected=False (it must NOT optimistically say connected). Regression for
+    the 'button always green' bug — the optimism was in the agent itself."""
+    import time
+
+    import pytest
+    from ferrodac.net import GRPC_AVAILABLE
+    if not GRPC_AVAILABLE:
+        pytest.skip("grpcio unavailable")
+    from ferrodac.net.agent import HubAgent
+
+    states = []
+    ag = HubAgent("127.0.0.1:1", agent_id="t",          # port 1 → nothing listening
+                  on_state=lambda connected, _d: states.append(connected))
+    ag.start()
+    try:
+        t = time.time()
+        while time.time() - t < 8 and False not in states:
+            time.sleep(0.05)
+        assert False in states, f"never reported failure: {states}"
+        assert True not in states, f"falsely reported connected: {states}"
+    finally:
+        ag.stop()

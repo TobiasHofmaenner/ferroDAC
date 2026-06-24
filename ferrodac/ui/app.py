@@ -2049,6 +2049,7 @@ class MainWindow(QMainWindow):
         self.hub.sync_status.connect(self.sync_status.set_state, Qt.QueuedConnection)
         self.hub.connection_changed.connect(self._on_hub_connection,
                                             Qt.QueuedConnection)
+        self.hub.link_state.connect(self._on_hub_link, Qt.QueuedConnection)
 
         # working-LAYOUT autosave (per-project working.json) — layout only now
         self._active_layout_path = None    # a named layout open → autosave to it too
@@ -2462,19 +2463,35 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg, 6000)
 
     def _on_hub_connection(self, connected: bool) -> None:
-        """Recolour the Hub toolbar button to signal the live link, and seed the
-        sync read-out (the SyncRunner then drives it from its background pass)."""
-        self.hub_action.setText("ferroDAC Cloud ✓" if connected else "ferroDAC Cloud…")
-        btn = self.main_toolbar.widgetForAction(self.hub_action)
-        if btn is not None:
-            btn.setStyleSheet(
-                "QToolButton{color:#0b0f16;background:#3fb950;border-radius:3px;"
-                "padding:2px 8px;font-weight:700;}" if connected else "")
+        """Connection MODE changed (intent: objects exist / torn down). Seed the sync
+        read-out and refresh hub-dependent views. The button COLOUR is driven
+        separately by the REAL link state (`_on_hub_link`), not by this assumption."""
         self.sync_status.set_state("connecting" if connected else "offline")
         # surface (or retire) the hub's historic catalog as routable ports
         self.dashboard.refresh_ports()
         self._refresh_explorer()                # enable/disable the “On the hub…” item
         self._refresh_doc_collab()              # offer/retire the Collaborate toggle
+
+    def _on_hub_link(self, state: str, detail: str) -> None:
+        """Recolour the Cloud button from the ACTUAL gRPC link state, so it reflects
+        reality (amber connecting → green connected → red on failure), not the
+        optimistic 'we started the thread' assumption."""
+        color, text = {
+            "connecting": ("#d29922", "ferroDAC Cloud …"),
+            "connected":  ("#3fb950", "ferroDAC Cloud ✓"),
+            "error":      ("#f85149", "ferroDAC Cloud ⚠"),
+            "offline":    (None,      "ferroDAC Cloud…"),
+        }.get(state, (None, "ferroDAC Cloud…"))
+        self.hub_action.setText(text)
+        btn = self.main_toolbar.widgetForAction(self.hub_action)
+        if btn is not None:
+            btn.setStyleSheet(
+                f"QToolButton{{color:#0b0f16;background:{color};border-radius:3px;"
+                "padding:2px 8px;font-weight:700;}" if color else "")
+        if detail:
+            self.hub_action.setToolTip(detail)
+        if state == "connected":                # we genuinely linked → reconnect next launch
+            QSettings("ferroDAC", "ferroDAC").setValue("hub/autoconnect", True)
 
     def _ensure_ext_manager(self):
         if self._extensions is None:
@@ -2507,6 +2524,7 @@ class MainWindow(QMainWindow):
         if not dlg.exec():
             return
         if dlg.disconnect_requested:
+            s.setValue("hub/autoconnect", False)    # explicit disconnect → don't auto-reconnect
             self.hub.disconnect()
             return
         addr, as_agent, as_viewer = dlg.values()
@@ -2515,6 +2533,21 @@ class MainWindow(QMainWindow):
             s.setValue("hub/agent", as_agent)
             s.setValue("hub/viewer", as_viewer)
             self.hub.connect(addr, as_agent, as_viewer)
+
+    def maybe_autoconnect(self) -> None:
+        """Reconnect to the last hub on launch if we were connected when we quit
+        (set by a successful link; cleared on an explicit disconnect). Called by the
+        app entry point AFTER show — never in headless tests."""
+        if not (self.hub.available and self._restore_last):
+            return
+        s = QSettings("ferroDAC", "ferroDAC")
+        if not s.value("hub/autoconnect", False, type=bool):
+            return
+        addr = s.value("hub/addr", "", type=str)
+        agent = s.value("hub/agent", True, type=bool)
+        viewer = s.value("hub/viewer", True, type=bool)
+        if addr and (agent or viewer):
+            self.hub.connect(addr, agent, viewer)
 
     def _add_tag(self):
         dlg = _MarkerDialog(parent=self)
@@ -4026,4 +4059,5 @@ def main(argv=None) -> int:
     manager = DeviceManager(drivers, engine=engine, registry=registry)
     win = MainWindow(manager, engine, extensions=ext_mgr)
     win.show()
+    win.maybe_autoconnect()                # reconnect to the last hub if we were linked
     return app.exec()

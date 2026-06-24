@@ -1371,3 +1371,69 @@ def test_navigator_action_bar_and_edit_dispatch(qapp):
         assert "overview" not in p.layouts()
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_hub_button_reflects_real_link_state(qapp):
+    """The Cloud button colour follows the ACTUAL gRPC link, not an assumption:
+    connecting=amber, connected=green, error=red, offline clears. The mode/intent
+    signal (_on_hub_connection) must NOT turn it green on its own."""
+    w = _mainwindow(qapp)
+    try:
+        btn = w.main_toolbar.widgetForAction(w.hub_action)
+        w._on_hub_connection(True)                       # intent only — no assumption
+        assert "3fb950" not in (btn.styleSheet() or "")
+        w._on_hub_link("connecting", "…")
+        assert "d29922" in btn.styleSheet()              # amber
+        w._on_hub_link("connected", "ok")
+        assert "3fb950" in btn.styleSheet()              # green (real)
+        w._on_hub_link("error", "boom")
+        assert "f85149" in btn.styleSheet()              # red
+        w._on_hub_link("offline", "")
+        assert btn.styleSheet() == ""                    # cleared
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_hub_link_state_aggregation(qapp):
+    """The real link state aggregates per-role gRPC reports: connecting until a role
+    reports, connected if any role is up, error if all are down."""
+    w = _mainwindow(qapp)
+    try:
+        hub = w.hub
+        seen = []
+        hub.link_state.connect(lambda s, _d: seen.append(s))
+        hub._link = {}
+        assert hub._overall_link() == "connecting"
+        hub._state_cb("agent")(False, "down")
+        assert hub._overall_link() == "error" and seen[-1] == "error"
+        hub._state_cb("viewer")(True, "up")
+        assert hub._overall_link() == "connected" and seen[-1] == "connected"
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_hub_autoconnect_gating(qapp):
+    """maybe_autoconnect reconnects only when the persisted flag is set (and uses the
+    saved address/roles). hub.connect is stubbed so no real network happens."""
+    from qtpy.QtCore import QSettings
+    w = _mainwindow(qapp)
+    try:
+        if not w.hub.available:
+            pytest.skip("grpcio unavailable")
+        s = QSettings("ferroDAC", "ferroDAC")
+        calls = []
+        w.hub.connect = lambda *a: calls.append(a)
+        s.setValue("hub/autoconnect", False)
+        w.maybe_autoconnect()
+        assert calls == []                               # off → nothing
+        s.setValue("hub/autoconnect", True)
+        s.setValue("hub/addr", "host:1234")
+        s.setValue("hub/agent", True); s.setValue("hub/viewer", False)
+        w.maybe_autoconnect()
+        assert calls and calls[-1] == ("host:1234", True, False)
+    finally:
+        s.setValue("hub/autoconnect", False)             # don't leak to other tests/app
+        w.close()
