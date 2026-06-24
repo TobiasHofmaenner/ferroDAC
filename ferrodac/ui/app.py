@@ -272,7 +272,13 @@ class ConfigDialog(QDialog):
             srow.addStretch(1)
             root.addLayout(srow)
 
-        if desc and desc.options:
+        # a driver may ship a dedicated config panel (registered by driver name); it
+        # AUGMENTS this dialog (embedded below) and can opt to own the options itself.
+        from .device_config import DEVICE_CONFIG_WIDGETS, DeviceConfigController
+        panel_cls = DEVICE_CONFIG_WIDGETS.get(desc.driver) if desc else None
+        owns_options = bool(panel_cls and getattr(panel_cls, "owns_options", False))
+
+        if desc and desc.options and not owns_options:
             for opt in desc.options:
                 orow = QHBoxLayout()
                 orow.addWidget(QLabel(opt.name))
@@ -321,6 +327,17 @@ class ConfigDialog(QDialog):
                 grid.addWidget(lbl, r, 0)
                 grid.addWidget(self._sink_widget(s), r, 1)
             root.addWidget(card)
+
+        self._driver_panel = None
+        if panel_cls is not None:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.HLine)
+            sep.setStyleSheet("color:#232a38;")
+            root.addWidget(sep)
+            self._driver_panel = panel_cls(
+                DeviceConfigController(self.manager, self.instance_id))
+            root.addWidget(self._driver_panel)
+            self._driver_panel.refresh(desc)
 
         btnrow = QHBoxLayout()
         btnrow.addStretch(1)
@@ -407,6 +424,8 @@ class ConfigDialog(QDialog):
         if desc is None:
             return
         self._update_info(desc)
+        if getattr(self, "_driver_panel", None) is not None:
+            self._driver_panel.refresh(desc)
         for s in desc.sinks:
             w = self._sink_widgets.get(s.id)
             if s.kind == SinkKind.SETPOINT and s.id in self._setpoint_labels:

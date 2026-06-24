@@ -24,23 +24,31 @@ DTYPES = frozenset({FLOAT, BOOL, TRACE})
 
 from ..analysis.processor import Port, Processor   # noqa: E402 — Qt-free contract
 from ..analysis.processor import register as register_processor  # noqa: E402
-from ..core.device import Device                   # noqa: E402 — Qt-free contract
+from ..core.device import CheckResult, Device       # noqa: E402 — Qt-free contract
 from ..core.trace import Trace                     # noqa: E402 — Qt-free contract
 
 # Device drivers register simply by subclassing Device (auto-discovered); processors
-# and widgets register with these decorators.
+# and widgets register with these decorators. A driver can also ship a dedicated config
+# panel (DeviceConfigWidget + @register_config_widget) — Qt, so lazily exposed below.
 __all__ = ["API_VERSION", "FLOAT", "BOOL", "TRACE", "DTYPES",
-           "Port", "Processor", "Device", "Trace", "Widget",
-           "register_processor", "register_widget"]
+           "Port", "Processor", "Device", "Trace", "Widget", "CheckResult",
+           "DeviceConfigWidget", "register_processor", "register_widget",
+           "register_config_widget"]
 
 
 def __getattr__(name):
-    """Lazily expose the Qt-touching names (Widget + register_widget) so a
-    processor/driver-only plugin that never references them stays Qt-free."""
+    """Lazily expose the Qt-touching names (Widget + the device-config panel surface)
+    so a processor/driver-only plugin that never references them stays Qt-free."""
     if name == "Widget":
         from ..ui.widget import Widget
         return Widget
     if name == "register_widget":
         from ..ui.widget import register_widget
         return register_widget
+    if name == "DeviceConfigWidget":
+        from ..ui.device_config import DeviceConfigWidget
+        return DeviceConfigWidget
+    if name == "register_config_widget":
+        from ..ui.device_config import register_config_widget
+        return register_config_widget
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -95,3 +95,65 @@ def test_one_bulk_status_call_per_cycle(monkeypatch):
     for s in acc.describe().sources:                        # every channel reads from the cache
         acc._read(s)
     assert [p for _s, p in calls] == ["/device/all_status"]   # ONE status call for the cycle
+
+
+# -- check(): the config GUI's "Check connection" diagnostic --------------------
+def test_check_unconfigured():
+    r = ShellyCloud.discover()[0].check()
+    assert not r.ok and "server" in r.summary.lower()      # tells you to fill the fields
+
+
+def test_check_success_reports_counts_and_applies(monkeypatch):
+    acc = ShellyCloud.discover()[0]
+    acc._option_values["server"] = "x"; acc._option_values["auth_key"] = "k"
+    _stub(monkeypatch)
+    r = acc.check()
+    assert r.ok and r.sources == 3                         # 2 on aa01 + 1 on bb02
+    assert "3 channel" in r.summary and "2 sensor" in r.summary
+    assert len(acc.describe().sources) == 3                # a successful check also populates
+
+
+def test_check_reports_auth_failure(monkeypatch):
+    acc = ShellyCloud.discover()[0]
+    acc._option_values["server"] = "x"; acc._option_values["auth_key"] = "bad"
+    monkeypatch.setattr(mod.time, "sleep", lambda *a, **k: None)
+    def fake_get(server, path, params, **_):
+        if "room" in path:
+            return _ROOMS                                  # best-effort room call is fine
+        raise Exception("HTTP Error 401: Unauthorized")    # the authoritative device/list call
+    monkeypatch.setattr(mod, "_get", fake_get)
+    r = acc.check()
+    assert not r.ok and "uthenticat" in r.summary          # "Authentication failed…"
+    assert acc.describe().sources == []                    # a failed check changes nothing
+
+
+def test_check_reports_no_sensors(monkeypatch):
+    acc = ShellyCloud.discover()[0]
+    acc._option_values["server"] = "x"; acc._option_values["auth_key"] = "k"
+    monkeypatch.setattr(mod.time, "sleep", lambda *a, **k: None)
+    relays = {"devices": {"cc03": {"category": "relay", "name": "Plug",
+                                   "ss": {"status": {"switch:0": {"output": True}}}}}}
+    monkeypatch.setattr(mod, "_get",
+                        lambda s, p, q, **_: _ROOMS if "room" in p else relays)
+    r = acc.check()
+    assert not r.ok and "no temperature" in r.summary.lower()
+
+
+def test_basedevice_check_default_counts_and_surfaces_errors():
+    from ferrodac.core.base import BaseDevice
+    from ferrodac.core.device import Interface
+
+    class Dev(BaseDevice):
+        driver = "t"
+        def __init__(self, boom=False):
+            super().__init__("t:1", "T", Interface(kind="sim"),
+                             sources=[Source(id="a", name="A"), Source(id="b", name="B")])
+            self._boom = boom
+        def _connect(self):
+            if self._boom:
+                raise RuntimeError("nope")
+
+    ok = Dev().check()
+    assert ok.ok and ok.sources == 2 and "2 sources" in ok.summary
+    bad = Dev(boom=True).check()
+    assert not bad.ok and "nope" in bad.summary

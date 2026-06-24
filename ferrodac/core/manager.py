@@ -205,6 +205,22 @@ class DeviceManager(QObject):
             device.set_option(key, value)
             _changed()
 
+    def check(self, instance_id: str, on_result) -> None:
+        """Run a device's connection check OFF the GUI thread; call ``on_result``
+        with the CheckResult on the GUI thread when done (drives the config GUI's
+        "Check connection" button)."""
+        from .device import CheckResult
+        device = self._active.get(instance_id) or self._available.get(instance_id)
+        if device is None:
+            on_result(CheckResult(False, "Device not found."))
+            return
+        box = {}
+        self._run_async(
+            lambda: box.__setitem__("r", device.check()),
+            on_finished=lambda: on_result(box.get("r")
+                                          or CheckResult(False, "Check failed.")),
+        )
+
     def rename(self, instance_id: str, name: str) -> None:
         device = self._active.get(instance_id) or self._available.get(instance_id)
         if device is None or not hasattr(device, "set_name"):

@@ -1554,3 +1554,80 @@ def test_async_config_option_applied_off_gui_thread(qapp):
         qapp.processEvents(); QThread.msleep(10)
     assert seen.get("auth_key") == "secret"             # the option WAS applied
     assert fired                                        # ...and the UI refreshed after
+
+
+@pytest.mark.ui
+def test_driver_config_panel_embeds_and_checks(qapp, monkeypatch):
+    """A driver-registered config panel is embedded in ConfigDialog (AUGMENTING the
+    standard sections — the declarative server/key fields still render), and its
+    Check button runs the device's check off the GUI thread and shows the result."""
+    from qtpy.QtCore import QThread
+    from qtpy.QtWidgets import QLineEdit
+    from ferrodac.ui.app import ConfigDialog
+    from ferrodac.ui.device_config import DEVICE_CONFIG_WIDGETS, ShellyConfigWidget
+    from ferrodac.devices import shelly_cloud as scmod
+    from ferrodac.devices.shelly_cloud import ShellyCloud
+    assert DEVICE_CONFIG_WIDGETS.get("shelly_cloud") is ShellyConfigWidget  # auto-registered
+    _LIST = {"devices": {"aa01": {"category": "sensor", "name": "S", "room_id": 3,
+             "ss": {"status": {"temperature:0": {"tC": 20.0}, "humidity:0": {"rh": 40}}}}}}
+    _ROOMS = {"rooms": {"3": {"id": 3, "name": "Lab"}}}
+    monkeypatch.setattr(scmod.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(scmod, "_get",
+                        lambda s, p, q, **_: _ROOMS if "room" in p else _LIST)
+    w = _mainwindow(qapp)
+    try:
+        acc = ShellyCloud()
+        acc._option_values["server"] = "x"; acc._option_values["auth_key"] = "k"
+        w.manager._active[acc.instance_id] = acc
+        dlg = ConfigDialog(w.manager, acc.instance_id, w)
+        panel = dlg._driver_panel
+        assert isinstance(panel, ShellyConfigWidget)               # embedded
+        edits = dlg.findChildren(QLineEdit)
+        assert any(e.placeholderText() == "Server" for e in edits)  # standard options STILL render
+        panel._btn.click()                                          # off-thread check
+        for _ in range(300):
+            t = panel._status.text()
+            if "✓" in t or "✗" in t:
+                break
+            qapp.processEvents(); QThread.msleep(10)
+        assert "✓" in panel._status.text() and "2 channel" in panel._status.text()
+        dlg.close()
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_config_panel_can_own_options(qapp):
+    """A panel with owns_options=True suppresses the dialog's auto-rendered Options
+    (it draws them itself), while still being embedded."""
+    from qtpy.QtWidgets import QLineEdit
+    from ferrodac.ui.app import ConfigDialog
+    from ferrodac.ui.device_config import DEVICE_CONFIG_WIDGETS, DeviceConfigWidget
+    from ferrodac.core.base import BaseDevice
+    from ferrodac.core.device import Interface, Option
+
+    class FakeDev(BaseDevice):
+        driver = "fake_owns"
+        def __init__(self):
+            super().__init__("fake:1", "Fake", Interface(kind="sim"),
+                             options=[Option("host", "Host", kind="text")])
+        def _connect(self):
+            pass
+
+    class FakePanel(DeviceConfigWidget):
+        driver = "fake_owns"
+        owns_options = True
+
+    DEVICE_CONFIG_WIDGETS["fake_owns"] = FakePanel
+    w = _mainwindow(qapp)
+    try:
+        dev = FakeDev()
+        w.manager._active[dev.instance_id] = dev
+        dlg = ConfigDialog(w.manager, dev.instance_id, w)
+        assert isinstance(dlg._driver_panel, FakePanel)            # panel embedded
+        assert not any(e.placeholderText() == "Host"               # auto option SUPPRESSED
+                       for e in dlg.findChildren(QLineEdit))
+        dlg.close()
+    finally:
+        DEVICE_CONFIG_WIDGETS.pop("fake_owns", None)
+        w.close()

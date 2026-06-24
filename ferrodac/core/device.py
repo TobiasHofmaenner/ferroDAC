@@ -122,6 +122,17 @@ class RateControl:
     max_hz: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class CheckResult:
+    """The outcome of a device's connection check — what the config GUI's "Check
+    connection" button shows. Serializable, so it crosses the manager/agent boundary
+    cleanly and a Qt-free driver can produce it."""
+    ok: bool
+    summary: str                 # one line, human-facing ("Auth OK · 16 sources")
+    sources: int = 0             # how many sources the device would expose
+    detail: str = ""             # optional longer explanation
+
+
 @dataclass
 class DeviceDescriptor:
     """A snapshot of a device's identity, capabilities and status."""
@@ -205,6 +216,17 @@ class Device(ABC):
     def set_option(self, key: str, value) -> None:
         """Set a device configuration option (see DeviceDescriptor.options)."""
         raise NotImplementedError(f"{self.driver} exposes no options")
+
+    def check(self) -> "CheckResult":
+        """Probe configuration / connectivity for the config GUI's "Check connection"
+        button. Override for a real probe (auth, reachability) that returns a precise
+        message + source count. Default: report the source count from a fresh
+        describe() (no connection attempted)."""
+        try:
+            n = len(self.describe().sources)
+        except Exception as exc:                       # noqa: BLE001
+            return CheckResult(False, f"Check failed: {exc}")
+        return CheckResult(True, f"{n} source{'' if n == 1 else 's'} available.", n)
 
     # -- data plane (push) ----------------------------------------------------
     def start(self, emit) -> None:

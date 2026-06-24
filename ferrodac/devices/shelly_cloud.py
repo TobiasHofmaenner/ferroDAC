@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 
 from ..core.base import BaseDevice
-from ..core.device import Interface, Option, RateControl, RateMode, Source
+from ..core.device import CheckResult, Interface, Option, RateControl, RateMode, Source
 
 log = logging.getLogger("ferrodac.shelly")
 
@@ -140,17 +140,19 @@ class ShellyCloud(BaseDevice):
                 out[rid] = name
         return out
 
-    def _refresh_sensors(self) -> None:
+    def _enumerate(self):
+        """Build (sources, chan) from the account, returning (sources, chan, error).
+        ``error`` is None on success, else a human string (the room call is best-effort
+        and omitted from it — the device/list call is the authoritative auth probe)."""
         server, auth = self._creds()
         if not server or not auth:
-            return                       # not configured yet — leave channels empty
-        rooms = self._room_names(server, auth)       # room_id -> name (best-effort)
+            return [], {}, "not configured"
+        rooms = self._room_names(server, auth)       # room_id -> name (best-effort, swallows)
         time.sleep(1.1)                  # respect the cloud's ~1 req/s limit between calls
         try:                             # the list carries name + room_id + a status snapshot
             data = _get(server, "/interface/device/list", {"auth_key": auth})
         except Exception as exc:         # noqa: BLE001 — surface WHY (not a silent [])
-            log.warning("Shelly Cloud: device list failed: %s", exc)
-            return
+            return [], {}, str(exc)
         sources, chan = [], {}
         for sid, dev in sorted((data.get("devices") or {}).items()):
             if not isinstance(dev, dict) or dev.get("category") != "sensor":
@@ -163,9 +165,39 @@ class ShellyCloud(BaseDevice):
                 src_id = f"{sid}_{skey.replace(':', '_')}"
                 sources.append(Source(id=src_id, name=f"{name} · {label}{tail}", unit=unit))
                 chan[src_id] = (sid, skey, field)
+        return sources, chan, None
+
+    def _refresh_sensors(self) -> None:
+        sources, chan, error = self._enumerate()
+        if error:                        # keep whatever we had (don't blank live channels)
+            if error != "not configured":
+                log.warning("Shelly Cloud: enumeration failed: %s", error)
+            return
         self._chan, self._sources = chan, sources    # poll loop picks up next cycle
         log.info("Shelly Cloud: %d channel(s) across %d sensor(s)",
                  len(sources), len({c[0] for c in chan.values()}))
+
+    def check(self) -> CheckResult:
+        """Probe the account for the config GUI: distinguish not-configured / auth
+        failure / rate-limit / no-sensors, and on success apply + count the channels."""
+        sources, chan, error = self._enumerate()
+        if error == "not configured":
+            return CheckResult(False, "Enter the server and auth key above, then check.")
+        if error:
+            low = error.lower()
+            if "401" in error or "unauthor" in low:   # the cloud returns 401 on BOTH
+                return CheckResult(False, "Authentication failed, or the cloud rate-limited "
+                                          "the request (~1/s) — check the key & server, then "
+                                          f"retry in a few seconds.  [{error}]")
+            return CheckResult(False, f"Could not reach the Shelly cloud: {error}")
+        self._chan, self._sources = chan, sources     # success → apply (also populates channels)
+        nsens = len({c[0] for c in chan.values()})
+        if not sources:
+            return CheckResult(False, "Authenticated, but found no temperature / humidity "
+                                      "sensors on this account.")
+        return CheckResult(True, f"Auth OK · {len(sources)} channel"
+                           f"{'' if len(sources) == 1 else 's'} across {nsens} "
+                           f"sensor{'' if nsens == 1 else 's'}.", len(sources))
 
     def _read(self, source: Source):
         info = self._chan.get(source.id)

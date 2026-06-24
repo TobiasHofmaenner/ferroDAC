@@ -16,6 +16,7 @@ from typing import Optional, Sequence
 from .reading import Reading
 from .identity import Fingerprint
 from .device import (
+    CheckResult,
     Device,
     DeviceDescriptor,
     Interface,
@@ -200,6 +201,17 @@ class BaseDevice(Device):
 
     def _on_option(self, key: str, value) -> None:
         """Hook: react to an option change (e.g. reconfigure hardware)."""
+
+    def check(self) -> CheckResult:
+        """Connect (if needed) and report the source count — a generic "is it
+        working?" probe for the config GUI. Drivers with auth / remote endpoints
+        override this for a precise message (which is why it lives on the contract)."""
+        try:
+            self._connect()
+        except Exception as exc:                       # noqa: BLE001
+            return CheckResult(False, f"Connection failed: {exc}")
+        n = len(self._sources)
+        return CheckResult(True, f"Connected · {n} source{'' if n == 1 else 's'}.", n)
 
     def _sink_schema(self, sink_id: str) -> Optional[Sink]:
         for s in self._sinks:
