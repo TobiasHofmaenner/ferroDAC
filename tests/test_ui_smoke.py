@@ -1437,3 +1437,29 @@ def test_hub_autoconnect_gating(qapp):
     finally:
         s.setValue("hub/autoconnect", False)             # don't leak to other tests/app
         w.close()
+
+
+@pytest.mark.ui
+def test_config_dialog_renders_text_and_secret_options(qapp):
+    """The device config dialog renders Option(kind='text'/'secret') as a line edit
+    / masked line edit (so a cloud account's server + key are GUI-editable), and
+    editing applies via set_option."""
+    from qtpy.QtWidgets import QLineEdit
+    from ferrodac.ui.app import ConfigDialog
+    from ferrodac.devices.shelly_cloud import ShellyCloud
+    w = _mainwindow(qapp)
+    try:
+        acc = ShellyCloud()
+        w.manager._active[acc.instance_id] = acc          # so descriptor() finds it
+        dlg = ConfigDialog(w.manager, acc.instance_id, w)
+        edits = dlg.findChildren(QLineEdit)
+        server = next(e for e in edits if e.placeholderText() == "Server")
+        auth = next(e for e in edits if e.placeholderText() == "Auth key")
+        assert server.echoMode() == QLineEdit.Normal       # free text
+        assert auth.echoMode() == QLineEdit.Password        # masked secret
+        server.setText("host.shelly.cloud")
+        server.editingFinished.emit()                       # apply via set_option
+        assert acc._option_values["server"] == "host.shelly.cloud"
+        dlg.close()
+    finally:
+        w.close()

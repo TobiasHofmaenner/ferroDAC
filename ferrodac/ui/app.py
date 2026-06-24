@@ -276,17 +276,29 @@ class ConfigDialog(QDialog):
             for opt in desc.options:
                 orow = QHBoxLayout()
                 orow.addWidget(QLabel(opt.name))
-                combo = QComboBox()
-                for value, label in opt.choices:
-                    combo.addItem(label, value)
-                ix = combo.findData(opt.value)
-                if ix >= 0:
-                    combo.setCurrentIndex(ix)
-                combo.currentIndexChanged.connect(
-                    lambda _i, c=combo, key=opt.key:
-                    self.manager.set_option(self.instance_id, key, c.currentData())
-                )
-                orow.addWidget(combo, 1)
+                kind = getattr(opt, "kind", "choice")
+                if kind in ("text", "secret"):       # free-text / masked (server, key…)
+                    edit = QLineEdit(str(opt.value or ""))
+                    if kind == "secret":
+                        edit.setEchoMode(QLineEdit.Password)
+                    edit.setPlaceholderText(opt.name)
+                    edit.editingFinished.connect(
+                        lambda e=edit, key=opt.key:
+                        self.manager.set_option(self.instance_id, key, e.text().strip())
+                    )
+                    orow.addWidget(edit, 1)
+                else:                                # a dropdown over choices
+                    combo = QComboBox()
+                    for value, label in opt.choices:
+                        combo.addItem(label, value)
+                    ix = combo.findData(opt.value)
+                    if ix >= 0:
+                        combo.setCurrentIndex(ix)
+                    combo.currentIndexChanged.connect(
+                        lambda _i, c=combo, key=opt.key:
+                        self.manager.set_option(self.instance_id, key, c.currentData())
+                    )
+                    orow.addWidget(combo, 1)
                 root.addLayout(orow)
 
         if desc and desc.sinks:

@@ -66,15 +66,19 @@ class Param:
 
 @dataclass(frozen=True)
 class Option:
-    """A device-level configuration choice (e.g. a camera's capture format).
+    """A device-level configuration choice (e.g. a camera's capture format, or a
+    cloud account's server + key).
 
     Distinct from a Sink: it is not routable, it just parameterises the device.
-    ``choices`` is a tuple of ``(value, label)``; ``value`` is the current value.
+    ``kind`` selects the editor: "choice" (a dropdown over ``choices``, tuples of
+    ``(value, label)``), "text" (a free-text line), or "secret" (a masked line, for
+    keys/passwords). ``value`` is the current value.
     """
     key: str
     name: str
     choices: tuple = ()
     value: object = None
+    kind: str = "choice"            # "choice" | "text" | "secret"
 
 
 @dataclass(frozen=True)
