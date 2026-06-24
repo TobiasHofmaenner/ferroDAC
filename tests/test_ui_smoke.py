@@ -1256,3 +1256,23 @@ def test_timeline_recenter_past_keeps_window_width(qapp):
         assert t0 < past < t1                        # window straddles the click
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_devices_opens_as_window(qapp):
+    """The Devices manager opens as a standalone window (not a dock), single-instance,
+    and clears its ref on close."""
+    from ferrodac.ui.app import DevicesPanel
+    w = _mainwindow(qapp)
+    try:
+        assert getattr(w, "_devices_win", None) is None
+        w._open_devices()
+        win = w._devices_win
+        assert win is not None and isinstance(win.centralWidget(), DevicesPanel)
+        w._open_devices()                            # single-instance: same window
+        assert w._devices_win is win
+        win.close()
+        qapp.processEvents()
+        assert w._devices_win is None                # destroyed → ref cleared
+    finally:
+        w.close()

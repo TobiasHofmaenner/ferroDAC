@@ -472,6 +472,23 @@ class DevicesPanel(QWidget):
         layout.addStretch(1)
 
 
+class DevicesWindow(QMainWindow):
+    """The Devices manager as a standalone window (like the Timeline) rather than a
+    cramped dock — Available + Active devices, add/remove/configure. Just hosts a
+    DevicesPanel; the panel is unchanged."""
+
+    def __init__(self, manager: DeviceManager, on_configure, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ferroDAC — Devices")
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.resize(460, 680)
+        self.setStyleSheet(
+            "QMainWindow,QWidget{background:#0e1116;color:#c7d0db;}"
+            "QScrollArea{border:none;}")
+        self.panel = DevicesPanel(manager, on_configure)
+        self.setCentralWidget(self.panel)
+
+
 # --------------------------------------------------------------------------- #
 #  Sources panel (right dock) — data outputs
 # --------------------------------------------------------------------------- #
@@ -2020,13 +2037,7 @@ class MainWindow(QMainWindow):
         self.docs_dock.setVisible(False)
         self.sources_dock.raise_()
 
-        self.devices_panel = DevicesPanel(manager, self._open_config)
-        self.devices_dock = QDockWidget("Devices", self)
-        self.devices_dock.setObjectName("DevicesDock")
-        self.devices_dock.setWidget(self.devices_panel)
-        self.devices_dock.setMinimumWidth(300)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.devices_dock)
-        self.devices_dock.setVisible(False)
+        self._devices_win = None        # the Devices manager opens as a window (below)
 
         # projects: a curation overlay over the global catalog (the active project
         # owns the working layout; Phase 2 adds the tag lens).
@@ -2129,7 +2140,7 @@ class MainWindow(QMainWindow):
         view = self.menuBar().addMenu("&View")
         view.addAction(self.projects_dock.toggleViewAction())
         view.addAction(self.explorer_dock.toggleViewAction())
-        view.addAction(self.devices_dock.toggleViewAction())
+        view.addAction("Devices…", self._open_devices)
         view.addAction(self.sources_dock.toggleViewAction())
         view.addAction(self.sinks_dock.toggleViewAction())
         view.addAction(self.events_dock.toggleViewAction())
@@ -2168,7 +2179,7 @@ class MainWindow(QMainWindow):
         self.main_toolbar = tb
         tb.setObjectName("MainToolBar")
         tb.setMovable(False)
-        tb.addAction(self.devices_dock.toggleViewAction())
+        tb.addAction("🔌 Devices", self._open_devices)
         tb.addAction(self.edit_action)
         tb.addSeparator()
         self.record_action = tb.addAction("● Record", self._toggle_record)
@@ -2205,6 +2216,16 @@ class MainWindow(QMainWindow):
         self._timeline_win.show()
         self._timeline_win.raise_()
         self._timeline_win.activateWindow()
+
+    def _open_devices(self):
+        """The Devices manager (Available + Active, add/remove/configure) as a window."""
+        if getattr(self, "_devices_win", None) is None:
+            win = DevicesWindow(self.manager, self._open_config, self)
+            win.destroyed.connect(lambda: setattr(self, "_devices_win", None))
+            self._devices_win = win
+        self._devices_win.show()
+        self._devices_win.raise_()
+        self._devices_win.activateWindow()
 
     # -- docs (in-app markdown/LaTeX view; the .md file is truth) -------------
     def _open_docs(self) -> None:
