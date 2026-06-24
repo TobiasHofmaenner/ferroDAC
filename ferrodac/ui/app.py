@@ -1623,6 +1623,7 @@ class ProjectNavigator(QWidget):
         self._on_remove_bookmark = on_remove_bookmark
         self._on_open_doc = on_open_doc                 # open a doc in the in-app view
         self._expanded = None        # set of stable keys; None = first build → expand all
+        self._last_active = None      # active project id at last refresh (switch → re-expand)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -1669,17 +1670,19 @@ class ProjectNavigator(QWidget):
         return a.id if a is not None else None
 
     def refresh(self):
-        if self._expanded is not None:           # remember which nodes are open
-            self._expanded = self._snapshot()
-        self._tree.blockSignals(True)
-        self._tree.clear()
         active = self.manager.active
         aid = active.id if active is not None else None
+        switched = aid != self._last_active      # project changed (or first build)
+        if self._expanded is not None and not switched:
+            self._expanded = self._snapshot()    # same project → keep the user's fold state
+        self._tree.blockSignals(True)
+        self._tree.clear()
         projs = self.manager.projects()
         self._label.setText(f"Workspace  ({len(projs)})")
         self._hub_action.setEnabled(self._hub_enabled())
-        if self._expanded is None:               # first build → active project + sections open
+        if self._expanded is None or switched:   # first build / switch → active project + sections open
             self._expanded = {("project", aid)} | {("section", s) for s in self.SECTIONS}
+        self._last_active = aid
         for p in projs:
             on = aid is not None and p.id == aid
             pit = QTreeWidgetItem(self._tree)
@@ -1780,15 +1783,13 @@ class ProjectNavigator(QWidget):
     def _on_clicked(self, item, _col=0):
         pay = item.data(0, Qt.UserRole) or {}
         t = pay.get("t")
-        if t == "section":
-            item.setExpanded(not item.isExpanded())
-        elif t == "project":
-            if pay["id"] == self._active_id():
-                item.setExpanded(not item.isExpanded())
-            elif self._on_activate is not None:          # switch (deferred — rebuilds tree)
-                QTimer.singleShot(0, lambda pid=pay["id"]: self._on_activate(pid))
-        # item rows: single-click only SELECTS → the bottom bar shows its actions;
-        # double-click opens (the primary action) so a select-click never opens.
+        # Only the expand ARROW toggles fold/unfold (the tree handles that natively).
+        # A click on the row BODY just SELECTS, so the bottom action bar shows the
+        # node's actions without collapsing the section/project under the cursor.
+        if t == "project" and pay["id"] != self._active_id() and self._on_activate is not None:
+            QTimer.singleShot(0, lambda pid=pay["id"]: self._on_activate(pid))  # switch (rebuilds)
+        # section / active-project / item rows: selection only → _update_action_bar;
+        # double-click opens an item row (the primary action), never a select-click.
 
     def _on_double_clicked(self, item, _col=0):
         pay = item.data(0, Qt.UserRole) or {}
@@ -2994,22 +2995,28 @@ class MainWindow(QMainWindow):
         except Exception:                          # noqa: BLE001
             pass
         mgr.set_active(pid)                               # persists to the registry
-        self._active_layout_path = None                   # not in a named layout yet
         self.dashboard.markers.default_projects = [pid]   # new tags file here
         self._apply_tag_lens()                            # and the view filters to it
         self._apply_source_lens()                         # follow the channel lens too
-        wp = mgr.active.working_path
-        layout = {}
-        existed = os.path.exists(wp)
-        if existed:
+        p = mgr.active
+        names = p.layouts()
+        if names:                                  # open the FIRST named layout, made live
+            path = p.layout_path(names[0])
+            layout = {}
             try:
-                with open(wp, encoding="utf-8") as fh:
+                with open(path, encoding="utf-8") as fh:
                     layout = json.load(fh).get("layout", {})
             except Exception:                      # noqa: BLE001
                 layout = {}
-        self.dashboard.import_layout(layout)       # swap panels/routes/markers only
-        if not existed and not self.dashboard.panels():
-            self.dashboard.add_panel("chart")      # fresh project → a default chart
+            self.dashboard.import_layout(layout)   # swap panels/routes/markers only
+        else:                                      # no named layout yet → create a default one
+            path = p.layout_path("Default")
+            self.dashboard.import_layout({})
+            if not self.dashboard.panels():
+                self.dashboard.add_panel("chart")  # a default chart to start from
+            self._write_session(path)              # persist it as the project's first layout
+        self._active_layout_path = path            # the open layout is live (autosaves to it)
+        self._remember(path)
         self._wire_doc_panels()                    # macro services for any doc panels
         self._update_project_title()
         self._refresh_explorer()                   # show the new project's contents

@@ -193,10 +193,17 @@ def test_layout_add_and_autosave(qapp):
         w._write_session(other)
         w._open_layout(other)
         assert w._active_layout_path == other
-        # switching projects drops the binding (the new one isn't in a layout yet)
+        # switching to a project with NO layouts creates a "Default" and lands in it
         q = w._project_mgr.track(tempfile.mkdtemp(), "Q")
         w._switch_project(q.id)
-        assert w._active_layout_path is None
+        assert "Default" in q.layouts()
+        assert w._active_layout_path == q.layout_path("Default")
+        # switching to a project that HAS layouts opens its FIRST one (alphabetical)
+        r = w._project_mgr.track(tempfile.mkdtemp(), "R")
+        open(r.layout_path("Alpha"), "w").write('{"layout": {"panels": []}}')
+        open(r.layout_path("Zeta"), "w").write('{"layout": {"panels": []}}')
+        w._switch_project(r.id)
+        assert w._active_layout_path == r.layout_path("Alpha")
     finally:
         w.close()
 
@@ -225,6 +232,41 @@ def test_project_explorer_groups(qapp):
         p.set_sources([{"key": "dev/p1"}])
         nav.refresh()
         assert len(nav.section_items("Channels")) == 1
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_navigator_expands_on_switch_and_folds_by_arrow_only(qapp):
+    """Switching to a project shows the tree EXPANDED (active project + sections),
+    and a click on a section/project ROW only selects — it never folds the tree
+    (only the expand arrow toggles, handled natively). A click on an inactive
+    project row still switches to it."""
+    import tempfile
+    from qtpy.QtCore import Qt
+    w = _mainwindow(qapp)
+    try:
+        nav = w.navigator
+        q = w._project_mgr.track(tempfile.mkdtemp(), "Q")
+        w._switch_project(q.id)                            # _switch_project rebuilds the nav
+        assert nav.is_section_expanded("Layouts")          # comes up expanded (change 3)
+        assert nav.is_section_expanded("Channels")
+        # a row click does NOT collapse an open section (arrow-only fold — change 4)
+        sit = nav._active_section("Layouts")
+        assert sit is not None and sit.isExpanded()
+        nav._on_clicked(sit)
+        assert sit.isExpanded()                            # still open
+        sit.setExpanded(False)                             # collapse (as the arrow would)
+        nav._on_clicked(sit)
+        assert not sit.isExpanded()                        # a row click never re-opens it
+        # clicking an INACTIVE project row still switches (deferred via a 0-timer)
+        root = nav._tree.invisibleRootItem()
+        other = next(root.child(i) for i in range(root.childCount())
+                     if (root.child(i).data(0, Qt.UserRole) or {}).get("id") != q.id)
+        target = other.data(0, Qt.UserRole)["id"]
+        nav._on_clicked(other)
+        qapp.processEvents()
+        assert w._project_mgr.active.id == target
     finally:
         w.close()
 
