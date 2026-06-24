@@ -120,41 +120,46 @@ class ShellyCloud(BaseDevice):
 
     @staticmethod
     def _room_names(server: str, auth: str) -> dict:
-        """{sensor_id: room_name} from /interface/room/list — the human-readable names
-        set in the Shelly app (each room maps to its `main_sensor`). Best-effort: on
-        failure, channels fall back to the device id."""
+        """{room_id: room_name} from /interface/room/list — the human-readable room names
+        set in the Shelly app. Best-effort: on failure, channels just omit the room."""
         try:
             data = _get(server, "/interface/room/list", {"auth_key": auth})
         except Exception as exc:         # noqa: BLE001
-            log.warning("Shelly Cloud: room list failed (using ids): %s", exc)
+            log.warning("Shelly Cloud: room list failed (omitting rooms): %s", exc)
             return {}
         out = {}
         for room in (data.get("rooms") or {}).values():
-            sid, name = room.get("main_sensor"), (room.get("name") or "").strip()
-            if sid and name:
-                out[sid] = name
+            rid, name = room.get("id"), (room.get("name") or "").strip()
+            if rid is not None and name:
+                out[rid] = name
         return out
 
     def _refresh_sensors(self) -> None:
         server, auth = self._creds()
         if not server or not auth:
             return                       # not configured yet — leave channels empty
-        try:
-            devices = self._all_status()
+        rooms = self._room_names(server, auth)       # room_id -> name (best-effort)
+        time.sleep(1.1)                  # respect the cloud's ~1 req/s limit between calls
+        try:                             # the list carries name + room_id + a status snapshot
+            data = _get(server, "/interface/device/list", {"auth_key": auth})
         except Exception as exc:         # noqa: BLE001 — surface WHY (not a silent [])
-            log.warning("Shelly Cloud: status fetch failed: %s", exc)
+            log.warning("Shelly Cloud: device list failed: %s", exc)
             return
-        names = self._room_names(server, auth)       # friendly room names (id fallback)
         sources, chan = [], {}
-        for sid, status in sorted(devices.items()):
-            who = names.get(sid) or f"Shelly {sid[-6:]}"
+        for sid, dev in sorted((data.get("devices") or {}).items()):
+            if not isinstance(dev, dict) or dev.get("category") != "sensor":
+                continue                 # skip relays / non-sensors (no temp/humidity)
+            name = (dev.get("name") or "").strip() or f"Shelly {sid[-6:]}"
+            room = rooms.get(dev.get("room_id"))
+            tail = f" ({room})" if room else ""
+            status = (dev.get("ss") or {}).get("status") or {}
             for skey, field, unit, label in _components(status):
                 src_id = f"{sid}_{skey.replace(':', '_')}"
-                sources.append(Source(id=src_id, name=f"{who} · {label}", unit=unit))
+                sources.append(Source(id=src_id, name=f"{name} · {label}{tail}", unit=unit))
                 chan[src_id] = (sid, skey, field)
         self._chan, self._sources = chan, sources    # poll loop picks up next cycle
-        log.info("Shelly Cloud: %d channel(s) across %d device(s)",
-                 len(sources), len(devices))
+        log.info("Shelly Cloud: %d channel(s) across %d sensor(s)",
+                 len(sources), len({c[0] for c in chan.values()}))
 
     def _read(self, source: Source):
         info = self._chan.get(source.id)

@@ -1,25 +1,40 @@
 """Shelly Cloud account driver: always-discoverable, GUI-configurable (server +
-key), then its sensors stream as channels via ONE bulk /device/all_status call,
-named from /interface/room/list. No network — the cloud calls are stubbed."""
+key), then its sensors stream as channels named by DEVICE name + a parenthetical
+room. Enumeration reads /interface/device/list (name + room_id + an embedded status
+snapshot) and /interface/room/list (room names); live values come from one bulk
+/device/all_status. No network — the cloud calls are stubbed."""
 import ferrodac.devices.shelly_cloud as mod
 from ferrodac.core.device import Source
 from ferrodac.devices.shelly_cloud import ShellyCloud
 
-# /device/all_status data payload, keyed by device id:
-_BULK = {"devices_status": {
-    "aa01": {"temperature:0": {"tC": 22.5}, "humidity:0": {"rh": 41}},   # Gen3 H&T
-    "bb02": {"tmp": {"value": 4.1}},                                      # Gen1 temp-only
-    "cc03": {"switch:0": {"output": True}},                              # relay → no channels
+# /interface/device/list — devices keyed by id, each with name/room_id/category + ss.status
+_LIST = {"devices": {
+    "aa01": {"category": "sensor", "name": "Sensor A", "room_id": 3,
+             "ss": {"status": {"temperature:0": {"tC": 22.5}, "humidity:0": {"rh": 41}}}},
+    "bb02": {"category": "sensor", "name": "", "room_id": 9,          # unnamed → id fallback
+             "ss": {"status": {"tmp": {"value": 4.1}}}},              # Gen1 temp-only
+    "cc03": {"category": "relay", "name": "Plug",                     # relay → no channels
+             "ss": {"status": {"switch:0": {"output": True}}}},
 }}
-# /interface/room/list — friendly names mapped to each room's main_sensor:
-_ROOMS = {"rooms": {"1": {"name": "Lab", "main_sensor": "aa01"}}}        # bb02 has no room
+# /interface/room/list — room id -> name (3 known; 9 absent → no parenthetical)
+_ROOMS = {"rooms": {"3": {"id": 3, "name": "Assembly Hall"}}}
+# /device/all_status — live values for polling / _read
+_BULK = {"devices_status": {
+    "aa01": {"temperature:0": {"tC": 22.5}, "humidity:0": {"rh": 41}},
+    "bb02": {"tmp": {"value": 4.1}},
+}}
 
 
 def _stub(monkeypatch, sink=None):
+    monkeypatch.setattr(mod.time, "sleep", lambda *a, **k: None)      # don't pause the suite
     def fake_get(server, path, params, **_):
         if sink is not None:
             sink.append((server, path))
-        return _ROOMS if "room" in path else _BULK
+        if "room" in path:
+            return _ROOMS
+        if "device/list" in path:
+            return _LIST
+        return _BULK                                                 # /device/all_status
     monkeypatch.setattr(mod, "_get", fake_get)
 
 
@@ -38,7 +53,7 @@ def test_unconfigured_makes_no_call(monkeypatch):
     assert acc.describe().sources == []
 
 
-def test_config_enumerates_names_and_strips_scheme(monkeypatch):
+def test_channels_use_device_name_and_room_parenthetical(monkeypatch):
     acc = ShellyCloud.discover()[0]
     acc._option_values["server"] = "https://x.shelly.cloud/"     # full URL → normalized
     acc._option_values["auth_key"] = "k"
@@ -46,10 +61,14 @@ def test_config_enumerates_names_and_strips_scheme(monkeypatch):
     _stub(monkeypatch, calls)
     acc._on_option("auth_key", "")                          # enumerate (what set_option does)
     names = [s.name for s in acc.describe().sources]
-    assert names == ["Lab · Temperature", "Lab · Humidity",         # room name from room/list
-                     "Shelly bb02 · Temperature"]                   # no room → id fallback
-    assert calls[0] == ("x.shelly.cloud", "/device/all_status")     # scheme stripped, bulk call
-    assert any(p == "/interface/room/list" for _s, p in calls)      # names fetched too
+    assert names == [
+        "Sensor A · Temperature (Assembly Hall)",           # device name + room
+        "Sensor A · Humidity (Assembly Hall)",
+        "Shelly bb02 · Temperature",                        # unnamed → id; room 9 unknown → no ()
+    ]
+    paths = {p for _s, p in calls}
+    assert paths == {"/interface/room/list", "/interface/device/list"}   # scheme-stripped host
+    assert all(s == "x.shelly.cloud" for s, _p in calls)
 
 
 def test_read_maps_channel_gen3_and_gen1(monkeypatch):
@@ -69,14 +88,10 @@ def test_one_bulk_status_call_per_cycle(monkeypatch):
     acc = ShellyCloud.discover()[0]
     acc._option_values["server"] = "x"; acc._option_values["auth_key"] = "k"
     acc._rate_hz = 1 / 60
-    status_calls = []
-
-    def fake_get(server, path, params, **_):
-        if path == "/device/all_status":
-            status_calls.append(1)
-        return _ROOMS if "room" in path else _BULK
-    monkeypatch.setattr(mod, "_get", fake_get)
-    acc._refresh_sensors()                                  # 1 bulk status fetch (cached)
+    calls = []
+    _stub(monkeypatch, calls)
+    acc._refresh_sensors()
+    calls.clear()                                           # ignore enumeration's list/room calls
     for s in acc.describe().sources:                        # every channel reads from the cache
         acc._read(s)
-    assert len(status_calls) == 1                           # ONE status call for the whole cycle
+    assert [p for _s, p in calls] == ["/device/all_status"]   # ONE status call for the cycle
