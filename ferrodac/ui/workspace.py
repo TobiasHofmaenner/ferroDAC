@@ -817,14 +817,11 @@ class Dashboard(QObject):
                 if sink_key in targets:
                     self._apply_route(skey, sink_key)
 
-        # default-route genuinely new device sources to the default chart — but
-        # only if datatype-compatible (an image source must not land on a chart).
-        for key, port in new_src.items():
-            if key not in self._routes:
-                self._routes[key] = set()
-                default = self._sinks.get(self.default_sink_id)
-                if default is not None and port.dtype in default.accepts:
-                    self.set_route(key, self.default_sink_id, True)
+        # Track genuinely new device sources but DON'T auto-route them — the user
+        # wires sources to sinks explicitly (silent auto-routing to the default chart
+        # surprised people, and put channels on plots they never asked for).
+        for key in new_src:
+            self._routes.setdefault(key, set())
         self.ports_changed.emit()
 
     def _emit_offline_gap(self, source_key: str) -> None:
