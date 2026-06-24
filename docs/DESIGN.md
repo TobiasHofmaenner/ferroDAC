@@ -1196,3 +1196,143 @@ analysis (why was this batch bad/good?) and **publication-grade fab provenance**
 **Bottom line:** both are *overlays on the existing data plane* — no rewrite. The
 single decision most at risk now is guardrail #1 (the project-specific lens);
 keep the membership model general and these stay cheap to add later.
+
+## 19. Units & uncertainty (recorded 2026-06-24)
+
+> **Not scheduled — design captured before building.** How ferroDAC should treat
+> *physical units* and *measurement uncertainty* as first-class properties of a
+> value, **without taxing the streaming hot path (§11) or every plugin author
+> (§15).** Core thesis: **units and uncertainty are edge / on-demand concerns, not
+> hot-path ones.** Values stay plain `float64` on the wire (§6); semantics attach as
+> *metadata* + an *opt-in compute mode*. Units and uncertainty are **independent
+> decisions** — units are the lighter, do-first track; uncertainty the deeper one.
+
+### 19.1 Units
+
+- **Standard:** `pint` is the de-facto Python units library (registry, dimensional
+  algebra, **affine temperature** done right — °C↔K needs an *offset*, not a scale).
+  Alternatives: `unyt` (numpy-subclass arrays, faster), `astropy.units` (heavy).
+  `pint`/`uncertainties` are apt-packaged (`python3-pint`, `python3-uncertainties`)
+  and pure-Python, so the dev-box pip block and the PyInstaller Windows build cope.
+- **Architecture = adopt pint as the unit AUTHORITY, keep values as plain floats +
+  a canonical unit string on the wire; materialise a `Quantity` only at the EDGES** —
+  display conversion, export, and dimensional checks when routing to an axis. Zero
+  hot-path cost; **no change to `Reading`/Zarr/proto schema** — the unit string just
+  becomes *validated against the registry* instead of free text.
+- **New capabilities:** a core **unit registry** (Qt-free); routing/patch-bay gains
+  **dimensional compatibility** (don't let mbar & Pa share a Y axis — extend the
+  dtype-compat already in `compatible_sinks`); charts gain **"show in <unit>"**;
+  processors **transform units on their output ports** (ratio → dimensionless,
+  integral → ×x-unit). Today units are bare descriptive strings (`Source.unit`,
+  `Trace.x/y_unit`, CSV `name [unit]`, proto `SourcePort.unit`) with **zero**
+  conversion anywhere — the only "unit logic" is two label tables (TPG
+  `{0:mbar,1:Torr,2:Pa}`, Shelly `°C` / `% RH`).
+
+### 19.2 Uncertainty — the data model
+
+Measured cost (`uncertainties` 3.2.3), the decision driver:
+
+| representation | bytes/value | vs `float64` |
+|---|---|---|
+| plain `float64` | 8 | 1× |
+| **value + σ side-channel** (2× `float64`) | **16** | **2×** |
+| live `ufloat` object | 104–112 | ~14× |
+| scalar `a*2+1` (1e6×) | 10 ms → **1700 ms** | **167× slower** |
+
+Plus: a *derived* `ufloat` stores **one derivative per independent input** it
+depends on → **O(N) graph growth** (measured 1 → 1000 entries) — the price of its
+correlation tracking, and why it can't reduce over big arrays cheaply.
+
+**Decisions:**
+- **σ rides as a 2× parallel channel — OR is reconstructed from a model.** Most
+  device specs *are* a model (`±abs`, `±rel %`, `floor + rel`) → σ is a **function
+  of the value**, rebuildable at compute time with **no stored σ and no schema
+  change**. Store a per-sample σ array only for instruments that genuinely *measure*
+  one.
+- **Split random vs systematic at the source** (§19.4). Random enters propagation; a
+  systematic (calibration) is *correlated across all points* and is propagated
+  *separately*. The tag must travel from the source or it's lost.
+- **σ is declared at the leaves** (device-spec accuracy). Natural home: the device
+  config GUI + provenance record (§5). Without it, propagation is just 0.
+
+### 19.3 Propagation = one mechanism + a method×when toggle (NOT live-vs-replay)
+
+The realisation that collapses the architecture: there is **one** propagation
+mechanism — box the value as `ufloat`/`unumpy` and let it flow through the **same
+`process()` graph** that already runs live *and* on replay (§7.4). "Live" vs
+"on-demand" is **only when you pay**, not two architectures — so the engine just
+gains an **element-type toggle** (float ↔ ufloat), not a new engine. The real design
+space is two axes:
+
+| | cheap: scalar-σ, analytic (2×, O(1)) | correct: full `ufloat` graph (14× / 167×) |
+|---|---|---|
+| **live** | instant bands; *assumes independent inputs* | OK for stateless; graph-grows for stateful |
+| **on-demand** (loaded window) | — | correlation-correct, bounded cost |
+
+- **Scalar-σ analytic** (each processor propagates its own op with numpy) is **2×
+  storage + ~2× compute**, the *same* first-order accuracy class as the package, and
+  **correct whenever inputs are independent** — the normal DAQ case (different
+  sensors, independent noise). It only errs when two channels share an upstream
+  source (`x−x`, `a/a`, a ratio against a shared calibration): it then
+  *over*estimates, treating them as independent.
+- **Full `ufloat` graph** re-runs the actual chain, so it tracks correlations
+  automatically and gets shared-source cases *exactly right* — at 14×/167× and,
+  critically, **unbounded graph growth through stateful/accumulating processors** (a
+  live integrator's output depends on every past sample → O(t) memory). Hence the
+  full graph belongs **on-demand over a bounded window**; stateless/point-wise use is
+  fine live.
+- **Default:** *cheap scalar-σ available live for instant bands; full-`ufloat`
+  recompute on-demand for publication-grade, correlation-correct numbers.* Same data
+  model underneath.
+- **Processor ladder (§15):** pure-arithmetic processors propagate **for free**
+  (operator overloading flows `ufloat` straight through); np-ufunc/linalg processors
+  need a uncertainty-aware math facade or an analytic `propagate()` hook; unsupported
+  processors output σ = **unknown** (never silently wrong / zero).
+
+### 19.4 The statistics it must get right (fits)
+
+ferroDAC already fits (gas deconvolution, §15), so this is concrete, not abstract:
+- **Random** per-point σ → goes **into** the fit as weights; the parameter
+  **covariance IS the propagated measurement uncertainty** (not a separate "σ on σ").
+  `curve_fit(..., absolute_sigma=True)`.
+- Unweighted / `absolute_sigma=False` (scipy default) → the fit **estimates the noise
+  from residual scatter** (`σ̂² = χ²/(N−p)`); valid for a correct model +
+  homoscedastic noise. (This is what most undergrad "statistical analysis" silently
+  does.)
+- **Reduced χ² is the consistency bridge:** ≈1 → your σ explain the scatter; ≫1 →
+  model wrong or σ underestimated (and `absolute_sigma=True` would give *too-small*
+  errors); ≪1 → σ overestimated. **Report it.**
+- **Systematic** uncertainty is correlated across points → **not** a per-point
+  weight; propagate separately and quote `value ± stat ± syst`. This is the *only*
+  legitimate "two uncertainties," and it lives *outside* the χ².
+
+### 19.5 Component capability map
+
+Where the work lands (hot-path change vs *recompute/display only*):
+
+- **Drivers / Source (§5, §6):** declare the σ-model + random/systematic tag (metadata).
+- **Reading (§6):** unchanged unless a device *measures* per-sample σ (optional field).
+- **Store / provenance (§7, §8):** persist σ-model + unit; a σ array only for measured σ.
+- **Routing / patch-bay:** σ transparent (follows existing routes); **units** add axis dimensional-compat.
+- **Processors (§15):** accept `ufloat` in `process()`; declare support level; transform output units. *Recompute.*
+- **Engine:** an **element-type toggle** (float ↔ ufloat) — not a new engine.
+- **Charts (§14):** bands / error bars / `value ± σ`; **units** add convert + mixed-axis guard. *Display.*
+- **Export (§7.2):** `name_sigma [unit]` columns from the compute pass.
+- **Hub / proto (§12):** carry σ-model + unit metadata; recompute stays client-side.
+- **Plugin SDK (§15):** expose the uncertainty type, math facade, `propagate()` hook, registry; bump `API_VERSION`.
+- **Control surface:** the **compute toggle** (scope?), band show/hide, and the trust-device-σ-vs-residuals choice (§19.4).
+
+### 19.6 Open decisions
+
+1. **σ stored per-sample vs reconstructed from a model** (model = the cheap default).
+2. **Toggle scope** — per-chart, per-project, or global.
+3. **Random/systematic first-class from v1**, or random-only first.
+4. **Processor default contract** — facade vs analytic-hook vs unknown-fallback.
+5. **Sequencing:** units first (edge-only, lighter); uncertainty's heavy parts are
+   §19.2 (declare), §19.3 (toggle), §19.5 (charts).
+
+**Bottom line:** units and uncertainty are **metadata + an opt-in compute mode**, not
+a hot-path rewrite. One propagation mechanism with a *method×when* toggle; values stay
+`float64` on the wire; σ is a 2× channel (or a model); the heavy `uncertainties`
+machinery is bounded to on-demand windows and opt-in for processor authors. Decide the
+two **independently**, and do **units first**.
