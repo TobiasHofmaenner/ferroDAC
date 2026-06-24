@@ -15,7 +15,7 @@ _BASE_DRIVER_IDS = {None, "device", "base"}
 
 # Frozen (PyInstaller one-file) builds can return nothing from iter_modules, so
 # the builtin device modules are listed explicitly as a fallback.
-_BUILTIN_DEVICE_MODULES = ("camera", "fake", "qms200", "tpg256a")
+_BUILTIN_DEVICE_MODULES = ("camera", "fake", "qms200", "shelly_cloud", "tpg256a")
 
 
 def _all_subclasses(cls) -> set[type]:
