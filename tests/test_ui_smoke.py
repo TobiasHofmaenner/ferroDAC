@@ -100,10 +100,11 @@ def test_projects_default_create_switch(qapp):
         assert w.windowTitle().endswith("Default")
         # track a project in a chosen folder (what _add_project does post-dialog)
         p = mgr.track(tempfile.mkdtemp(), "Experiment 1")
-        w.projects_panel.refresh()
+        w.navigator.refresh()
         w._switch_project(p.id)
         assert mgr.active.name == "Experiment 1"
-        assert w.projects_panel._list.count() == 2
+        assert len(w.navigator.project_ids()) == 2
+        assert w.navigator.active_project_name == "Experiment 1"
         assert w._runs_dir().startswith(mgr.active.path)   # recordings file under it
         did = next(pp.id for pp in mgr.projects() if pp.name == "Default")
         w._switch_project(did)
@@ -206,23 +207,24 @@ def test_project_explorer_groups(qapp):
     import os
     w = _mainwindow(qapp)
     try:
-        ex = w.project_explorer
+        nav = w.navigator
         p = w._project_mgr.active
-        # the explorer follows the active project and exposes its three groups
-        assert ex._label.text() == p.name
-        assert ex._layout_cards(p) == [] and ex._recording_cards(p) == []
+        # the navigator follows the active project and exposes its sections
+        assert nav.active_project_name == p.name
+        assert nav.section_items("Layouts") == [] and nav.section_items("Recordings") == []
         # drop a layout + a recording bundle on disk → the scan picks them up
         open(p.layout_path("overview"), "w").write("{}")
         run = os.path.join(p.reports_dir, "run_x")
         os.makedirs(run)
         json.dump({"t0": 1000.0, "t1": 1030.0, "sources": [{"key": "a"}]},
                   open(os.path.join(run, "manifest.json"), "w"))
-        ex.refresh()                                  # what _switch_project/record call
-        assert len(ex._layout_cards(p)) == 1
-        assert len(ex._recording_cards(p)) == 1
-        # curated channels surface as their own group
+        nav.refresh()                                 # what _switch_project/record call
+        assert len(nav.section_items("Layouts")) == 1
+        assert len(nav.section_items("Recordings")) == 1
+        # curated channels surface as their own section
         p.set_sources([{"key": "dev/p1"}])
-        assert len(ex._channel_cards(p)) == 1
+        nav.refresh()
+        assert len(nav.section_items("Channels")) == 1
     finally:
         w.close()
 
@@ -232,17 +234,17 @@ def test_project_docs_and_bookmarks(qapp):
     import os
     w = _mainwindow(qapp)
     try:
-        ex = w.project_explorer
+        nav = w.navigator
         p = w._project_mgr.active
-        assert ex._doc_cards(p) == [] and ex._window_cards(p) == []
-        # a reference file dropped in docs/ shows up as a card
+        assert nav.section_items("Docs") == [] and nav.section_items("Bookmarks") == []
+        # a reference file dropped in docs/ shows up as an item
         open(os.path.join(p.docs_dir, "notes.txt"), "w").write("hi")
-        ex.refresh()
-        assert len(ex._doc_cards(p)) == 1
-        # bookmark a window (model path; the UI prompts for the name) → card appears
+        nav.refresh()
+        assert len(nav.section_items("Docs")) == 1
+        # bookmark a window (model path; the UI prompts for the name) → item appears
         p.add_window("bakeout", 1000.0, 1600.0)
-        ex.refresh()
-        assert len(ex._window_cards(p)) == 1
+        nav.refresh()
+        assert len(nav.section_items("Bookmarks")) == 1
         # jumping a bookmark parks the timeline on it (re-streams that slice)
         tc = w.time_context
         nav0 = tc.nav
@@ -250,7 +252,8 @@ def test_project_docs_and_bookmarks(qapp):
         assert abs(tc.window[0] - 1000.0) < 1 and abs(tc.window[1] - 1600.0) < 1
         assert tc.following is False and tc.nav == nav0 + 1
         w._remove_bookmark("bakeout")
-        assert ex._window_cards(p) == []
+        nav.refresh()
+        assert nav.section_items("Bookmarks") == []
     finally:
         w.close()
 
@@ -545,9 +548,7 @@ def test_hub_project_incoming_appears_and_clears(qapp):
         hp = mgr.get("hubX")
         assert hp is not None and hp.is_hub and hp.name == "Shared X"
         assert len(mgr.projects()) == n0 + 1
-        labels = [w.projects_panel._list.item(i).text()
-                  for i in range(w.projects_panel._list.count())]
-        assert any("Shared X" in t for t in labels)
+        assert "hubX" in w.navigator.project_ids()         # the navigator shows it
         # a newer version edits in place (LWW); a stale one is ignored
         w.hub._on_project_gui({**rec, "name": "Shared X2", "version": 2})
         assert mgr.get("hubX").name == "Shared X2"
@@ -1274,5 +1275,66 @@ def test_devices_opens_as_window(qapp):
         win.close()
         qapp.processEvents()
         assert w._devices_win is None                # destroyed → ref cleared
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_navigator_preserves_expand_state(qapp):
+    """The unified navigator keeps a section's expand/collapse state across an
+    imperative refresh (and still surfaces a newly-dropped item)."""
+    import os
+    w = _mainwindow(qapp)
+    try:
+        nav = w.navigator
+        p = w._project_mgr.active
+        assert nav.is_section_expanded("Docs")           # expanded by default (first build)
+        nav._active_section("Docs").setExpanded(False)   # user collapses it
+        assert not nav.is_section_expanded("Docs")
+        open(os.path.join(p.docs_dir, "n.txt"), "w").write("x")
+        nav.refresh()                                    # rebuild
+        assert not nav.is_section_expanded("Docs")       # stayed collapsed
+        assert len(nav.section_items("Docs")) == 1        # new item present
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_navigator_click_switches_project(qapp):
+    """Clicking an (inactive) project row routes to _switch_project."""
+    import tempfile
+    from qtpy.QtCore import Qt
+    w = _mainwindow(qapp)
+    try:
+        nav = w.navigator
+        p = w._project_mgr.track(tempfile.mkdtemp(), "Exp 2")
+        nav.refresh()
+        root = nav._tree.invisibleRootItem()
+        target = next(root.child(i) for i in range(root.childCount())
+                      if (root.child(i).data(0, Qt.UserRole) or {}).get("id") == p.id)
+        nav._on_clicked(target)                          # deferred switch
+        qapp.processEvents()                             # let the singleShot fire
+        assert w._project_mgr.active.id == p.id
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_navigator_context_actions(qapp):
+    """Right-click menu: Share for a local project, Clone for a hub project with a
+    remote, and a section's add action."""
+    w = _mainwindow(qapp)
+    try:
+        nav = w.navigator
+        local = w._project_mgr.active                    # a LOCAL project
+        share = [l for l, _ in nav._context_actions({"t": "project", "id": local.id})]
+        assert any("Share to hub" in l for l in share)
+        rec = {"id": "hubY", "name": "Y", "version": 1, "git_remote": "http://x/y.git",
+               "sources": [], "windows": [], "layouts": {}, "deleted": False}
+        w._project_mgr.apply_hub_record(rec)
+        clone = [l for l, _ in nav._context_actions({"t": "project", "id": "hubY"})]
+        assert any("Clone repository" in l for l in clone)
+        sec = [l for l, _ in nav._context_actions({"t": "section", "name": "Bookmarks"})]
+        assert any("Add bookmark" in l for l in sec)
     finally:
         w.close()

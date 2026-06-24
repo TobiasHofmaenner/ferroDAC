@@ -47,6 +47,8 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -1572,33 +1574,58 @@ class CursorDialog(QDialog):
                 self._list.addItem(item)
 
 
-class ProjectsPanel(QWidget):
-    """Lists projects — LOCAL folders and (☁) HUB projects — pick one to make it
-    active. Add a project (a local folder, or a new one on the hub); a local one
-    can be Shared to the hub from its right-click menu. Reveal the folder."""
+class ProjectNavigator(QWidget):
+    """One OneNote-style tree for the whole left side: PROJECTS (notebooks) at the top
+    level; the ACTIVE project expands into SECTIONS (Layouts, Channels, Recordings,
+    Docs, Bookmarks) → item rows (pages). Click a project to switch to it; click an
+    item to open it; right-click for add / remove / share / clone. A VIEW over the
+    unchanged ProjectManager/Project model — it scans disk fresh on every refresh,
+    keeping no mirrored index. Replaces the old Projects + Project Explorer panels."""
 
-    def __init__(self, manager, on_activate, on_create_local, on_create_hub,
-                 on_reveal, on_share=None, hub_enabled=None, on_clone=None, parent=None):
+    SECTIONS = ("Layouts", "Channels", "Recordings", "Docs", "Bookmarks")
+
+    def __init__(self, manager, active_layout=None, on_activate=None,
+                 on_create_local=None, on_create_hub=None, on_reveal=None,
+                 on_share=None, on_clone=None, hub_enabled=None, on_open_layout=None,
+                 on_reveal_path=None, on_curate=None, on_add_layout=None,
+                 on_add_doc=None, on_add_bookmark=None, on_jump_window=None,
+                 on_remove_bookmark=None, on_open_doc=None, parent=None):
         super().__init__(parent)
         self.manager = manager
+        self._active_layout = active_layout or (lambda: None)
         self._on_activate = on_activate
         self._on_create_local = on_create_local
         self._on_create_hub = on_create_hub
-        self._on_reveal = on_reveal
+        self._on_reveal = on_reveal                     # reveal the active project folder
         self._on_share = on_share
-        self._on_clone = on_clone                       # clone a hub project's git repo
+        self._on_clone = on_clone
         self._hub_enabled = hub_enabled or (lambda: False)
+        self._on_open_layout = on_open_layout
+        self._on_reveal_path = on_reveal_path           # reveal a recording's folder
+        self._on_curate = on_curate
+        self._on_add_layout = on_add_layout
+        self._on_add_doc = on_add_doc
+        self._on_add_bookmark = on_add_bookmark
+        self._on_jump_window = on_jump_window
+        self._on_remove_bookmark = on_remove_bookmark
+        self._on_open_doc = on_open_doc                 # open a doc in the in-app view
+        self._expanded = None        # set of stable keys; None = first build → expand all
+
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
-        self._label = QLabel("Projects")
+        self._label = QLabel("Workspace")
         self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
         root.addWidget(self._label)
-        self._list = QListWidget()
-        self._list.itemActivated.connect(self._activate)   # double-click or Enter
-        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._list.customContextMenuRequested.connect(self._context_menu)
-        root.addWidget(self._list, 1)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._tree.setColumnCount(1)
+        self._tree.setIndentation(14)
+        self._tree.setExpandsOnDoubleClick(False)       # single click drives everything
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._context_menu)
+        self._tree.itemClicked.connect(self._on_clicked)
+        root.addWidget(self._tree, 1)
         row = QHBoxLayout()
         new = QToolButton()
         new.setText("＋ Add project")
@@ -1610,57 +1637,245 @@ class ProjectsPanel(QWidget):
         self._hub_action.setToolTip("Create a shared project on the hub (needs a connection)")
         new.setMenu(menu)
         rev = QPushButton("Reveal")
-        rev.clicked.connect(lambda: self._on_reveal())
+        rev.clicked.connect(lambda: self._on_reveal() if self._on_reveal else None)
         row.addWidget(new)
         row.addWidget(rev)
         root.addLayout(row)
         self.refresh()
 
+    # -- build ---------------------------------------------------------------
+    def _active_id(self):
+        a = self.manager.active
+        return a.id if a is not None else None
+
     def refresh(self):
-        self._list.clear()
+        if self._expanded is not None:           # remember which nodes are open
+            self._expanded = self._snapshot()
+        self._tree.blockSignals(True)
+        self._tree.clear()
         active = self.manager.active
+        aid = active.id if active is not None else None
         projs = self.manager.projects()
-        self._label.setText(f"Projects  ({len(projs)})")
-        self._hub_action.setEnabled(self._hub_enabled())    # greyed when offline
+        self._label.setText(f"Workspace  ({len(projs)})")
+        self._hub_action.setEnabled(self._hub_enabled())
+        if self._expanded is None:               # first build → active project + sections open
+            self._expanded = {("project", aid)} | {("section", s) for s in self.SECTIONS}
         for p in projs:
-            on = active is not None and p.id == active.id
+            on = aid is not None and p.id == aid
+            pit = QTreeWidgetItem(self._tree)
             badge = "☁ " if getattr(p, "is_hub", False) else ""
-            it = QListWidgetItem(("●  " if on else "○  ") + badge + p.name)
-            it.setData(Qt.UserRole, p.id)
+            pit.setText(0, ("●  " if on else "○  ") + badge + p.name)
+            pit.setData(0, Qt.UserRole, {"t": "project", "id": p.id})
             if on:
-                f = it.font(); f.setBold(True); it.setFont(f)
+                f = pit.font(0); f.setBold(True); pit.setFont(0, f)
             tip = p.description or ""
             if getattr(p, "is_hub", False):
                 tip = (tip + "  ·  " if tip else "") + "on the hub"
             if tip:
-                it.setToolTip(tip)
-            self._list.addItem(it)
+                pit.setToolTip(0, tip)
+            if on:                               # only the active project shows sections
+                self._build_sections(pit, p)
+                pit.setExpanded(("project", p.id) in self._expanded)
+            else:
+                pit.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
+        self._tree.blockSignals(False)
+
+    def _build_sections(self, pit, p):
+        self._section(pit, "Layouts", self._layout_rows(p))
+        self._section(pit, "Channels", self._channel_rows(p))
+        self._section(pit, "Recordings", self._recording_rows(p))
+        self._section(pit, "Docs", self._doc_rows(p))
+        self._section(pit, "Bookmarks", self._bookmark_rows(p))
+
+    def _section(self, pit, name, rows):
+        sit = QTreeWidgetItem(pit)
+        sit.setText(0, f"{name}  ({len(rows)})")
+        sit.setData(0, Qt.UserRole, {"t": "section", "name": name})
+        f = sit.font(0); f.setBold(True); sit.setFont(0, f)
+        sit.setForeground(0, QColor("#9aa4b2"))
+        for text, payload, tip in rows:
+            cit = QTreeWidgetItem(sit)
+            cit.setText(0, text)
+            cit.setData(0, Qt.UserRole, payload)
+            if tip:
+                cit.setToolTip(0, tip)
+        sit.setExpanded(("section", name) in (self._expanded or set()))
+
+    # -- per-section rows: (text, payload, tooltip) — reuse the Project model --
+    def _layout_rows(self, p):
+        active = self._active_layout()
+        rows = []
+        for name in p.layouts():
+            path = p.layout_path(name)
+            n = p.layout_panels(name)
+            sub = f"{n} panel{'' if n == 1 else 's'}" if n else "layout"
+            is_active = active is not None and os.path.abspath(path) == os.path.abspath(active)
+            label = ("● " if is_active else "") + name + ("  ·  autosaving" if is_active else "")
+            rows.append((label, {"t": "layout", "path": path, "active": is_active}, sub))
+        return rows
+
+    def _channel_rows(self, p):
+        rows = []
+        for s in p.sources():
+            key = s.get("key") if isinstance(s, dict) else s
+            label = (isinstance(s, dict) and s.get("label")) or key
+            rows.append((label, {"t": "channel", "key": key}, key))
+        return rows
+
+    def _recording_rows(self, p):
+        return [(self._rec_title(r), {"t": "recording", "path": r["path"]}, self._rec_sub(r))
+                for r in p.recordings()]
+
+    @staticmethod
+    def _rec_title(r):
+        t0 = r.get("t0")
+        return time.strftime("%b %d, %H:%M", time.localtime(t0)) if t0 else r["name"]
+
+    @staticmethod
+    def _rec_sub(r):
+        bits = []
+        t0, t1 = r.get("t0"), r.get("t1")
+        if t0 and t1 and t1 >= t0:
+            bits.append(_dur(t1 - t0))
+        bits.append(f"{r['sources']} src")
+        if r.get("tags"):
+            bits.append(f"{r['tags']} tags")
+        return "  ·  ".join(bits)
+
+    def _doc_rows(self, p):
+        return [(d["name"], {"t": "doc", "path": d["path"]}, d.get("ext") or "file")
+                for d in p.docs()]
+
+    def _bookmark_rows(self, p):
+        rows = []
+        for w in p.windows():
+            name, t0, t1 = w.get("name", "window"), w.get("t0"), w.get("t1")
+            sub = (f"{time.strftime('%b %d, %H:%M', time.localtime(t0))}  ·  {_dur(t1 - t0)}"
+                   if t0 and t1 and t1 >= t0 else "")
+            rows.append((name, {"t": "bookmark", "name": name, "t0": t0, "t1": t1}, sub))
+        return rows
+
+    # -- interaction ---------------------------------------------------------
+    def _on_clicked(self, item, _col=0):
+        pay = item.data(0, Qt.UserRole) or {}
+        t = pay.get("t")
+        if t == "section":
+            item.setExpanded(not item.isExpanded())
+        elif t == "project":
+            if pay["id"] == self._active_id():
+                item.setExpanded(not item.isExpanded())
+            elif self._on_activate is not None:          # switch (deferred — rebuilds tree)
+                QTimer.singleShot(0, lambda pid=pay["id"]: self._on_activate(pid))
+        elif t in ("layout", "recording", "doc", "bookmark"):
+            QTimer.singleShot(0, lambda d=dict(pay): self._open_item(d))
+
+    def _open_item(self, pay):
+        t = pay.get("t")
+        if t == "layout" and not pay.get("active") and self._on_open_layout:
+            self._on_open_layout(pay["path"])
+        elif t == "recording" and self._on_reveal_path:
+            self._on_reveal_path(pay["path"])
+        elif t == "doc":
+            cb = self._on_open_doc or self._on_reveal_path
+            if cb:
+                cb(pay["path"])
+        elif t == "bookmark" and self._on_jump_window and pay.get("t0") and pay.get("t1"):
+            self._on_jump_window(pay["t0"], pay["t1"])
+
+    def _context_actions(self, pay) -> list:
+        """[(label, callback|None)] for a node's right-click menu. Split from exec so
+        the menu contents are testable; a None callback renders as a disabled item
+        (e.g. Share while offline)."""
+        t = pay.get("t")
+        out = []
+        if t == "project":
+            p = self.manager.get(pay.get("id"))
+            if p is None:
+                return out
+            if not getattr(p, "is_hub", False):
+                if self._on_share is not None:
+                    out.append(("☁ Share to hub",
+                                (lambda pid=p.id: self._on_share(pid))
+                                if self._hub_enabled() else None))
+            elif self._on_clone is not None and getattr(p, "git_remote", ""):
+                out.append(("⬇ Clone repository…", lambda pid=p.id: self._on_clone(pid)))
+        elif t == "section":
+            adders = {"Layouts": (self._on_add_layout, "＋ Add layout"),
+                      "Channels": (self._on_curate, "✔ Curate channels…"),
+                      "Docs": (self._on_add_doc, "＋ Add doc…"),
+                      "Bookmarks": (self._on_add_bookmark, "＋ Add bookmark")}
+            cb, label = adders.get(pay.get("name"), (None, ""))
+            if cb is not None:
+                out.append((label, lambda cb=cb: cb()))
+        elif t == "bookmark" and self._on_remove_bookmark is not None:
+            out.append(("✕ Remove bookmark",
+                        lambda name=pay.get("name"): self._on_remove_bookmark(name)))
+        return out
 
     def _context_menu(self, pos):
-        it = self._list.itemAt(pos)
-        if it is None:
+        item = self._tree.itemAt(pos)
+        if item is None:
             return
-        p = self.manager.get(it.data(Qt.UserRole))
-        if p is None:
+        actions = self._context_actions(item.data(0, Qt.UserRole) or {})
+        if not actions:
             return
         menu = QMenu(self)
-        if not getattr(p, "is_hub", False):
-            if self._on_share is not None:
-                act = menu.addAction("☁ Share to hub")
-                act.setEnabled(self._hub_enabled())
-                act.triggered.connect(lambda: self._on_share(p.id))
-        elif self._on_clone is not None and getattr(p, "git_remote", ""):
-            act = menu.addAction("⬇ Clone repository…")    # check out a shared project
-            act.triggered.connect(lambda: self._on_clone(p.id))
-        if menu.actions():
-            menu.exec(self._list.mapToGlobal(pos))
+        for label, cb in actions:
+            a = menu.addAction(label)
+            if cb is None:
+                a.setEnabled(False)
+            else:
+                a.triggered.connect(lambda _=False, cb=cb: cb())
+        menu.exec(self._tree.mapToGlobal(pos))
 
-    def _activate(self, item):
-        if item is None:                        # list cleared mid-signal → ignore
-            return
-        pid = item.data(Qt.UserRole)
-        if pid:
-            self._on_activate(pid)
+    # -- expand-state preservation across the imperative refresh -------------
+    def _snapshot(self) -> set:
+        keys = set()
+        root = self._tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            pit = root.child(i)
+            pp = pit.data(0, Qt.UserRole) or {}
+            if pit.isExpanded() and pp.get("t") == "project":
+                keys.add(("project", pp["id"]))
+            for j in range(pit.childCount()):
+                sit = pit.child(j)
+                sp = sit.data(0, Qt.UserRole) or {}
+                if sit.isExpanded() and sp.get("t") == "section":
+                    keys.add(("section", sp["name"]))
+        return keys
+
+    # -- stable query surface (for tests; no QTreeWidgetItem traversal needed)
+    def project_ids(self) -> list:
+        root = self._tree.invisibleRootItem()
+        return [(root.child(i).data(0, Qt.UserRole) or {}).get("id")
+                for i in range(root.childCount())]
+
+    @property
+    def active_project_name(self):
+        a = self.manager.active
+        return a.name if a is not None else None
+
+    def _active_section(self, name):
+        root = self._tree.invisibleRootItem()
+        aid = self._active_id()
+        for i in range(root.childCount()):
+            pit = root.child(i)
+            if (pit.data(0, Qt.UserRole) or {}).get("id") != aid:
+                continue
+            for j in range(pit.childCount()):
+                sit = pit.child(j)
+                if (sit.data(0, Qt.UserRole) or {}).get("name") == name:
+                    return sit
+        return None
+
+    def section_items(self, name) -> list:
+        sit = self._active_section(name)
+        return ([sit.child(k).data(0, Qt.UserRole) for k in range(sit.childCount())]
+                if sit is not None else [])
+
+    def is_section_expanded(self, name) -> bool:
+        sit = self._active_section(name)
+        return bool(sit is not None and sit.isExpanded())
 
 
 def _dur(seconds) -> str:
@@ -1683,190 +1898,6 @@ def _editor_args(command: str, path: str) -> list:
     if "{file}" in command or "{path}" in command:
         return [a.replace("{file}", path).replace("{path}", path) for a in parts]
     return parts + [path]
-
-
-class ProjectExplorer(QWidget):
-    """The ACTIVE project's contents, grouped and format-aware (Phase 3b). Every
-    group is SCANNED fresh from the filesystem — `layouts/`, the curated channels
-    in `sources.json`, the recordings in `reports/` — so it tracks disk with no
-    mirrored index. It's a *view*: opening a layout, revealing a recording, or
-    curating channels acts on what's already there; nothing here copies data."""
-
-    def __init__(self, project_provider, on_open_layout, on_reveal_path,
-                 on_curate, on_add_layout=None, active_layout=None,
-                 on_add_doc=None, on_add_bookmark=None, on_jump_window=None,
-                 on_remove_bookmark=None, parent=None):
-        super().__init__(parent)
-        self._project = project_provider
-        self._on_open_layout = on_open_layout
-        self._on_reveal = on_reveal_path
-        self._on_curate = on_curate
-        self._on_add_layout = on_add_layout
-        self._active_layout = active_layout or (lambda: None)   # () -> active path
-        self._on_add_doc = on_add_doc
-        self._on_add_bookmark = on_add_bookmark
-        self._on_jump_window = on_jump_window                   # (t0, t1) -> jump
-        self._on_remove_bookmark = on_remove_bookmark           # (name) -> drop
-        self._collapsed: set = set()
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
-        self._label = QLabel("Project")
-        self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
-        root.addWidget(self._label)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # cards wrap, don't scroll sideways
-        host = QWidget()
-        self._layout = QVBoxLayout(host)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(6)
-        self._layout.addStretch(1)
-        scroll.setWidget(host)
-        root.addWidget(scroll, 1)
-        self.refresh()
-
-    def refresh(self):
-        clear_layout(self._layout)
-        p = self._project()
-        if p is None:
-            self._label.setText("Project")
-            ph = QLabel("No active project.")
-            ph.setStyleSheet("color:#7f8a99;")
-            self._layout.addWidget(ph)
-            self._layout.addStretch(1)
-            return
-        self._label.setText(p.name)
-        self._add_group("Layouts", self._layout_cards(p),
-                        "No layouts yet.\n＋ Add one — it then autosaves as you work.",
-                        action=("＋ Add", self._on_add_layout) if self._on_add_layout else None)
-        self._add_group("Channels", self._channel_cards(p),
-                        "No channels curated — the Sources panel shows them all.\n"
-                        "Curate to focus this project.",
-                        action=("✔ Curate", self._on_curate))
-        self._add_group("Recordings", self._recording_cards(p),
-                        "No recordings yet.\nHit ● Record to capture a span.")
-        self._add_group("Docs", self._doc_cards(p),
-                        "No docs yet.\n＋ Add reference files (notes, datasheets, plots).",
-                        action=("＋ Add", self._on_add_doc) if self._on_add_doc else None)
-        self._add_group("Bookmarks", self._window_cards(p),
-                        "No bookmarks yet.\n＋ Add saves the current timeline window.",
-                        action=("＋ Add", self._on_add_bookmark) if self._on_add_bookmark else None)
-        self._layout.addStretch(1)
-
-    # -- groups & cards ------------------------------------------------------
-    def _add_group(self, title, cards, empty_hint, action=None):
-        grp = CollapsibleGroup(title, len(cards), title in self._collapsed,
-                               self._on_toggle, action=action)
-        if cards:
-            for c in cards:
-                grp.add(c)
-        else:
-            ph = QLabel(empty_hint)
-            ph.setWordWrap(True)
-            ph.setStyleSheet("color:#6b7480; font-size:11px;")
-            grp.add(ph)
-        self._layout.addWidget(grp)
-
-    def _on_toggle(self, title, collapsed):
-        (self._collapsed.add if collapsed else self._collapsed.discard)(title)
-
-    def _card(self, title, sub, actions):
-        card = QFrame()
-        card.setObjectName("ExpCard")
-        card.setStyleSheet("#ExpCard { background:#171c26; border:1px solid #232a38;"
-                           " border-radius:8px; }")
-        lay = QVBoxLayout(card)
-        lay.setContentsMargins(10, 7, 10, 7)
-        lay.setSpacing(2)
-        top = QHBoxLayout()
-        top.setSpacing(6)
-        t = QLabel(title)
-        t.setStyleSheet("font-weight:700;")
-        t.setToolTip(title)
-        # a long title (e.g. a doc filename) must give way to the action buttons,
-        # not push them off-screen — Ignored lets the row compress it (full name
-        # stays in the tooltip).
-        t.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        top.addWidget(t, 1)
-        for text, cb in actions:
-            b = QToolButton()
-            b.setText(text)
-            b.clicked.connect(lambda _=False, cb=cb: cb())
-            top.addWidget(b)
-        lay.addLayout(top)
-        if sub:
-            s = QLabel(sub)
-            s.setStyleSheet("color:#7f8a99; font-size:11px;")
-            lay.addWidget(s)
-        return card
-
-    def _layout_cards(self, p):
-        cards = []
-        active = self._active_layout()
-        for name in p.layouts():
-            path = p.layout_path(name)
-            n = p.layout_panels(name)
-            sub = f"{n} panel{'' if n == 1 else 's'}" if n else "layout"
-            is_active = active is not None and os.path.abspath(path) == os.path.abspath(active)
-            if is_active:
-                sub += "  ·  autosaving"             # this one tracks live edits
-                actions = []                          # already the live layout
-            else:
-                actions = [("Open", lambda path=path: self._on_open_layout(path))]
-            cards.append(self._card(("● " if is_active else "") + name, sub, actions))
-        return cards
-
-    def _channel_cards(self, p):
-        cards = []
-        for s in p.sources():
-            key = s.get("key") if isinstance(s, dict) else s
-            label = (isinstance(s, dict) and s.get("label")) or key
-            cards.append(self._card(label, key, []))
-        return cards
-
-    def _recording_cards(self, p):
-        return [self._card(self._rec_title(r), self._rec_sub(r),
-                           [("Reveal", lambda path=r["path"]: self._on_reveal(path))])
-                for r in p.recordings()]
-
-    @staticmethod
-    def _rec_title(r):
-        t0 = r.get("t0")
-        return (time.strftime("%b %d, %H:%M", time.localtime(t0)) if t0
-                else r["name"])           # a friendlier label than the run_ folder
-
-    @staticmethod
-    def _rec_sub(r):
-        bits = []
-        t0, t1 = r.get("t0"), r.get("t1")
-        if t0 and t1 and t1 >= t0:
-            bits.append(_dur(t1 - t0))
-        bits.append(f"{r['sources']} src")
-        if r.get("tags"):
-            bits.append(f"{r['tags']} tags")
-        return "  ·  ".join(bits)
-
-    def _doc_cards(self, p):
-        return [self._card(d["name"], d["ext"] or "file",
-                           [("Open", lambda path=d["path"]: self._on_reveal(path))])
-                for d in p.docs()]
-
-    def _window_cards(self, p):
-        cards = []
-        for w in p.windows():
-            name, t0, t1 = w.get("name", "window"), w.get("t0"), w.get("t1")
-            sub = ""
-            if t0 and t1 and t1 >= t0:
-                sub = f"{time.strftime('%b %d, %H:%M', time.localtime(t0))}  ·  {_dur(t1 - t0)}"
-            actions = []
-            if self._on_jump_window is not None and t0 and t1:
-                actions.append(("⌖ Jump", lambda t0=t0, t1=t1: self._on_jump_window(t0, t1)))
-            if self._on_remove_bookmark is not None:
-                actions.append(("✕", lambda name=name: self._on_remove_bookmark(name)))
-            cards.append(self._card(name, sub, actions))
-        return cards
 
 
 # --------------------------------------------------------------------------- #
@@ -2042,34 +2073,24 @@ class MainWindow(QMainWindow):
         # projects: a curation overlay over the global catalog (the active project
         # owns the working layout; Phase 2 adds the tag lens).
         self._setup_projects()
-        self.projects_panel = ProjectsPanel(
-            self._project_mgr, on_activate=self._switch_project,
-            on_create_local=self._add_project, on_create_hub=self._add_project_hub,
-            on_reveal=self._reveal_project, on_share=self._share_project,
-            hub_enabled=lambda: self.hub.connected, on_clone=self._clone_hub_project)
-        self.projects_dock = QDockWidget("Projects", self)
-        self.projects_dock.setObjectName("ProjectsDock")
-        self.projects_dock.setWidget(self.projects_panel)
-        self.projects_dock.setMinimumWidth(220)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.projects_dock)
-
-        # the active project's contents — layouts, curated channels, recordings —
-        # scanned from disk and shown as format-aware cards (Phase 3b).
-        self.project_explorer = ProjectExplorer(
-            lambda: self._project_mgr.active, on_open_layout=self._open_layout,
+        # ONE OneNote-style tree for the whole left side: projects (notebooks) →
+        # the active one's Layouts/Channels/Recordings/Docs/Bookmarks (sections) →
+        # items (pages). A view over the unchanged ProjectManager/Project model.
+        self.navigator = ProjectNavigator(
+            self._project_mgr, active_layout=lambda: self._active_layout_path,
+            on_activate=self._switch_project, on_create_local=self._add_project,
+            on_create_hub=self._add_project_hub, on_reveal=self._reveal_project,
+            on_share=self._share_project, on_clone=self._clone_hub_project,
+            hub_enabled=lambda: self.hub.connected, on_open_layout=self._open_layout,
             on_reveal_path=self._reveal_path, on_curate=self._curate_sources,
-            on_add_layout=self._on_add_layout,
-            active_layout=lambda: self._active_layout_path,
-            on_add_doc=self._add_doc, on_add_bookmark=self._add_bookmark,
-            on_jump_window=self._jump_to_window,
-            on_remove_bookmark=self._remove_bookmark)
-        self.explorer_dock = QDockWidget("Project", self)
-        self.explorer_dock.setObjectName("ProjectExplorerDock")
-        self.explorer_dock.setWidget(self.project_explorer)
-        self.explorer_dock.setMinimumWidth(220)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.explorer_dock)
-        self.tabifyDockWidget(self.projects_dock, self.explorer_dock)
-        self.projects_dock.raise_()
+            on_add_layout=self._on_add_layout, on_add_doc=self._add_doc,
+            on_add_bookmark=self._add_bookmark, on_jump_window=self._jump_to_window,
+            on_remove_bookmark=self._remove_bookmark, on_open_doc=self._open_doc)
+        self.navigator_dock = QDockWidget("Workspace", self)
+        self.navigator_dock.setObjectName("NavigatorDock")
+        self.navigator_dock.setWidget(self.navigator)
+        self.navigator_dock.setMinimumWidth(240)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.navigator_dock)
 
         # transport player: control the shared replay head from the main window
         # (without opening the Timeline). The app owns the clock heartbeat below
@@ -2138,8 +2159,7 @@ class MainWindow(QMainWindow):
         projmenu.addAction("Git identity…", self._set_git_identity)
 
         view = self.menuBar().addMenu("&View")
-        view.addAction(self.projects_dock.toggleViewAction())
-        view.addAction(self.explorer_dock.toggleViewAction())
+        view.addAction(self.navigator_dock.toggleViewAction())
         view.addAction("Devices…", self._open_devices)
         view.addAction(self.sources_dock.toggleViewAction())
         view.addAction(self.sinks_dock.toggleViewAction())
@@ -2341,6 +2361,18 @@ class MainWindow(QMainWindow):
             self._docs_view.open(readme)
         self._refresh_doc_collab()
 
+    def _open_doc(self, path: str) -> None:
+        """Open a project doc (from the navigator's Docs section) in the in-app Docs
+        view; if QtWebEngine is unavailable, fall back to revealing the file."""
+        self._open_docs()                                  # show the dock
+        if self._docs_view is None and not self._docs_unavailable:
+            self._ensure_docs_view()                       # lazy-create now
+        if self._docs_view is not None:
+            self._docs_view.open(path)
+            self._refresh_doc_collab()
+        else:
+            self._reveal_path(path)
+
     def _refresh_doc_collab(self) -> None:
         """Offer the Docs view's Collaborate toggle when it's showing a HUB
         project's doc and the hub is connected; otherwise hide it (ending any live
@@ -2383,8 +2415,7 @@ class MainWindow(QMainWindow):
         self.sync_status.set_state("connecting" if connected else "offline")
         # surface (or retire) the hub's historic catalog as routable ports
         self.dashboard.refresh_ports()
-        if getattr(self, "projects_panel", None) is not None:
-            self.projects_panel.refresh()       # enable/disable the “On the hub…” item
+        self._refresh_explorer()                # enable/disable the “On the hub…” item
         self._refresh_doc_collab()              # offer/retire the Collaborate toggle
 
     def _ensure_ext_manager(self):
@@ -2563,8 +2594,7 @@ class MainWindow(QMainWindow):
     def _update_project_title(self) -> None:
         p = self._project_mgr.active
         self.setWindowTitle(f"ferroDAC — {p.name}" if p else "ferroDAC")
-        if getattr(self, "projects_panel", None) is not None:
-            self.projects_panel.refresh()
+        self._refresh_explorer()
 
     def _add_project(self) -> None:
         """Pick a folder → ADOPT the project there if it already is one, else create
@@ -2582,7 +2612,7 @@ class MainWindow(QMainWindow):
             if not ok or not name.strip():
                 return
             p = self._project_mgr.track(folder, name.strip())   # create here
-        self.projects_panel.refresh()
+        self._refresh_explorer()
         self._switch_project(p.id)
 
     def _add_project_hub(self) -> None:
@@ -2600,7 +2630,7 @@ class MainWindow(QMainWindow):
                "sources": [], "windows": [], "layouts": {}, "deleted": False}
         self._project_mgr.apply_hub_record(rec)           # optimistic local
         self.hub.publish_project(rec)                     # push up (echo is idempotent)
-        self.projects_panel.refresh()
+        self._refresh_explorer()
         self._switch_project(rec["id"])
 
     def _share_project(self, pid: str) -> None:
@@ -2626,7 +2656,6 @@ class MainWindow(QMainWindow):
         self.hub.publish_project(rec)
         if path:                                          # push once the hub provisions a repo
             self._pending_share[pid] = path
-        self.projects_panel.refresh()
         self._refresh_explorer()
         self.statusBar().showMessage(
             f"Shared “{rec.get('name')}” — provisioning its repo…", 5000)
@@ -2688,7 +2717,7 @@ class MainWindow(QMainWindow):
             return
         QApplication.restoreOverrideCursor()
         local = self._project_mgr.track(dest)
-        self.projects_panel.refresh()
+        self._refresh_explorer()
         self._switch_project(local.id)
         self.statusBar().showMessage(f"Cloned “{p.name}” → {dest}", 6000)
 
@@ -2704,16 +2733,16 @@ class MainWindow(QMainWindow):
             self._reveal_path(p.path)
 
     def _refresh_explorer(self) -> None:
-        ex = getattr(self, "project_explorer", None)
-        if ex is not None:
-            ex.refresh()
+        """Rebuild the unified workspace navigator (projects + the active project's
+        sections). One call covers what the old Projects + Explorer panels needed."""
+        nav = getattr(self, "navigator", None)
+        if nav is not None:
+            nav.refresh()
 
     def _on_hub_projects_changed(self) -> None:
         """Hub projects arrived / changed / vanished (sync or disconnect) — refresh
         the Projects views. Runs on the GUI thread (queued from the sync)."""
         self._push_pending_shares()                       # a provisioned repo just echoed back?
-        if getattr(self, "projects_panel", None) is not None:
-            self.projects_panel.refresh()
         self._refresh_explorer()
 
     # -- docs (reference files filed under the project) ----------------------
