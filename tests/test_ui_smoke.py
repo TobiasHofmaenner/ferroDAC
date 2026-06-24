@@ -1327,14 +1327,47 @@ def test_navigator_context_actions(qapp):
     try:
         nav = w.navigator
         local = w._project_mgr.active                    # a LOCAL project
-        share = [l for l, _ in nav._context_actions({"t": "project", "id": local.id})]
-        assert any("Share to hub" in l for l in share)
+        share = [l for l, _ in nav._actions_for({"t": "project", "id": local.id})]
+        assert any("Rename" in l for l in share) and any("Share" in l for l in share)
+        assert any("Remove" in l for l in share)
         rec = {"id": "hubY", "name": "Y", "version": 1, "git_remote": "http://x/y.git",
                "sources": [], "windows": [], "layouts": {}, "deleted": False}
         w._project_mgr.apply_hub_record(rec)
-        clone = [l for l, _ in nav._context_actions({"t": "project", "id": "hubY"})]
-        assert any("Clone repository" in l for l in clone)
-        sec = [l for l, _ in nav._context_actions({"t": "section", "name": "Bookmarks"})]
+        clone = [l for l, _ in nav._actions_for({"t": "project", "id": "hubY"})]
+        assert any("Clone" in l for l in clone)
+        sec = [l for l, _ in nav._actions_for({"t": "section", "name": "Bookmarks"})]
         assert any("Add bookmark" in l for l in sec)
+        # an item exposes its edit verbs
+        lay = [l for l, _ in nav._actions_for({"t": "layout", "path": "/x/Overview.json"})]
+        assert {"✎ Rename", "⧉ Duplicate", "✕ Delete"} <= set(lay)
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_navigator_action_bar_and_edit_dispatch(qapp):
+    """Selecting a node populates the context-sensitive bottom bar; the edit
+    dispatcher applies duplicate/delete via the Project model (delete confirmed)."""
+    w = _mainwindow(qapp)
+    try:
+        nav = w.navigator
+        p = w._project_mgr.active
+        open(p.layout_path("overview"), "w").write("{}")
+        nav.refresh()
+        sit = nav._active_section("Layouts")
+        sit.setExpanded(True)
+        sit.child(0).setSelected(True)
+        nav._update_action_bar()
+        bar = [nav._action_bar.itemAt(i).widget().text()
+               for i in range(nav._action_bar.count())
+               if nav._action_bar.itemAt(i).widget() is not None]
+        assert any("Rename" in t for t in bar) and any("Delete" in t for t in bar)
+        # dispatcher: duplicate (no dialog), then delete (confirm patched True)
+        path = p.layout_path("overview")
+        w._navigator_edit("duplicate_layout", {"path": path})
+        assert len(p.layouts()) == 2
+        w._confirm = lambda _t: True
+        w._navigator_edit("delete_layout", {"path": path})
+        assert "overview" not in p.layouts()
     finally:
         w.close()

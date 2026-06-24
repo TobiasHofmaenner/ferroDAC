@@ -55,6 +55,15 @@ class Project:
     def name(self) -> str:
         return self.meta.get("name") or os.path.basename(self.path)
 
+    def rename(self, name: str) -> bool:
+        """Rename the project (its display name; the folder is unchanged)."""
+        name = (name or "").strip()
+        if not name:
+            return False
+        self.meta["name"] = name
+        self.save()
+        return True
+
     @property
     def description(self) -> str:
         return self.meta.get("description", "")
@@ -115,6 +124,31 @@ class Project:
                 return len(json.load(fh).get("layout", {}).get("panels", []))
         except Exception:
             return 0
+
+    def delete_layout(self, name: str) -> None:
+        try:
+            os.remove(self.layout_path(name))
+        except OSError:
+            pass
+
+    def rename_layout(self, old: str, new: str) -> bool:
+        new = (new or "").strip()
+        src, dst = self.layout_path(old), self.layout_path(new)
+        if not new or os.path.exists(dst) or not os.path.exists(src):
+            return False
+        os.rename(src, dst)
+        return True
+
+    def duplicate_layout(self, name: str) -> "str | None":
+        """Copy a layout to a fresh unique name ('<name> copy'); returns the new name."""
+        import shutil
+        if not os.path.exists(self.layout_path(name)):
+            return None
+        base, new, i = f"{name} copy", f"{name} copy", 2
+        while os.path.exists(self.layout_path(new)):
+            new = f"{base} {i}"; i += 1
+        shutil.copy2(self.layout_path(name), self.layout_path(new))
+        return new
 
     @property
     def working_path(self) -> str:
@@ -239,6 +273,29 @@ class Project:
         shutil.copy2(src, dest)
         return dest
 
+    def delete_doc(self, name: str) -> None:
+        try:
+            os.remove(os.path.join(self.docs_dir, name))
+        except OSError:
+            pass
+
+    def rename_doc(self, old: str, new: str) -> bool:
+        new = (new or "").strip()
+        src = os.path.join(self.docs_dir, old)
+        dst = os.path.join(self.docs_dir, new)
+        if not new or os.path.exists(dst) or not os.path.exists(src):
+            return False
+        os.rename(src, dst)
+        return True
+
+    def delete_recording(self, path: str) -> None:
+        """Delete a recording's report folder — only within this project's reports/."""
+        import shutil
+        rd = os.path.abspath(self.reports_dir)
+        ap = os.path.abspath(path)
+        if ap.startswith(rd + os.sep) and os.path.isdir(ap):
+            shutil.rmtree(ap, ignore_errors=True)
+
     # -- favourites: saved time-windows (bookmarks) — a nav aid, in the meta --
     def windows(self) -> list:
         """Saved time-windows: [{name, t0, t1}, …]. A bookmark for an interesting
@@ -256,6 +313,19 @@ class Project:
         fav = self.meta.setdefault("favorites", {})
         fav["windows"] = [w for w in (fav.get("windows") or []) if w.get("name") != name]
         self.save()
+
+    def rename_window(self, old: str, new: str) -> bool:
+        new = (new or "").strip()
+        fav = self.meta.setdefault("favorites", {})
+        wins = fav.get("windows") or []
+        if not new or any(w.get("name") == new for w in wins):
+            return False
+        for w in wins:
+            if w.get("name") == old:
+                w["name"] = new
+                self.save()
+                return True
+        return False
 
     @property
     def version(self) -> int:

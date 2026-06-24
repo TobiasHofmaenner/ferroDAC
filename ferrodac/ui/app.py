@@ -1589,10 +1589,11 @@ class ProjectNavigator(QWidget):
                  on_share=None, on_clone=None, hub_enabled=None, on_open_layout=None,
                  on_reveal_path=None, on_curate=None, on_add_layout=None,
                  on_add_doc=None, on_add_bookmark=None, on_jump_window=None,
-                 on_remove_bookmark=None, on_open_doc=None, parent=None):
+                 on_remove_bookmark=None, on_open_doc=None, on_edit=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self._active_layout = active_layout or (lambda: None)
+        self._on_edit = on_edit                         # (verb, payload) edit dispatcher
         self._on_activate = on_activate
         self._on_create_local = on_create_local
         self._on_create_hub = on_create_hub
@@ -1625,10 +1626,15 @@ class ProjectNavigator(QWidget):
         self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._context_menu)
         self._tree.itemClicked.connect(self._on_clicked)
+        self._tree.itemDoubleClicked.connect(self._on_double_clicked)
+        self._tree.itemSelectionChanged.connect(self._update_action_bar)
         root.addWidget(self._tree, 1)
-        row = QHBoxLayout()
+        # bottom: a persistent "＋ Project" + a CONTEXT-SENSITIVE action bar showing the
+        # selected node's actions (open / rename / delete / add / share / …).
+        bottom = QHBoxLayout()
         new = QToolButton()
-        new.setText("＋ Add project")
+        new.setText("＋ Project")
+        new.setToolTip("Add a project")
         new.setToolButtonStyle(Qt.ToolButtonTextOnly)
         new.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(new)
@@ -1636,11 +1642,13 @@ class ProjectNavigator(QWidget):
         self._hub_action = menu.addAction("On the hub…", lambda: self._on_create_hub())
         self._hub_action.setToolTip("Create a shared project on the hub (needs a connection)")
         new.setMenu(menu)
-        rev = QPushButton("Reveal")
-        rev.clicked.connect(lambda: self._on_reveal() if self._on_reveal else None)
-        row.addWidget(new)
-        row.addWidget(rev)
-        root.addLayout(row)
+        bottom.addWidget(new)
+        self._action_host = QWidget()
+        self._action_bar = QHBoxLayout(self._action_host)
+        self._action_bar.setContentsMargins(0, 0, 0, 0)
+        self._action_bar.setSpacing(4)
+        bottom.addWidget(self._action_host, 1)
+        root.addLayout(bottom)
         self.refresh()
 
     # -- build ---------------------------------------------------------------
@@ -1679,6 +1687,7 @@ class ProjectNavigator(QWidget):
             else:
                 pit.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
         self._tree.blockSignals(False)
+        self._update_action_bar()                # selection was cleared → clear the bar
 
     def _build_sections(self, pit, p):
         self._section(pit, "Layouts", self._layout_rows(p))
@@ -1755,7 +1764,7 @@ class ProjectNavigator(QWidget):
             rows.append((name, {"t": "bookmark", "name": name, "t0": t0, "t1": t1}, sub))
         return rows
 
-    # -- interaction ---------------------------------------------------------
+    # -- interaction: single click selects/switches, double click opens ------
     def _on_clicked(self, item, _col=0):
         pay = item.data(0, Qt.UserRole) or {}
         t = pay.get("t")
@@ -1766,7 +1775,12 @@ class ProjectNavigator(QWidget):
                 item.setExpanded(not item.isExpanded())
             elif self._on_activate is not None:          # switch (deferred — rebuilds tree)
                 QTimer.singleShot(0, lambda pid=pay["id"]: self._on_activate(pid))
-        elif t in ("layout", "recording", "doc", "bookmark"):
+        # item rows: single-click only SELECTS → the bottom bar shows its actions;
+        # double-click opens (the primary action) so a select-click never opens.
+
+    def _on_double_clicked(self, item, _col=0):
+        pay = item.data(0, Qt.UserRole) or {}
+        if pay.get("t") in ("layout", "recording", "doc", "bookmark"):
             QTimer.singleShot(0, lambda d=dict(pay): self._open_item(d))
 
     def _open_item(self, pay):
@@ -1782,41 +1796,67 @@ class ProjectNavigator(QWidget):
         elif t == "bookmark" and self._on_jump_window and pay.get("t0") and pay.get("t1"):
             self._on_jump_window(pay["t0"], pay["t1"])
 
-    def _context_actions(self, pay) -> list:
-        """[(label, callback|None)] for a node's right-click menu. Split from exec so
-        the menu contents are testable; a None callback renders as a disabled item
-        (e.g. Share while offline)."""
+    def _actions_for(self, pay) -> list:
+        """[(label, callback|None)] — the action/edit set for a node, used by BOTH the
+        right-click menu and the context-sensitive bottom bar. None = disabled. The new
+        edit verbs (rename/delete/duplicate/…) route through the single `on_edit`."""
         t = pay.get("t")
+        e = self._on_edit or (lambda _v, _p: None)
         out = []
         if t == "project":
             p = self.manager.get(pay.get("id"))
             if p is None:
                 return out
+            out.append(("✎ Rename", lambda d=dict(pay): e("rename_project", d)))
             if not getattr(p, "is_hub", False):
                 if self._on_share is not None:
-                    out.append(("☁ Share to hub",
-                                (lambda pid=p.id: self._on_share(pid))
+                    out.append(("☁ Share", (lambda pid=p.id: self._on_share(pid))
                                 if self._hub_enabled() else None))
+                if self._on_reveal is not None:
+                    out.append(("📂 Reveal", lambda: self._on_reveal()))
             elif self._on_clone is not None and getattr(p, "git_remote", ""):
-                out.append(("⬇ Clone repository…", lambda pid=p.id: self._on_clone(pid)))
+                out.append(("⬇ Clone…", lambda pid=p.id: self._on_clone(pid)))
+            out.append(("⌫ Remove", lambda d=dict(pay): e("remove_project", d)))
         elif t == "section":
             adders = {"Layouts": (self._on_add_layout, "＋ Add layout"),
-                      "Channels": (self._on_curate, "✔ Curate channels…"),
+                      "Channels": (self._on_curate, "✔ Curate…"),
                       "Docs": (self._on_add_doc, "＋ Add doc…"),
                       "Bookmarks": (self._on_add_bookmark, "＋ Add bookmark")}
             cb, label = adders.get(pay.get("name"), (None, ""))
             if cb is not None:
                 out.append((label, lambda cb=cb: cb()))
-        elif t == "bookmark" and self._on_remove_bookmark is not None:
-            out.append(("✕ Remove bookmark",
-                        lambda name=pay.get("name"): self._on_remove_bookmark(name)))
+        elif t == "layout":
+            if not pay.get("active") and self._on_open_layout:
+                out.append(("↗ Open", lambda path=pay["path"]: self._on_open_layout(path)))
+            out.append(("✎ Rename", lambda d=dict(pay): e("rename_layout", d)))
+            out.append(("⧉ Duplicate", lambda d=dict(pay): e("duplicate_layout", d)))
+            out.append(("✕ Delete", lambda d=dict(pay): e("delete_layout", d)))
+        elif t == "channel":
+            out.append(("✕ Uncurate", lambda d=dict(pay): e("uncurate", d)))
+        elif t == "recording":
+            if self._on_reveal_path:
+                out.append(("📂 Reveal", lambda path=pay["path"]: self._on_reveal_path(path)))
+            out.append(("✕ Delete", lambda d=dict(pay): e("delete_recording", d)))
+        elif t == "doc":
+            cb = self._on_open_doc or self._on_reveal_path
+            if cb:
+                out.append(("↗ Open", lambda path=pay["path"], cb=cb: cb(path)))
+            out.append(("✎ Rename", lambda d=dict(pay): e("rename_doc", d)))
+            out.append(("✕ Delete", lambda d=dict(pay): e("delete_doc", d)))
+        elif t == "bookmark":
+            if self._on_jump_window and pay.get("t0") and pay.get("t1"):
+                out.append(("⌖ Jump",
+                            lambda t0=pay["t0"], t1=pay["t1"]: self._on_jump_window(t0, t1)))
+            out.append(("✎ Rename", lambda d=dict(pay): e("rename_bookmark", d)))
+            if self._on_remove_bookmark:
+                out.append(("✕ Delete", lambda name=pay.get("name"): self._on_remove_bookmark(name)))
         return out
 
     def _context_menu(self, pos):
         item = self._tree.itemAt(pos)
         if item is None:
             return
-        actions = self._context_actions(item.data(0, Qt.UserRole) or {})
+        actions = self._actions_for(item.data(0, Qt.UserRole) or {})
         if not actions:
             return
         menu = QMenu(self)
@@ -1827,6 +1867,23 @@ class ProjectNavigator(QWidget):
             else:
                 a.triggered.connect(lambda _=False, cb=cb: cb())
         menu.exec(self._tree.mapToGlobal(pos))
+
+    def _update_action_bar(self) -> None:
+        """Rebuild the bottom bar to the SELECTED node's actions (or empty)."""
+        clear_layout(self._action_bar)
+        items = self._tree.selectedItems()
+        if not items:
+            return
+        for label, cb in self._actions_for(items[0].data(0, Qt.UserRole) or {}):
+            b = QToolButton()
+            b.setText(label)
+            b.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            if cb is None:
+                b.setEnabled(False)
+            else:
+                b.clicked.connect(lambda _=False, cb=cb: cb())
+            self._action_bar.addWidget(b)
+        self._action_bar.addStretch(1)
 
     # -- expand-state preservation across the imperative refresh -------------
     def _snapshot(self) -> set:
@@ -2085,7 +2142,8 @@ class MainWindow(QMainWindow):
             on_reveal_path=self._reveal_path, on_curate=self._curate_sources,
             on_add_layout=self._on_add_layout, on_add_doc=self._add_doc,
             on_add_bookmark=self._add_bookmark, on_jump_window=self._jump_to_window,
-            on_remove_bookmark=self._remove_bookmark, on_open_doc=self._open_doc)
+            on_remove_bookmark=self._remove_bookmark, on_open_doc=self._open_doc,
+            on_edit=self._navigator_edit)
         self.navigator_dock = QDockWidget("Workspace", self)
         self.navigator_dock.setObjectName("NavigatorDock")
         self.navigator_dock.setWidget(self.navigator)
@@ -2789,6 +2847,94 @@ class MainWindow(QMainWindow):
         p = self._project_mgr.active
         if p is not None:
             p.remove_window(name)
+            self._refresh_explorer()
+            self._republish_active_if_hub()
+
+    # -- navigator edit actions (rename / delete / duplicate / …) -------------
+    def _confirm(self, text: str) -> bool:
+        return QMessageBox.question(self, "ferroDAC", text) == QMessageBox.Yes
+
+    @staticmethod
+    def _layout_name(path: str) -> str:
+        return os.path.splitext(os.path.basename(path))[0]
+
+    def _navigator_edit(self, verb: str, pay: dict) -> None:
+        """One dispatcher for the workspace navigator's edit verbs. Confirms
+        destructive ops, applies them via the Project model, then refreshes."""
+        mgr = self._project_mgr
+        if verb == "rename_project":
+            proj = mgr.get(pay.get("id"))
+            if proj is None:
+                return
+            name, ok = QInputDialog.getText(self, "Rename project", "New name:",
+                                            text=proj.name)
+            if ok and proj.rename(name):
+                self._update_project_title()           # title + refresh
+                self._republish_active_if_hub()
+            return
+        if verb == "remove_project":
+            proj = mgr.get(pay.get("id"))
+            if proj is None or not self._confirm(
+                    f"Remove “{proj.name}” from the workspace?\n"
+                    "The folder on disk is kept — this only untracks it."):
+                return
+            was_active = mgr.active is not None and mgr.active.id == proj.id
+            mgr.untrack(proj.id)
+            if was_active:
+                rest = mgr.projects()
+                if rest:
+                    self._switch_project(rest[0].id)
+            self._refresh_explorer()
+            return
+
+        p = mgr.active
+        if p is None:
+            return
+        if verb == "rename_layout":
+            old = self._layout_name(pay["path"])
+            name, ok = QInputDialog.getText(self, "Rename layout", "New name:", text=old)
+            if ok and p.rename_layout(old, name):
+                if (self._active_layout_path and os.path.abspath(self._active_layout_path)
+                        == os.path.abspath(pay["path"])):
+                    self._active_layout_path = p.layout_path(name.strip())
+                self._refresh_explorer()
+        elif verb == "duplicate_layout":
+            p.duplicate_layout(self._layout_name(pay["path"]))
+            self._refresh_explorer()
+        elif verb == "delete_layout":
+            name = self._layout_name(pay["path"])
+            if self._confirm(f"Delete layout “{name}”?"):
+                if (self._active_layout_path and os.path.abspath(self._active_layout_path)
+                        == os.path.abspath(pay["path"])):
+                    self._active_layout_path = None
+                p.delete_layout(name)
+                self._refresh_explorer()
+        elif verb == "rename_doc":
+            old = os.path.basename(pay["path"])
+            name, ok = QInputDialog.getText(self, "Rename doc", "New name:", text=old)
+            if ok and p.rename_doc(old, name):
+                self._refresh_explorer()
+        elif verb == "delete_doc":
+            name = os.path.basename(pay["path"])
+            if self._confirm(f"Delete “{name}”?"):
+                p.delete_doc(name)
+                self._refresh_explorer()
+        elif verb == "delete_recording":
+            if self._confirm("Delete this recording and its exported files?"):
+                p.delete_recording(pay["path"])
+                self._refresh_explorer()
+        elif verb == "rename_bookmark":
+            old = pay.get("name")
+            name, ok = QInputDialog.getText(self, "Rename bookmark", "New name:", text=old)
+            if ok and p.rename_window(old, name):
+                self._refresh_explorer()
+                self._republish_active_if_hub()
+        elif verb == "uncurate":
+            key = pay.get("key")
+            kept = [s for s in p.sources()
+                    if (s.get("key") if isinstance(s, dict) else s) != key]
+            p.set_sources(kept)
+            self._apply_source_lens()
             self._refresh_explorer()
             self._republish_active_if_hub()
 

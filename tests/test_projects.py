@@ -243,3 +243,53 @@ def test_is_on_hub_recognises_local_working_copy():
     assert mgr.get("X").is_hub is False               # local copy wins the dedup
     assert mgr.is_on_hub("X")                          # …but it's still shared on the hub
     assert not mgr.is_on_hub("nope")
+
+
+def test_layout_edit_ops():
+    import os
+    d = tempfile.mkdtemp()
+    p = Project.create(os.path.join(d, "e"), "E")
+    open(p.layout_path("overview"), "w").write("{}")
+    # rename
+    assert p.rename_layout("overview", "main") is True
+    assert p.layouts() == ["main"]
+    # duplicate → a fresh copy appears (name is _safe-encoded by layout_path)
+    dup = p.duplicate_layout("main")
+    assert dup is not None and len(p.layouts()) == 2 and "main" in p.layouts()
+    # delete it again
+    p.delete_layout(dup)
+    assert p.layouts() == ["main"]
+    # rename refuses a clash / empty
+    open(p.layout_path("other"), "w").write("{}")
+    assert p.rename_layout("main", "other") is False and p.rename_layout("main", "") is False
+
+
+def test_doc_and_recording_and_bookmark_edit_ops():
+    import os
+    d = tempfile.mkdtemp()
+    p = Project.create(os.path.join(d, "e"), "E")
+    open(os.path.join(p.docs_dir, "a.txt"), "w").write("x")
+    assert p.rename_doc("a.txt", "b.txt") is True
+    assert [x["name"] for x in p.docs()] == ["b.txt"]
+    p.delete_doc("b.txt")
+    assert p.docs() == []
+    # a recording folder is removed only within reports/
+    run = os.path.join(p.reports_dir, "run_1")
+    os.makedirs(run)
+    p.delete_recording(run)
+    assert not os.path.exists(run)
+    p.delete_recording("/etc")                       # outside reports/ → no-op (safety)
+    assert os.path.isdir("/etc")
+    # bookmark rename
+    p.add_window("win", 1.0, 2.0)
+    assert p.rename_window("win", "bakeout") is True
+    assert [w["name"] for w in p.windows()] == ["bakeout"]
+
+
+def test_project_rename():
+    import os
+    d = tempfile.mkdtemp()
+    p = Project.create(os.path.join(d, "e"), "Old")
+    assert p.rename("New") is True and p.name == "New"
+    assert Project(p.path).name == "New"             # persisted
+    assert p.rename("  ") is False                    # empty rejected
