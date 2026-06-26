@@ -591,6 +591,114 @@ class DeviceMetaDialog(QDialog):
         self.accept()
 
 
+class BackupFolderDialog(QDialog):
+    """Pick (or create) a folder on the hub's backup store for a project — tree-browse
+    via the Backup service. A folder used by another project can't be taken; re-selecting
+    this project's own folder re-attaches. DESIGN §20 Phase 2."""
+
+    def __init__(self, client, project_id, project_name, parent=None):
+        super().__init__(parent)
+        self._client = client
+        self._pid = project_id
+        self._selected = ""
+        self.result_detail = ""
+        self.setWindowTitle(f"Hub backup folder — {project_name}")
+        self.setMinimumSize(460, 440)
+        root = QVBoxLayout(self)
+        intro = QLabel("Choose where the hub mirrors this project. Drill in to browse, or "
+                       "make a new folder. A folder used by another project can't be taken.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#8b95a4; font-size:11px;")
+        root.addWidget(intro)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._tree.itemExpanded.connect(self._on_expand)
+        self._tree.currentItemChanged.connect(self._on_select)
+        root.addWidget(self._tree, 1)
+        self._sel = QLabel("Selected: (root)")
+        self._sel.setStyleSheet("font-size:11px; color:#c7d0db;")
+        root.addWidget(self._sel)
+        rowb = QHBoxLayout()
+        newb = QPushButton("New folder…")
+        newb.clicked.connect(self._new_folder)
+        rowb.addWidget(newb)
+        rowb.addStretch(1)
+        root.addLayout(rowb)
+        bb = QDialogButtonBox()
+        bb.addButton("Use this folder", QDialogButtonBox.AcceptRole)
+        bb.addButton(QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._use)
+        bb.rejected.connect(self.reject)
+        root.addWidget(bb)
+        self._fill(self._tree.invisibleRootItem(), "")
+
+    def _busy(self, fn, *a):
+        from qtpy.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return fn(*a)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _fill(self, parent_item, path):
+        try:
+            folders = self._busy(self._client.list_folders, path)
+        except Exception as exc:                       # noqa: BLE001
+            self._sel.setText(f"Hub backup unavailable: {exc}")
+            return
+        parent_item.takeChildren()
+        for f in folders:
+            it = QTreeWidgetItem(parent_item)
+            label = f["name"]
+            if f["project_id"] == self._pid:
+                label += "   → (this project)"
+            elif f["project_id"]:
+                label += f"   → {f['project_name'] or 'another project'}"
+            it.setText(0, label)
+            it.setData(0, Qt.UserRole, f)
+            if f["has_children"]:
+                QTreeWidgetItem(it)                    # placeholder → shows the expander
+
+    def _on_expand(self, item):
+        pay = item.data(0, Qt.UserRole) or {}
+        if pay.get("_loaded"):
+            return
+        pay["_loaded"] = True
+        item.setData(0, Qt.UserRole, pay)
+        self._fill(item, pay.get("path", ""))
+
+    def _on_select(self, cur, _prev):
+        pay = (cur.data(0, Qt.UserRole) if cur else None) or {}
+        self._selected = pay.get("path", "")
+        self._sel.setText(f"Selected: {self._selected or '(root)'}")
+
+    def _new_folder(self):
+        name, ok = QInputDialog.getText(self, "New folder", "New folder name:")
+        name = (name or "").strip().strip("/\\")
+        if not ok or not name:
+            return
+        self._selected = f"{self._selected}/{name}" if self._selected else name
+        self._sel.setText(f"Selected: {self._selected}   (new)")
+
+    def _use(self):
+        if not self._selected:
+            self._sel.setText("Pick or create a folder first.")
+            return
+        try:
+            res = self._busy(self._client.set_folder, self._pid, self._selected)
+        except Exception as exc:                       # noqa: BLE001
+            QMessageBox.warning(self, "Backup", f"Could not set the folder: {exc}")
+            return
+        if res["ok"]:
+            self.result_detail = (("Re-attached to the backup at "
+                                   if res["claimed"] else "Backing up to ")
+                                  + (res["folder"] or self._selected))
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Can't use that folder",
+                                res["detail"] or "That folder can't be used.")
+
+
 class DevicesWindow(QMainWindow):
     """The Devices manager as a standalone window (like the Timeline) rather than a
     cramped dock — Available + Active devices, add/remove/configure. Just hosts a
@@ -2331,6 +2439,8 @@ class MainWindow(QMainWindow):
         filemenu.addAction("Open Layout…", self._on_open)
         filemenu.addSeparator()
         filemenu.addAction("Back up project…", self._backup_project)
+        filemenu.addAction("Set hub backup folder…", self._set_hub_backup_folder)
+        filemenu.addAction("Download project copy…", self._download_project_copy)
 
         projmenu = self.menuBar().addMenu("&Project")
         projmenu.addAction("Checkpoint…", self._checkpoint)
@@ -4025,6 +4135,48 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self.statusBar().showMessage(f"Backed up “{p.name}” → {path}", 8000)
+
+    def _set_hub_backup_folder(self) -> None:
+        """File ▸ Set hub backup folder — pick where the hub mirrors the active project
+        (DESIGN §20 Phase 2). The hub (server) is the authoritative writer; this just
+        tells it which backend folder to use."""
+        client = self.hub.backup if getattr(self, "hub", None) else None
+        p = self._project_mgr.active if self._project_mgr else None
+        if client is None:
+            self.statusBar().showMessage("Connect to a hub first (Cloud).", 6000)
+            return
+        if p is None:
+            self.statusBar().showMessage("No active project.", 5000)
+            return
+        dlg = BackupFolderDialog(client, p.id, p.name, self)
+        if dlg.exec():
+            self.statusBar().showMessage(dlg.result_detail or "Backup folder set.", 7000)
+
+    def _download_project_copy(self) -> None:
+        """File ▸ Download project copy — fetch a self-contained zip from the hub."""
+        from qtpy.QtWidgets import QApplication
+        client = self.hub.backup if getattr(self, "hub", None) else None
+        p = self._project_mgr.active if self._project_mgr else None
+        if client is None or p is None:
+            self.statusBar().showMessage("Connect to a hub and open a project first.", 6000)
+            return
+        safe = (p.name or "project").replace("/", "_").replace("\\", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Download project copy",
+            os.path.join(self._app_dir(), f"{safe}.zip"), "ferroDAC backup (*.zip)")
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            client.download(p.id, path)
+        except Exception as exc:                       # noqa: BLE001
+            self.statusBar().showMessage(f"Download failed: {exc}", 8000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.statusBar().showMessage(f"Downloaded “{p.name}” → {path}", 8000)
 
     @staticmethod
     def _remember(path: str) -> None:

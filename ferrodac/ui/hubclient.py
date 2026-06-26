@@ -47,6 +47,7 @@ class HubController(QObject):
         self._store = store              # local durable ZarrStore (for hub sync)
         self._resolver = resolver        # local read resolver (gets a hub READ tier)
         self._read_chan = None           # sync channel for the hub read tier
+        self._backup_client = None       # hub Backup service client (§20)
         self._hub_sources: list = []     # cached [(key,name,unit,dtype)] from the hub
         self._agent = None
         self._viewer = None
@@ -94,6 +95,11 @@ class HubController(QObject):
     @property
     def connected(self) -> bool:
         return self._agent is not None or self._viewer is not None
+
+    @property
+    def backup(self):
+        """The hub Backup-service client (DESIGN §20), or None when not connected."""
+        return self._backup_client
 
     @property
     def roles(self) -> tuple:
@@ -144,17 +150,21 @@ class HubController(QObject):
                 on_readings=self._on_readings_net,
                 on_state=self._state_cb("viewer"))
             self._viewer.start()
-        # hub READ tier: serve history the client lacks locally (DESIGN §12.1
-        # read side) — wired whenever connected, independent of agent/viewer, so
-        # a wiped local store can be back-read from the hub.
-        if self._resolver is not None and net.GRPC_AVAILABLE:
+        # hub READ tier + backup admin: a sync channel, wired whenever connected
+        # (independent of agent/viewer) — the read tier back-reads history a wiped
+        # local store lacks (§12.1), the backup client browses/targets the hub's
+        # project backup store (§20).
+        if net.GRPC_AVAILABLE:
             import grpc
-            from ..net.readtier import HubReadTier
+            from ..net.backup import HubBackupClient
             self._read_chan = grpc.insecure_channel(
                 addr, options=net.GRPC_CHANNEL_OPTIONS)
-            tier = HubReadTier(self._read_chan)
-            self._resolver.set_remote(tier)
-            self._hub_sources = tier.sources()        # one ListSources for the catalog
+            self._backup_client = HubBackupClient(self._read_chan)
+            if self._resolver is not None:
+                from ..net.readtier import HubReadTier
+                tier = HubReadTier(self._read_chan)
+                self._resolver.set_remote(tier)
+                self._hub_sources = tier.sources()    # one ListSources for the catalog
         # Tags ride their own channel and are role-independent — sync them
         # whenever connected, regardless of agent/viewer (DESIGN §7.3).
         self._tagsync = HubTagSync(addr, agent_id=aid,
@@ -199,6 +209,7 @@ class HubController(QObject):
         self._unwire_tags()
         if self._resolver is not None:
             self._resolver.clear_remote()
+        self._backup_client = None
         if self._read_chan is not None:
             self._read_chan.close()
             self._read_chan = None
