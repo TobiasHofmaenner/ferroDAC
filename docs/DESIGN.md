@@ -1336,3 +1336,101 @@ a hot-path rewrite. One propagation mechanism with a *method×when* toggle; valu
 `float64` on the wire; σ is a 2× channel (or a model); the heavy `uncertainties`
 machinery is bounded to on-demand windows and opt-in for processor authors. Decide the
 two **independently**, and do **units first**.
+
+## 20. Local-first archival & storage backends (recorded 2026-06-26)
+
+> **Partly building — the local zip first.** How ferroDAC keeps the **"always usable
+> in N years"** guarantee (the local-first North Star, §2) once projects and provenance
+> can live on a hub/server. Core thesis: **split storage by who OWNS the data** — the
+> tool owns the *structured truth* (records, identity, measurements); a *file cloud*
+> owns *human-curated files*. "**Use a file cloud, don't build one**" (the §8.1 hub-
+> projects guardrail). And archival is a **replica + freeze** problem, **not** a merge
+> problem.
+
+### 20.1 The principle
+
+- A complete, openable **local copy must survive the hub/server dying.**
+- **Separate ARCHIVAL from EDITING.** Conflicts come *only* from editing a copy;
+  archival needs a *replica*, which is conflict-free. Do **not** solve archival with
+  bidirectional merge.
+- Conflicts are already handled at the **sync-channel layer** — Yjs CRDT for docs,
+  LWW for records (§7.3/§8.1). Never re-solve them at the git/file layer (ugly merge
+  markers in an ELN; duplicated logic).
+
+### 20.2 Project local backup = a client-side ZIP  *(building first)*
+
+- The client writes a **single `.zip`** of the project's **metadata** (docs / layouts /
+  records / tags / bookmarks — text, small; **NOT** measurements, which sync separately,
+  §12.1) to a **user-chosen path** (local folder, a Nextcloud-synced folder, USB…). The
+  tool doesn't care where it lands; if the user points it at a synced folder they get
+  off-site copies for free, but that's their choice, not a dependency.
+- **Format:** readable files (markdown/json) **+ an invisible `history.bundle`** (a
+  `git bundle` = the whole repo + history in one file). A regular user sees a zip of
+  readable files; recovery / full history is `git clone history.bundle` performed *by
+  the app* — **zero git literacy required.** A plain "latest-snapshot-only" zip is the
+  fallback when history isn't wanted.
+- **Read-only by FORMAT, not policy.** To edit it you'd extract → edit → re-zip, and it
+  isn't wired back anywhere — *obviously futile*. That's the strong-but-not-impossible
+  barrier we wanted; everyone understands a zip is a sealed snapshot, not a workspace.
+  No "normal-looking folder that's secretly locked," and **no dependency on any external
+  ACL / read-only share** to enforce it — the container is the enforcement.
+- **Personal, not canonical:** each client writes its own; one path per machine (else
+  last-writer-wins, low stakes). A *shared* canonical archive, if ever wanted, is a
+  separate later concern.
+- Cheap to regenerate (metadata-only → KB–MB), atomic `tmp`→`replace`, on a debounced
+  trigger (cadence TBD: on disconnect / a timer / on-change).
+
+### 20.3 Storage split by data nature
+
+- **Tool-owned structured truth** — device identity + provenance change-log, tags /
+  records, measurements (Zarr): **hub + Zarr**, via the sync channels. Atomic, conflict-
+  policied, never hand-edited. **Never a shared editable folder** (write races, no
+  atomicity, davfs caching surprises).
+- **Human-curated files** — cal-cert PDFs, manuals, rig photos: **a file cloud
+  (Nextcloud).** Editing *is* the feature. A hub record **references** the file
+  (path/URL); it does **not** copy it into Zarr.
+
+### 20.4 Instruments folder = Nextcloud as the authoritative FILE backend
+
+- A Nextcloud folder tree is the **authoritative source** for instrument documents.
+  Humans add/remove/edit via Nextcloud (familiar); the server **observes** and reflects
+  into device records. **One-directional** (Nextcloud → server) ⇒ no merge problem.
+- **Folder → device mapping:** a per-folder **`instrument.json`** manifest declares the
+  serial/id (humans name folders freely; binding stays unambiguous). The server stubs
+  the folder on a device's first-seen.
+- **One writer per file:** the server *observes*; anything it must write (skeleton, an
+  auto index) goes under its **own** path (`/_auto/…`), never co-editing human files →
+  races impossible.
+- **Change detection is EVENTUAL** — poll the folder/API (no reliable inotify over
+  WebDAV). Fine for documents.
+- **Server reach:** prefer the **Nextcloud API** (atomic) for writes; a **WebDAV/davfs
+  mount** is fine for a quick read/watch prototype but flaky — never the transactional
+  path.
+- **Auth:** Nextcloud OIDC governs who may drop; the server uses a service account.
+
+### 20.5 The archival-integrity rule (load-bearing) — live vs frozen
+
+A mutable authoritative folder is great for *current* truth but **breaks archival**:
+delete/replace a cert next year and every past measurement that referenced it dangles.
+Resolve it with the **same live-vs-frozen pattern as device metadata** (§19.5 / the
+provenance change-log):
+- the Nextcloud folder = the **current, editable** truth (links resolve live);
+- **at record time, FREEZE the referenced documents (the bytes + a hash) into the
+  durable store**, alongside the data.
+
+So the cert that was valid when the data was taken **travels with the data** and
+survives folder-tidying years later. Without this, "authoritative mutable folder" and
+"always usable in N years" directly contradict.
+
+### 20.6 Cross-cutting
+
+- **Pluggable backend** (echo §8.2): `local-folder | git-remote | nextcloud-webdav` —
+  Nextcloud is **one** option, never a hard dependency; a plain local folder must work.
+- **Provenance = a structured record (hub) + referenced docs (file backend) + frozen
+  copies (durable store)** — three tiers, one resolver view.
+
+**Bottom line:** archival is a **replica + freeze** problem, not a merge problem. Split
+storage by ownership — structured truth in the hub/Zarr; human files in a file cloud you
+*use* rather than rebuild; reference-live + freeze-at-record-time for integrity. The
+project local backup ships first as a **client-side zip** (readable files + an invisible
+history bundle), read-only purely by virtue of being a zip.
