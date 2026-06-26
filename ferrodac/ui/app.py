@@ -41,6 +41,7 @@ from qtpy.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -340,12 +341,22 @@ class ConfigDialog(QDialog):
             self._driver_panel.refresh(desc)
 
         btnrow = QHBoxLayout()
+        meta = QPushButton("📝 Notes & journal…")
+        meta.setToolTip("Describe this device's setup + lab-journal fields "
+                        "(notes, calibration, asset tag)")
+        meta.clicked.connect(self._edit_meta)
+        btnrow.addWidget(meta)
         btnrow.addStretch(1)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
         btnrow.addWidget(close)
         root.addLayout(btnrow)
         self._update_info(desc)
+
+    def _edit_meta(self) -> None:
+        win = self.parent()
+        if win is not None and hasattr(win, "_open_device_meta"):
+            win._open_device_meta(self.instance_id)
 
     def _sink_widget(self, s) -> QWidget:
         iid = self.instance_id
@@ -503,6 +514,81 @@ class DevicesPanel(QWidget):
                            self.on_configure if active else None)
             )
         layout.addStretch(1)
+
+
+class DeviceMetaDialog(QDialog):
+    """Edit a device's lab-journal metadata: a prominent free-text NOTES field (the
+    setup description, e.g. "RGA mounted to UHV-CTS SN:12345") plus the structured
+    journal fields. User entries override what the device reports and are frozen
+    alongside recorded data via the provenance change-log — so moving a sensor and
+    updating its note keeps past data correctly labelled (DESIGN §5/§8.2)."""
+
+    _FIELDS = [("manufacturer", "Manufacturer", "manufacturer"),
+               ("model", "Model", "model"),
+               ("serial", "Serial", "hardware_id"),
+               ("firmware", "Firmware", "firmware"),
+               ("cal_date", "Cal date", "cal_date"),
+               ("cal_due", "Cal due", "cal_due"),
+               ("cal_cert", "Cal cert", "cal_cert"),
+               ("asset_tag", "Asset tag", "asset_tag")]
+
+    def __init__(self, manager, instance_id, devmeta, on_saved=None,
+                 focus_notes=False, parent=None):
+        super().__init__(parent)
+        from ..core.devicemeta import device_key
+        self._iid = instance_id
+        self._devmeta = devmeta
+        self._on_saved = on_saved
+        desc = manager.descriptor(instance_id)
+        self._key = (device_key(desc) if desc else "") or instance_id
+        self.setWindowTitle(f"Notes & journal — {desc.name if desc else instance_id}")
+        self.setMinimumWidth(460)
+        user = devmeta.get(self._key)
+
+        root = QVBoxLayout(self)
+        root.setSpacing(8)
+        intro = QLabel("Describe this device's current setup. Notes are kept with the "
+                       "device and frozen alongside any data you record — so moving a "
+                       "sensor and updating the note keeps past data labelled correctly.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#8b95a4; font-size:11px;")
+        root.addWidget(intro)
+
+        lbl = QLabel("Notes / setup")
+        lbl.setStyleSheet("font-weight:600;")
+        root.addWidget(lbl)
+        self._notes = QPlainTextEdit(user.get("notes", ""))
+        self._notes.setPlaceholderText(
+            "e.g. RGA mounted to UHV-CTS SN:12345 — chamber side, post-bake")
+        self._notes.setFixedHeight(80)
+        root.addWidget(self._notes)
+
+        form = QFormLayout()
+        self._edits = {}
+        for key, label, attr in self._FIELDS:
+            e = QLineEdit(user.get(key, ""))
+            reported = getattr(desc, attr, None) if desc else None
+            e.setPlaceholderText(f"{reported}  (reported by device)" if reported else "—")
+            self._edits[key] = e
+            form.addRow(label, e)
+        root.addLayout(form)
+
+        bb = QDialogButtonBox()
+        bb.addButton("Save", QDialogButtonBox.AcceptRole)
+        bb.addButton("Skip", QDialogButtonBox.RejectRole)
+        bb.accepted.connect(self._save)
+        bb.rejected.connect(self.reject)
+        root.addWidget(bb)
+        if focus_notes:
+            self._notes.setFocus()
+
+    def _save(self):
+        fields = {k: e.text() for k, e in self._edits.items()}
+        fields["notes"] = self._notes.toPlainText().strip()
+        self._devmeta.set(self._key, fields)        # only non-empty user fields persist
+        if self._on_saved is not None:
+            self._on_saved()                        # refresh records → freeze on next flush
+        self.accept()
 
 
 class DevicesWindow(QMainWindow):
@@ -3234,6 +3320,45 @@ class MainWindow(QMainWindow):
             recs[did] = rec
         self.store_writer.set_device_records(recs)
 
+    # -- device journal / notes editor ---------------------------------------
+    def _open_device_meta(self, instance_id: str, focus_notes: bool = False):
+        """Open the lab-journal / notes editor for a device. Returns the dialog."""
+        dlg = DeviceMetaDialog(self.manager, instance_id, self._device_meta(),
+                               on_saved=self._push_device_records,
+                               focus_notes=focus_notes, parent=self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.show()
+        return dlg
+
+    def _maybe_prompt_device_meta(self) -> None:
+        """Gentle, skippable nudge to describe a NEWLY added device — once per device
+        (remembered across sessions), never if it's already described. Gated by
+        ``_meta_prompt_on`` so it only fires in the live app (set in main())."""
+        if not getattr(self, "_meta_prompt_on", False):
+            return
+        from ..core.devicemeta import device_key
+        self._ensure_prompted_loaded()
+        for d in self.manager.active_descriptors():
+            key = device_key(d)
+            if not key or key in self._prompted_meta:
+                continue
+            self._prompted_meta.add(key)                  # seen → never nag twice
+            self._persist_prompted()
+            if not self._device_meta().get(key):          # not yet described → nudge
+                self._open_device_meta(d.instance_id, focus_notes=True)
+
+    def _ensure_prompted_loaded(self) -> None:
+        if not hasattr(self, "_prompted_meta"):
+            from qtpy.QtCore import QSettings
+            v = QSettings("ferroDAC", "ferroDAC").value(
+                "devicemeta/prompted", [], type=list)
+            self._prompted_meta = set(v or [])
+
+    def _persist_prompted(self) -> None:
+        from qtpy.QtCore import QSettings
+        QSettings("ferroDAC", "ferroDAC").setValue(
+            "devicemeta/prompted", list(self._prompted_meta))
+
     def _device_meta(self):
         if getattr(self, "_devmeta", None) is None:
             from ..core.devicemeta import DeviceMeta
@@ -4097,5 +4222,7 @@ def main(argv=None) -> int:
     manager = DeviceManager(drivers, engine=engine, registry=registry)
     win = MainWindow(manager, engine, extensions=ext_mgr)
     win.show()
+    win._meta_prompt_on = True              # gently nudge for notes on newly-added devices
+    manager.active_changed.connect(win._maybe_prompt_device_meta)
     win.maybe_autoconnect()                # reconnect to the last hub if we were linked
     return app.exec()

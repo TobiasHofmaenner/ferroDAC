@@ -1631,3 +1631,78 @@ def test_config_panel_can_own_options(qapp):
     finally:
         DEVICE_CONFIG_WIDGETS.pop("fake_owns", None)
         w.close()
+
+
+def _meta_dev(iid="t:1", sn="SN-9"):
+    from ferrodac.core.base import BaseDevice
+    from ferrodac.core.device import Interface
+
+    class Dev(BaseDevice):
+        driver = "t"
+        def __init__(self):
+            super().__init__(iid, "Gauge", Interface(kind="sim"), hardware_id=sn)
+        def _connect(self):
+            pass
+    return Dev()
+
+
+@pytest.mark.ui
+def test_device_meta_editor_saves_notes(qapp, tmp_path):
+    """The notes/journal editor persists the operator's free-text setup note + journal
+    fields to DeviceMeta (keyed by serial) and fires the records-refresh callback."""
+    from ferrodac.ui.app import DeviceMetaDialog
+    from ferrodac.core.devicemeta import DeviceMeta, device_key
+    w = _mainwindow(qapp)
+    try:
+        dev = _meta_dev()
+        w.manager._active[dev.instance_id] = dev
+        dm = DeviceMeta(str(tmp_path / "dm.json"))
+        saved = []
+        dlg = DeviceMetaDialog(w.manager, dev.instance_id, dm,
+                               on_saved=lambda: saved.append(True), parent=w)
+        dlg._notes.setPlainText("RGA mounted to UHV-CTS SN:12345")
+        dlg._edits["asset_tag"].setText("LAB-007")
+        dlg._save()
+        rec = dm.get(device_key(dev.describe()))
+        assert rec["notes"] == "RGA mounted to UHV-CTS SN:12345"
+        assert rec["asset_tag"] == "LAB-007"
+        assert saved == [True]                              # refresh callback fired
+        dlg.deleteLater()
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_device_meta_prompt_on_add(qapp, tmp_path, monkeypatch):
+    """The on-add nudge: gated off → never; gated on → a NEW undescribed device prompts
+    exactly once; an already-described device is marked seen but not nagged."""
+    from ferrodac.core.devicemeta import DeviceMeta, device_key
+    w = _mainwindow(qapp)
+    try:
+        w._devmeta = DeviceMeta(str(tmp_path / "dm.json"))
+        w._prompted_meta = set()
+        monkeypatch.setattr(w, "_persist_prompted", lambda: None)
+        opened = []
+        monkeypatch.setattr(w, "_open_device_meta",
+                            lambda iid, focus_notes=False: opened.append(iid))
+        for d in w.manager.active_descriptors():            # ignore pre-existing devices
+            w._prompted_meta.add(device_key(d))
+
+        d1 = _meta_dev("t:1", "SN-1")
+        w.manager._active[d1.instance_id] = d1
+        w._maybe_prompt_device_meta()                       # gated OFF → nothing
+        assert opened == []
+
+        w._meta_prompt_on = True
+        w._maybe_prompt_device_meta()                       # new + undescribed → prompt
+        assert opened == ["t:1"]
+        w._maybe_prompt_device_meta()                       # already prompted → no repeat
+        assert opened == ["t:1"]
+
+        d2 = _meta_dev("t:2", "SN-2")
+        w.manager._active[d2.instance_id] = d2
+        w._devmeta.set("SN-2", {"notes": "already described"})
+        w._maybe_prompt_device_meta()                       # described → seen, not nagged
+        assert opened == ["t:1"] and "SN-2" in w._prompted_meta
+    finally:
+        w.close()
