@@ -2329,6 +2329,8 @@ class MainWindow(QMainWindow):
         filemenu.addSeparator()
         filemenu.addAction("Add Layout…", self._on_add_layout)
         filemenu.addAction("Open Layout…", self._on_open)
+        filemenu.addSeparator()
+        filemenu.addAction("Back up project…", self._backup_project)
 
         projmenu = self.menuBar().addMenu("&Project")
         projmenu.addAction("Checkpoint…", self._checkpoint)
@@ -3992,6 +3994,37 @@ class MainWindow(QMainWindow):
             self, "Open Layout", start, "ferroDAC layout (*.json)")
         if path:
             self._open_layout(path)
+
+    def _backup_project(self) -> None:
+        """File ▸ Back up project — write a self-contained .zip of the active project
+        (readable metadata + an invisible git history bundle) to a user-chosen path.
+        Read-only by being a zip; measurements are not included (DESIGN §20.2)."""
+        from qtpy.QtWidgets import QApplication
+        p = self._project_mgr.active if self._project_mgr else None
+        if p is None:
+            self.statusBar().showMessage("No active project to back up.", 5000)
+            return
+        s = QSettings("ferroDAC", "ferroDAC")
+        last = s.value("backup/dir", "", type=str) or self._app_dir()
+        safe = (p.name or "project").replace("/", "_").replace("\\", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Back up project", os.path.join(last, f"{safe}.zip"),
+            "ferroDAC backup (*.zip)")
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        s.setValue("backup/dir", os.path.dirname(path))
+        from ..core.archive import archive_project
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            archive_project(p, path)
+        except Exception as exc:                       # noqa: BLE001
+            self.statusBar().showMessage(f"Backup failed: {exc}", 8000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.statusBar().showMessage(f"Backed up “{p.name}” → {path}", 8000)
 
     @staticmethod
     def _remember(path: str) -> None:

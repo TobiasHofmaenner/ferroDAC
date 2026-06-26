@@ -1706,3 +1706,26 @@ def test_device_meta_prompt_on_add(qapp, tmp_path, monkeypatch):
         assert opened == ["t:1"] and "SN-2" in w._prompted_meta
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_backup_project_action(qapp, tmp_path, monkeypatch):
+    """File ▸ Back up project writes a self-contained zip of the active project's
+    metadata to the chosen path."""
+    import os
+    import zipfile
+    from qtpy.QtWidgets import QFileDialog
+    w = _mainwindow(qapp)
+    try:
+        p = w._project_mgr.active
+        assert p is not None
+        open(p.layout_path("overview"), "w").write('{"layout": {"panels": []}}')
+        dest = str(tmp_path / "backup.zip")
+        monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                            staticmethod(lambda *a, **k: (dest, "")))
+        w._backup_project()
+        assert os.path.exists(dest)
+        with zipfile.ZipFile(dest) as z:
+            assert any(n.endswith("overview.json") for n in z.namelist())
+    finally:
+        w.close()

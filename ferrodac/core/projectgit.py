@@ -79,6 +79,22 @@ class ProjectRepo:
             log.warning("project commit failed in %s: %s", self.path, exc)
             return None
 
+    def bundle(self, dest: str) -> bool:
+        """Pack the WHOLE repo (all refs + full history) into a single bundle file at
+        `dest` — a self-contained git repo in one file, for the archival backup
+        (DESIGN §20.2). Returns False if git is missing or nothing is committed yet."""
+        if not self.is_repo():
+            return False
+        try:
+            self._git("bundle", "create", dest, "--all")
+            return True
+        except FileNotFoundError:
+            log.warning("git not installed — history bundle skipped")
+            return False
+        except Exception as exc:                # noqa: BLE001 — empty repo / failure
+            log.warning("project bundle failed in %s: %s", self.path, exc)
+            return False
+
     # -- remote (push / pull to any git URL — the "native" dial) -------------
     def remote_url(self) -> str:
         if not self.is_repo():
