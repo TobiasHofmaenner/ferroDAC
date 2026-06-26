@@ -1018,3 +1018,204 @@ class Store:
             timeout,
             metadata,
             _registered_method=True)
+
+
+class BackupStub:
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.ListBackupFolders = channel.unary_unary(
+                '/ferrodac_contract.v1.Backup/ListBackupFolders',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ListFoldersRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.FolderList.FromString,
+                _registered_method=True)
+        self.SetProjectBackup = channel.unary_unary(
+                '/ferrodac_contract.v1.Backup/SetProjectBackup',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SetBackupRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.BackupInfo.FromString,
+                _registered_method=True)
+        self.GetProjectBackup = channel.unary_unary(
+                '/ferrodac_contract.v1.Backup/GetProjectBackup',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.GetBackupRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.BackupInfo.FromString,
+                _registered_method=True)
+        self.DownloadProject = channel.unary_stream(
+                '/ferrodac_contract.v1.Backup/DownloadProject',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DownloadRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.FileChunk.FromString,
+                _registered_method=True)
+
+
+class BackupServicer:
+    """Missing associated documentation comment in .proto file."""
+
+    def ListBackupFolders(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetProjectBackup(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetProjectBackup(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DownloadProject(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_BackupServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'ListBackupFolders': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListBackupFolders,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ListFoldersRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.FolderList.SerializeToString,
+            ),
+            'SetProjectBackup': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetProjectBackup,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SetBackupRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.BackupInfo.SerializeToString,
+            ),
+            'GetProjectBackup': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetProjectBackup,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.GetBackupRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.BackupInfo.SerializeToString,
+            ),
+            'DownloadProject': grpc.unary_stream_rpc_method_handler(
+                    servicer.DownloadProject,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.DownloadRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.FileChunk.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'ferrodac_contract.v1.Backup', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('ferrodac_contract.v1.Backup', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class Backup:
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def ListBackupFolders(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Backup/ListBackupFolders',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.ListFoldersRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.FolderList.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetProjectBackup(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Backup/SetProjectBackup',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.SetBackupRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.BackupInfo.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetProjectBackup(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Backup/GetProjectBackup',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.GetBackupRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.BackupInfo.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DownloadProject(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ferrodac_contract.v1.Backup/DownloadProject',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.DownloadRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.FileChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

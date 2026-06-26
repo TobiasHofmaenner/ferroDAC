@@ -328,3 +328,73 @@ class StoreServicer(rpc.StoreServicer):
             except Exception:                       # noqa: BLE001
                 pass
         return pb.RawTrace(blocks=blocks)
+
+
+class BackupServicer(rpc.BackupServicer):
+    """Project backup admin (DESIGN §20): browse the backend folder tree, point a
+    project at a folder (claiming an existing backup if the marker matches), and
+    download a project as a self-contained zip. All work runs in an executor — the
+    mirror/zip is blocking file I/O. Allow-all auth like the other services."""
+
+    def __init__(self, hub: Hub):
+        self.hub = hub
+
+    def _backup(self):
+        return getattr(self.hub, "_backup", None)
+
+    async def ListBackupFolders(self, request, context):  # noqa: N802
+        b = self._backup()
+        if b is None:
+            return pb.FolderList(path=request.path)
+        loop = asyncio.get_running_loop()
+        folders = await loop.run_in_executor(None, b.list_folders, request.path)
+        return pb.FolderList(path=request.path, folders=[
+            pb.BackupFolder(name=f["name"], path=f["path"], project_id=f["project_id"],
+                            project_name=f["project_name"], has_children=f["has_children"])
+            for f in folders])
+
+    async def SetProjectBackup(self, request, context):  # noqa: N802
+        b = self._backup()
+        if b is None:
+            return pb.BackupInfo(ok=False, detail="Backup is not configured on this hub.")
+        pid = request.project_id
+        rec = self.hub._projects.get(pid)
+        name = rec.name if rec is not None else ""
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(None, b.set_folder, pid, name, request.folder)
+        if res["ok"]:
+            await loop.run_in_executor(None, b.mirror, pid, name)   # populate it now
+        return pb.BackupInfo(ok=res["ok"], detail=res["detail"], claimed=res["claimed"],
+                             folder=res["folder"], last_backup=b.last_backup(pid))
+
+    async def GetProjectBackup(self, request, context):  # noqa: N802
+        b = self._backup()
+        if b is None:
+            return pb.BackupInfo(ok=False, detail="Backup is not configured on this hub.")
+        pid = request.project_id
+        return pb.BackupInfo(ok=True, folder=b.folder_of(pid), last_backup=b.last_backup(pid))
+
+    async def DownloadProject(self, request, context):  # noqa: N802
+        import os
+        import shutil
+        import tempfile
+
+        import grpc
+        b = self._backup()
+        if b is None:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "Backup not configured")
+        work = tempfile.mkdtemp(prefix="ferrodac-dl-")
+        loop = asyncio.get_running_loop()
+        try:
+            path = await loop.run_in_executor(
+                None, b.make_zip, request.project_id, os.path.join(work, "project.zip"))
+            if not path:
+                await context.abort(grpc.StatusCode.NOT_FOUND, "Unknown project")
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(1 << 20)        # 1 MiB frames
+                    if not chunk:
+                        break
+                    yield pb.FileChunk(data=chunk)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
