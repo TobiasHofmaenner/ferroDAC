@@ -10,6 +10,7 @@ server-side.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -21,6 +22,25 @@ from .projectgit import ProjectRepo
 log = logging.getLogger("ferrodac.archive")
 
 HISTORY_NAME = "history.bundle"
+
+
+def project_signature(path: str) -> str:
+    """A cheap content signature of a project folder (each file's relpath + mtime +
+    size, excluding ``.git/``). Lets a caller skip re-archiving an unchanged project —
+    so an auto-backup doesn't churn an identical zip (and re-sync a backend needlessly)."""
+    h = hashlib.sha1()
+    for root, dirs, files in os.walk(path):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for name in sorted(files):
+            full = os.path.join(root, name)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            h.update(os.path.relpath(full, path).encode("utf-8", "replace"))
+            h.update(f"\0{int(st.st_mtime)}:{st.st_size}\0".encode())
+    return h.hexdigest()
 
 
 def archive_project(project, dest: str, include_history: bool = True) -> str:

@@ -83,6 +83,12 @@ def _projects_dir():
         if store_dir else None
 
 
+def _backup_dir():
+    """Where the hub mirrors project folders for durable backup (DESIGN §20). A server
+    path now (a mounted Nextcloud folder later). Off unless HUB_BACKUP_DIR is set."""
+    return os.environ.get("HUB_BACKUP_DIR") or None
+
+
 def _gitea():
     """Transparent dial (DESIGN §8.2): if a bundled Gitea is configured, the hub
     auto-provisions a repo per project. Off unless GITEA_URL + GITEA_TOKEN are set."""
@@ -98,13 +104,27 @@ def _gitea():
     return g
 
 
+async def _backup_loop(hub, interval: float = 30.0) -> None:
+    """Periodically flush queued project backups (off the event loop — the mirror is
+    blocking file I/O). Runs an initial pass immediately so a restart re-mirrors."""
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            await loop.run_in_executor(None, hub.flush_backups)
+        except Exception as exc:                     # noqa: BLE001 — never kill the loop
+            log.warning("backup flush failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
 async def serve() -> None:
-    hub = Hub(tags_path=_tags_path(), projects_dir=_projects_dir(), gitea=_gitea())
+    hub = Hub(tags_path=_tags_path(), projects_dir=_projects_dir(), gitea=_gitea(),
+              backup_dir=_backup_dir())
     server, _ = build_server(hub=hub, store=_open_store(os.environ.get("HUB_STORE_DIR")))
     addr = os.environ.get("HUB_GRPC_ADDR", "0.0.0.0:50051")
     server.add_insecure_port(addr)
     await server.start()
     log.info("ferroDAC hub %s listening on %s (gRPC, insecure)", HUB_VERSION, addr)
+    backup_task = asyncio.create_task(_backup_loop(hub)) if _backup_dir() else None
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -115,6 +135,9 @@ async def serve() -> None:
             pass
     await stop.wait()
     log.info("shutting down…")
+    if backup_task is not None:
+        backup_task.cancel()
+        hub.flush_backups()                          # final backup before we go
     await server.stop(grace=2.0)
 
 

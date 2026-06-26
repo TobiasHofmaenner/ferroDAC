@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 
 from google.protobuf import json_format
 
@@ -91,7 +92,8 @@ class DocRoom:
 
 class Hub:
     def __init__(self, tags_path: "str | None" = None,
-                 projects_dir: "str | None" = None, gitea=None) -> None:
+                 projects_dir: "str | None" = None, gitea=None,
+                 backup_dir: "str | None" = None) -> None:
         self.gitea = gitea                          # transparent dial: auto-provision repos
         self._devices: dict[str, pb.DeviceDescriptor] = {}
         self._subs: set[Subscriber] = set()
@@ -116,6 +118,16 @@ class Hub:
         self._project_watchers: set[asyncio.Queue] = set()
         self._projects_dir = projects_dir
         self._load_projects()
+        # Authoritative project backup (DESIGN §20): the hub mirrors each project folder
+        # one-way + incrementally into a backend dir. Off unless backup_dir is set.
+        self._backup = None
+        self._backup_dirty: set[str] = set()
+        self._backup_lock = threading.Lock()
+        if backup_dir and projects_dir:
+            from .backup import ProjectBackup
+            self._backup = ProjectBackup(projects_dir, backup_dir)
+            self._backup_dirty = set(self._projects)     # initial full mirror on startup
+            log.info("project backup → %s", backup_dir)
         # Docs (DESIGN §10.x): live collaborative-editing rooms keyed by doc_id.
         # The hub is a DUMB relay of opaque Yjs bytes — it never parses them. Rooms
         # live in RAM (fan-out cache); durability is the .ycrdt baseline + the
@@ -291,6 +303,20 @@ class Hub:
             Project(os.path.join(self._projects_dir, project.id)).apply_record(rec)
         except Exception as exc:                     # noqa: BLE001
             log.warning("could not write project folder %s: %s", project.id, exc)
+        if self._backup is not None:                 # queue an incremental backup
+            with self._backup_lock:
+                self._backup_dirty.add(project.id)
+
+    def flush_backups(self) -> None:
+        """Mirror any projects queued since the last flush — blocking file I/O, so the
+        hub runs this in an executor off the event loop (main._backup_loop)."""
+        if self._backup is None:
+            return
+        with self._backup_lock:
+            pending, self._backup_dirty = self._backup_dirty, set()
+        for pid in pending:
+            rec = self._projects.get(pid)
+            self._backup.mirror(pid, rec.name if rec is not None else "")
 
     def _remove_project_folder(self, project_id: str) -> None:
         if not self._projects_dir:

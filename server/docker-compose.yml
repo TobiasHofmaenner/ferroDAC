@@ -26,6 +26,8 @@ services:
     environment:
       HUB_GRPC_ADDR: "0.0.0.0:50051"
       HUB_STORE_DIR: "/data/hub.zarr"   # sync target + read tier (§12.1)
+      HUB_BACKUP_DIR: "/backups"        # authoritative project backup mirror (§20); a
+      #                                   server path now, a mounted Nextcloud folder later
       # transparent git dial (optional — empty GITEA_TOKEN disables it):
       GITEA_URL: "${GITEA_URL:-http://gitea:3000}"  # API base the HUB reaches Gitea at
       GITEA_PUBLIC_URL: "${GITEA_PUBLIC_URL:-http://localhost:3000}"  # what CLIENTS reach
@@ -34,6 +36,7 @@ services:
       GITEA_USER: "${GITEA_USER:-ferrodac}"     # the token's OWNER (used in the clone URL)
     volumes:
       - hub-data:/data         # persist the hub's store across restarts
+      - hub-backups:/backups   # project backup mirror (swap for a Nextcloud mount later)
     extra_hosts:
       - "host.docker.internal:host-gateway"   # so GITEA_URL can be a Gitea on the host
     restart: unless-stopped
@@ -58,4 +61,5 @@ services:
 
 volumes:
   hub-data:
+  hub-backups:
   gitea-data:
