@@ -106,15 +106,19 @@ def test_set_folder_rejects_other_projects_folder(tmp_path):
     assert res["ok"] is False and "backs up" in res["detail"]
 
 
-def test_set_folder_reassign_drops_old_marker(tmp_path):
+def test_set_folder_reassign_moves_and_clears_old(tmp_path):
     projects, backup = tmp_path / "projects", tmp_path / "backup"
     _mk_project(str(projects), "p1")
     backup.mkdir()
     b = ProjectBackup(str(projects), str(backup))
     b.set_folder("p1", "P", "a")
+    b.mirror("p1", "P")                                 # populate "a"
+    assert (backup / "a" / "project.json").exists()
     b.set_folder("p1", "P", "b")                        # move a → b
     assert b.folder_of("p1") == "b"
-    assert not (backup / "a" / MARKER).exists()         # old marker gone → no double-claim
+    assert not (backup / "a").exists()                  # old backup removed → no double-claim
+    # a fresh scan resolves to "b" only (no ambiguity)
+    assert ProjectBackup(str(projects), str(backup)).folder_of("p1") == "b"
 
 
 def test_set_folder_rejects_escape(tmp_path):

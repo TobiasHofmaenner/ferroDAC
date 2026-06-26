@@ -59,12 +59,18 @@ class ProjectBackup:
         with self._gate:
             self._map = found
 
-    def folder_of(self, pid: str) -> str:
+    def _mapped(self, pid: str) -> str:
+        """Raw mapped folder (may be the default <id>) — internal bookkeeping."""
         with self._gate:
             return self._map.get(pid, "")
 
+    def folder_of(self, pid: str) -> str:
+        """The EXPLICITLY chosen folder, or '' when the project uses the auto default."""
+        f = self._mapped(pid)
+        return "" if f == pid else f
+
     def dest_for(self, pid: str) -> str:
-        rel = self.folder_of(pid) or pid        # mapped folder, else default <id>
+        rel = self._mapped(pid) or pid          # mapped folder, else default <id>
         return os.path.join(self.backup_dir, rel)
 
     def last_backup(self, pid: str) -> str:
@@ -135,12 +141,11 @@ class ProjectBackup:
         elif os.path.isdir(target) and _has_content(target):
             return {"ok": False, "claimed": False, "folder": "",
                     "detail": "That folder isn't empty and isn't a ferroDAC backup."}
-        old = self.folder_of(pid)               # reassigning? drop the old marker (no double-claim)
+        old = self._mapped(pid)                 # reassigning? drop the superseded copy
         if old and self._norm_rel(old) != rel:
-            try:
-                os.remove(os.path.join(self.backup_dir, old, MARKER))
-            except OSError:
-                pass
+            old_abs = os.path.join(self.backup_dir, old)
+            if _read_marker(os.path.join(old_abs, MARKER)).get("id") == pid:
+                shutil.rmtree(old_abs, ignore_errors=True)   # it's this project's old backup
         os.makedirs(target, exist_ok=True)
         self._write_marker(target, pid, name)
         self._refresh_map()
@@ -170,6 +175,8 @@ class ProjectBackup:
                 os.makedirs(dst, exist_ok=True)
                 changed = _mirror_tree(src, dst, keep={MARKER})
                 self._write_marker(dst, pid, name)
+            with self._gate:                        # keep the map current (avoid stale scans)
+                self._map[pid] = os.path.relpath(dst, self.backup_dir)
             return changed
         except Exception as exc:                     # noqa: BLE001 — never break the hub
             log.warning("backup mirror failed for %s: %s", pid, exc)
