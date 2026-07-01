@@ -77,3 +77,115 @@ def test_hub_flushes_queued_backups(tmp_path):
     hub.flush_backups()
     assert (backup / "p1" / "project.json").exists()
     assert hub.flush_backups() is None and not (backup / "p1.tmp").exists()
+
+
+# -- Phase 2: per-project folder pick + claim + download -----------------------
+def test_set_folder_assigns_claims_and_maps(tmp_path):
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    _mk_project(str(projects), "p1")
+    backup.mkdir()
+    b = ProjectBackup(str(projects), str(backup))
+    # assign a fresh nested folder → mapped + marker written
+    res = b.set_folder("p1", "P", "experiments/rga")
+    assert res["ok"] and not res["claimed"] and res["folder"] == "experiments/rga"
+    assert b.folder_of("p1") == "experiments/rga"
+    assert b.dest_for("p1").endswith(os.path.join("experiments", "rga"))
+    # a fresh ProjectBackup rebuilds the SAME map by scanning the marker (no state file)
+    assert ProjectBackup(str(projects), str(backup)).folder_of("p1") == "experiments/rga"
+    # re-pointing the same project at the same folder → claim (re-attach)
+    assert b.set_folder("p1", "P", "experiments/rga")["claimed"] is True
+
+
+def test_set_folder_rejects_other_projects_folder(tmp_path):
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    _mk_project(str(projects), "p1")
+    backup.mkdir()
+    b = ProjectBackup(str(projects), str(backup))
+    b.set_folder("p1", "P1", "shared")
+    res = b.set_folder("p2", "P2", "shared")           # p2 tries p1's folder
+    assert res["ok"] is False and "backs up" in res["detail"]
+
+
+def test_set_folder_reassign_moves_and_clears_old(tmp_path):
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    _mk_project(str(projects), "p1")
+    backup.mkdir()
+    b = ProjectBackup(str(projects), str(backup))
+    b.set_folder("p1", "P", "a")
+    b.mirror("p1", "P")                                 # populate "a"
+    assert (backup / "a" / "project.json").exists()
+    b.set_folder("p1", "P", "b")                        # move a → b
+    assert b.folder_of("p1") == "b"
+    assert not (backup / "a").exists()                  # old backup removed → no double-claim
+    # a fresh scan resolves to "b" only (no ambiguity)
+    assert ProjectBackup(str(projects), str(backup)).folder_of("p1") == "b"
+
+
+def test_folder_paths_stay_forward_slash(tmp_path):
+    """Backend folders are LOGICAL, forward-slash paths (they cross the wire + go in
+    markers) regardless of the server OS — a backslash/mixed input normalises to '/'."""
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    backup.mkdir()
+    b = ProjectBackup(str(projects), str(backup))
+    res = b.set_folder("p1", "P", "experiments\\rga")       # Windows-style input
+    assert res["ok"] and res["folder"] == "experiments/rga"
+    assert b.folder_of("p1") == "experiments/rga"           # never a backslash on the wire
+    assert b._norm_rel("a/b/../c") == "a/c"                 # logical normalisation
+    assert b._norm_rel("/abs") == "abs"                    # leading slash stripped, still confined
+    assert b._norm_rel("../escape") is None                # parent escape → reject
+    assert b._norm_rel("C:\\Windows") is None              # drive-letter / absolute → reject
+
+
+def test_set_folder_rejects_escape(tmp_path):
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    _mk_project(str(projects), "p1")
+    backup.mkdir()
+    b = ProjectBackup(str(projects), str(backup))
+    assert b.set_folder("p1", "P", "../../etc")["ok"] is False
+
+
+def test_list_folders_tags_claims(tmp_path):
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    _mk_project(str(projects), "p1")
+    backup.mkdir()
+    (backup / "experiments").mkdir()                    # an organizational folder
+    b = ProjectBackup(str(projects), str(backup))
+    b.set_folder("p1", "MyProj", "experiments/rga")
+    listing = {f["name"]: f for f in b.list_folders("experiments")}
+    assert listing["rga"]["project_id"] == "p1" and listing["rga"]["project_name"] == "MyProj"
+
+
+def test_make_zip_download(tmp_path):
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    _mk_project(str(projects), "p1")
+    backup.mkdir()
+    b = ProjectBackup(str(projects), str(backup))
+    dest = str(tmp_path / "dl.zip")
+    assert b.make_zip("p1", dest) == dest
+    import zipfile
+    with zipfile.ZipFile(dest) as z:
+        assert "project.json" in z.namelist()
+    assert b.make_zip("nope", str(tmp_path / "x.zip")) is None
+
+
+def test_backup_servicer_set_get_list(tmp_path):
+    import asyncio
+    from ferrodac_contract.v1 import data_plane_pb2 as pb
+    from hub.core import Hub
+    from hub.service import BackupServicer
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    _mk_project(str(projects), "p1")
+    backup.mkdir()
+    svc = BackupServicer(Hub(projects_dir=str(projects), backup_dir=str(backup)))
+
+    async def run():
+        r = await svc.SetProjectBackup(
+            pb.SetBackupRequest(project_id="p1", folder="experiments/rga"), None)
+        assert r.ok and r.folder == "experiments/rga"
+        g = await svc.GetProjectBackup(pb.GetBackupRequest(project_id="p1"), None)
+        assert g.folder == "experiments/rga" and g.last_backup        # mirrored just now
+        lst = await svc.ListBackupFolders(pb.ListFoldersRequest(path="experiments"), None)
+        assert any(f.name == "rga" and f.project_id == "p1" for f in lst.folders)
+
+    asyncio.run(run())
+    assert (backup / "experiments" / "rga" / "project.json").exists()   # mirrored content

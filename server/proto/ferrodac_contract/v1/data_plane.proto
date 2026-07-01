@@ -571,3 +571,64 @@ service Store {
   rpc ReadRaw(RawRequest) returns (RawScalar);
   rpc ReadRawTrace(RawRequest) returns (RawTrace);   // full-res trace scans
 }
+
+// --------------------------------------------------------------------------- //
+//  Backup — the hub is the AUTHORITATIVE project-backup writer (DESIGN §20).
+// --------------------------------------------------------------------------- //
+// The hub mirrors each project folder one-way + incrementally into a backend dir
+// (a server path; a Nextcloud mount later). The client picks a per-project backend
+// SUBFOLDER (browsed via ListBackupFolders); the chosen folder is self-identifying
+// via a marker file, so the id->folder map is rebuilt by SCANNING markers — no
+// separate state. A client may also DOWNLOAD a project as a self-contained zip.
+// Role-independent and ADDITIVE, like Tags/Projects.
+
+message BackupFolder {
+  string name = 1;               // folder name at this level
+  string path = 2;               // path relative to the backend root
+  string project_id = 3;         // non-empty if it already backs up a project (claimed)
+  string project_name = 4;       // the claimed project's name (display)
+  bool has_children = 5;         // there are sub-folders to drill into
+}
+
+message ListFoldersRequest {
+  string token = 1;              // reserved auth seam (allow-all in M1)
+  string path = 2;               // relative path under the root to list (empty = root)
+}
+
+message FolderList {
+  string path = 1;               // the listed path (echoed)
+  repeated BackupFolder folders = 2;
+}
+
+message SetBackupRequest {
+  string token = 1;
+  string project_id = 2;
+  string folder = 3;             // chosen path relative to the root
+}
+
+message GetBackupRequest {
+  string token = 1;
+  string project_id = 2;
+}
+
+message BackupInfo {
+  bool ok = 1;
+  string detail = 2;             // human reason (e.g. why a claim was rejected)
+  bool claimed = 3;              // true = adopted an existing backup at that folder
+  string folder = 4;             // the project's current backend folder (relative), "" if none
+  string last_backup = 5;        // ISO-8601 UTC of the last mirror, "" if never
+}
+
+message DownloadRequest {
+  string token = 1;
+  string project_id = 2;
+}
+
+message FileChunk { bytes data = 1; }
+
+service Backup {
+  rpc ListBackupFolders(ListFoldersRequest) returns (FolderList);
+  rpc SetProjectBackup(SetBackupRequest) returns (BackupInfo);
+  rpc GetProjectBackup(GetBackupRequest) returns (BackupInfo);
+  rpc DownloadProject(DownloadRequest) returns (stream FileChunk);
+}

@@ -38,7 +38,7 @@ hiddenimports = collect_submodules("ferrodac")
 # the sim devices) were never bundled and the app saw zero devices. List the
 # builtin drivers explicitly so they're guaranteed in the frozen app regardless.
 hiddenimports += [f"ferrodac.devices.{m}"
-                  for m in ("camera", "fake", "qms200", "tpg256a")]
+                  for m in ("camera", "fake", "keithley6221", "qms200", "tpg256a")]
 # pyqtgraph loads a lot lazily; include its submodules but skip the optional 3D
 # OpenGL package (needs PyOpenGL, which we don't use).
 hiddenimports += collect_submodules(

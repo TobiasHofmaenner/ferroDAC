@@ -16,6 +16,7 @@ from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
 from .core import HUB_VERSION, Hub
 from .service import (
+    BackupServicer,
     DocsServicer,
     IngestServicer,
     ProjectsServicer,
@@ -59,6 +60,7 @@ def build_server(hub: "Hub | None" = None, store=None
     rpc.add_ProjectsServicer_to_server(ProjectsServicer(hub), server)
     rpc.add_DocsServicer_to_server(DocsServicer(hub), server)
     rpc.add_StoreServicer_to_server(StoreServicer(store), server)
+    rpc.add_BackupServicer_to_server(BackupServicer(hub), server)
     return server, hub
 
 

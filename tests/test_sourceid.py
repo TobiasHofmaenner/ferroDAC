@@ -3,6 +3,8 @@ live AND historic sources, with graceful fallback for old stores."""
 import os
 import types
 
+import pytest
+
 from ferrodac.core.sourceid import compose_label, resolve_source
 from ferrodac.store import ZarrStore
 
@@ -47,6 +49,7 @@ def test_resolve_old_store_degrades_to_bare(tmp_path):
     assert info.device_name == "" and info.label == "ch1"
 
 
+@pytest.mark.ui   # imports ferrodac.ui.workspace (qtpy) — runs in the UI job, not the data-plane job
 def test_historic_sourceport_label_guard_includes_historic():
     """A historic SourcePort (kind='historic') with a device origin device-qualifies
     its label — the bare-'ch1' fix (the guard previously excluded 'historic')."""

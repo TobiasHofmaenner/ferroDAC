@@ -27,22 +27,152 @@ MARKER = "ferrodac-project.json"          # self-identifying; survives the stric
 
 
 class ProjectBackup:
-    """Mirrors hub project folders (``projects_dir/<id>``) into ``backup_dir/<id>/``."""
+    """Mirrors hub project folders (``projects_dir/<id>``) into the backend.
+
+    The per-project backend SUBFOLDER is chosen by the client (Phase 2) and recorded by
+    a ``ferrodac-project.json`` marker in that folder — so the ``id -> folder`` map is
+    rebuilt by SCANNING markers, never a separate state file. Unmapped projects default
+    to ``backup_dir/<id>/`` (Phase 1)."""
 
     def __init__(self, projects_dir: str, backup_dir: str) -> None:
         self.projects_dir = projects_dir
         self.backup_dir = backup_dir
         self._locks: dict[str, threading.Lock] = {}
         self._gate = threading.Lock()
+        self._map: dict[str, str] = {}          # project id -> folder (relative to root)
+        self._refresh_map()
 
     def _plock(self, pid: str) -> threading.Lock:
         with self._gate:
             return self._locks.setdefault(pid, threading.Lock())
 
+    def _fs(self, rel: str) -> str:
+        """A forward-slash LOGICAL folder path (relative to root) -> a filesystem path.
+        Backend folders are logical paths (they cross the wire + go in markers), always
+        '/'-separated; only here do we map to the OS separator."""
+        return os.path.join(self.backup_dir, *rel.split("/")) if rel else self.backup_dir
+
+    # -- folder map (rebuilt by scanning markers) ----------------------------
+    def _refresh_map(self) -> None:
+        found: dict[str, str] = {}
+        for cur, dirs, files in os.walk(self.backup_dir):
+            if MARKER in files:
+                m = _read_marker(os.path.join(cur, MARKER))
+                pid = m.get("id")
+                if pid:
+                    rel = os.path.relpath(cur, self.backup_dir).replace(os.sep, "/")
+                    found.setdefault(pid, "" if rel == "." else rel)
+                dirs[:] = []                    # a project backup — don't recurse below it
+        with self._gate:
+            self._map = found
+
+    def _mapped(self, pid: str) -> str:
+        """Raw mapped folder (may be the default <id>) — internal bookkeeping."""
+        with self._gate:
+            return self._map.get(pid, "")
+
+    def folder_of(self, pid: str) -> str:
+        """The EXPLICITLY chosen folder, or '' when the project uses the auto default."""
+        f = self._mapped(pid)
+        return "" if f == pid else f
+
     def dest_for(self, pid: str) -> str:
-        # Phase 1: key the backend folder by project id (collision-free). Phase 2 lets
-        # the operator pick a human-named folder + claim an existing one.
-        return os.path.join(self.backup_dir, pid)
+        rel = self._mapped(pid) or pid          # mapped folder, else default <id>
+        return self._fs(rel)
+
+    def last_backup(self, pid: str) -> str:
+        """ISO-8601 UTC mtime of the project's marker (when it last mirrored), '' if never."""
+        marker = os.path.join(self.dest_for(pid), MARKER)
+        try:
+            ts = os.path.getmtime(marker)
+        except OSError:
+            return ""
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+
+    # -- picker / claim (Phase 2) --------------------------------------------
+    def _norm_rel(self, relpath: str):
+        """Normalise a picker path to a forward-slash LOGICAL folder (relative to root),
+        or None if it escapes the root / is absolute. OS-independent."""
+        import posixpath
+        rel = posixpath.normpath((relpath or "").strip().replace("\\", "/").strip("/"))
+        if rel in (".", ""):
+            return ""
+        if (rel == ".." or rel.startswith("../") or rel.startswith("/")
+                or (len(rel) > 1 and rel[1] == ":")):     # abs / drive-letter / escape
+            return None
+        abs_target = os.path.abspath(self._fs(rel))
+        if not abs_target.startswith(os.path.abspath(self.backup_dir) + os.sep):
+            return None                          # outside the root
+        return rel
+
+    def list_folders(self, relpath: str = "") -> list:
+        """Subfolders under `relpath` (relative to the root) for the picker, each tagged
+        with the project it backs up (if any) and whether it has sub-folders to drill into."""
+        rel = self._norm_rel(relpath)
+        if rel is None:
+            return []
+        base = self._fs(rel)
+        out = []
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            return []
+        for name in names:
+            full = os.path.join(base, name)
+            if not os.path.isdir(full):
+                continue
+            m = _read_marker(os.path.join(full, MARKER))
+            try:
+                kids = any(os.path.isdir(os.path.join(full, c)) for c in os.listdir(full))
+            except OSError:
+                kids = False
+            out.append({"name": name, "path": (f"{rel}/{name}" if rel else name),
+                        "project_id": m.get("id", ""), "project_name": m.get("name", ""),
+                        "has_children": kids and not m})   # don't drill into a project backup
+        return out
+
+    def set_folder(self, pid: str, name: str, folder: str) -> dict:
+        """Point project `pid`'s backup at `folder` (relative to the root). Empty/new →
+        assign; an existing marker for THIS project → claim (re-attach); a marker for a
+        DIFFERENT project → reject (never clobber). Returns {ok, claimed, detail, folder}."""
+        rel = self._norm_rel(folder)
+        if rel is None or rel == "":
+            return {"ok": False, "claimed": False, "folder": "",
+                    "detail": "Pick a folder inside the backup area."}
+        target = self._fs(rel)
+        marker = os.path.join(target, MARKER)
+        claimed = False
+        if os.path.isfile(marker):
+            m = _read_marker(marker)
+            if m.get("id") and m.get("id") != pid:
+                return {"ok": False, "claimed": False, "folder": "",
+                        "detail": f"That folder already backs up “{m.get('name') or m['id']}”."}
+            claimed = True
+        elif os.path.isdir(target) and _has_content(target):
+            return {"ok": False, "claimed": False, "folder": "",
+                    "detail": "That folder isn't empty and isn't a ferroDAC backup."}
+        old = self._mapped(pid)                 # reassigning? drop the superseded copy
+        if old and self._norm_rel(old) != rel:
+            old_abs = self._fs(old)
+            if _read_marker(os.path.join(old_abs, MARKER)).get("id") == pid:
+                shutil.rmtree(old_abs, ignore_errors=True)   # it's this project's old backup
+        os.makedirs(target, exist_ok=True)
+        self._write_marker(target, pid, name)
+        self._refresh_map()
+        return {"ok": True, "claimed": claimed, "folder": rel,
+                "detail": "Re-attached to the existing backup." if claimed
+                          else "Backup folder set."}
+
+    def make_zip(self, pid: str, dest: str):
+        """Generate a self-contained download zip of a project (files + history.bundle)
+        from the hub's project folder. Returns dest, or None if unknown."""
+        src = os.path.join(self.projects_dir, pid)
+        if not os.path.isdir(src):
+            return None
+        import types
+        from ferrodac.core.archive import archive_project
+        return archive_project(types.SimpleNamespace(path=src), dest)
 
     def mirror(self, pid: str, name: str = "") -> bool:
         """Incrementally mirror project `pid` to the backend. Returns True if anything
@@ -50,12 +180,15 @@ class ProjectBackup:
         src = os.path.join(self.projects_dir, pid)
         if not os.path.isdir(src):
             return False
-        dst = self.dest_for(pid)
+        rel = self._mapped(pid) or pid              # the LOGICAL folder (forward-slash, or the id)
+        dst = self._fs(rel)
         try:
             with self._plock(pid):
                 os.makedirs(dst, exist_ok=True)
                 changed = _mirror_tree(src, dst, keep={MARKER})
                 self._write_marker(dst, pid, name)
+            with self._gate:                        # keep the map current (logical, never OS-sep)
+                self._map[pid] = rel
             return changed
         except Exception as exc:                     # noqa: BLE001 — never break the hub
             log.warning("backup mirror failed for %s: %s", pid, exc)
@@ -104,6 +237,23 @@ def _mirror_tree(src: str, dst: str, keep=frozenset()) -> bool:
             changed = True
     _prune_empty_dirs(dst)
     return changed
+
+
+def _read_marker(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _has_content(path: str) -> bool:
+    """True if the dir holds anything other than our marker (so we never pollute it)."""
+    try:
+        return any(n != MARKER for n in os.listdir(path))
+    except OSError:
+        return False
 
 
 def _differs(src: str, dst: str) -> bool:

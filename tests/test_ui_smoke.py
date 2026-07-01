@@ -1709,6 +1709,43 @@ def test_device_meta_prompt_on_add(qapp, tmp_path, monkeypatch):
 
 
 @pytest.mark.ui
+def test_backup_folder_dialog_browse_and_set(qapp):
+    """The hub-backup folder picker lazy-loads the tree and SetProjectBackup is called
+    with the chosen path on 'Use this folder'."""
+    from ferrodac.ui.app import BackupFolderDialog
+
+    class FakeClient:
+        def __init__(self):
+            self.set_args = None
+        def list_folders(self, path=""):
+            if path == "":
+                return [{"name": "experiments", "path": "experiments", "project_id": "",
+                         "project_name": "", "has_children": True}]
+            return [{"name": "rga", "path": "experiments/rga", "project_id": "",
+                     "project_name": "", "has_children": False}]
+        def set_folder(self, pid, folder):
+            self.set_args = (pid, folder)
+            return {"ok": True, "claimed": False, "folder": folder,
+                    "detail": "set", "last_backup": ""}
+
+    client = FakeClient()
+    dlg = BackupFolderDialog(client, "p1", "Proj")
+    try:
+        root = dlg._tree.invisibleRootItem()
+        assert root.childCount() == 1                      # "experiments" from list_folders("")
+        exp = root.child(0)
+        exp.setExpanded(True)                              # lazy-load → "rga"
+        assert exp.childCount() == 1 and "rga" in exp.child(0).text(0)
+        dlg._tree.setCurrentItem(exp.child(0))
+        assert dlg._selected == "experiments/rga"
+        dlg._use()
+        assert client.set_args == ("p1", "experiments/rga")
+        assert "Backing up to" in dlg.result_detail
+    finally:
+        dlg.deleteLater()
+
+
+@pytest.mark.ui
 def test_backup_project_action(qapp, tmp_path, monkeypatch):
     """File ▸ Back up project writes a self-contained zip of the active project's
     metadata to the chosen path."""
