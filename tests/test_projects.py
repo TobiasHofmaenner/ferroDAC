@@ -278,8 +278,10 @@ def test_doc_and_recording_and_bookmark_edit_ops():
     os.makedirs(run)
     p.delete_recording(run)
     assert not os.path.exists(run)
-    p.delete_recording("/etc")                       # outside reports/ → no-op (safety)
-    assert os.path.isdir("/etc")
+    outside = os.path.join(d, "keep")                # a dir OUTSIDE reports/ (cross-platform)
+    os.makedirs(outside)
+    p.delete_recording(outside)                      # outside reports/ → no-op (safety)
+    assert os.path.isdir(outside)
     # bookmark rename
     p.add_window("win", 1.0, 2.0)
     assert p.rename_window("win", "bakeout") is True

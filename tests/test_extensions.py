@@ -113,6 +113,16 @@ def test_install_url_from_local_git(tmp_path):
     assert rec["source"] == str(repo) and rec["commit"] == sha and rec["clone"] == dest
 
 
+def test_repo_name_handles_windows_and_url_paths():
+    """The clone-dir name is the LAST path component of a URL OR a local path — a
+    Windows local path (backslashes) must not become the whole encoded path (which
+    blows past MAX_PATH on a deep source dir)."""
+    from ferrodac.extensions.manager import _repo_name
+    assert _repo_name("C:\\Users\\runner\\deep\\path\\my-repo") == "my-repo"
+    assert _repo_name("/home/u/my-repo/") == "my-repo"
+    assert _repo_name("https://github.com/a/b.git") == "b"
+
+
 def test_official_extensions_url():
     from ferrodac.extensions import OFFICIAL_EXTENSIONS_URL
     assert OFFICIAL_EXTENSIONS_URL == \
