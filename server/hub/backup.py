@@ -180,14 +180,15 @@ class ProjectBackup:
         src = os.path.join(self.projects_dir, pid)
         if not os.path.isdir(src):
             return False
-        dst = self.dest_for(pid)
+        rel = self._mapped(pid) or pid              # the LOGICAL folder (forward-slash, or the id)
+        dst = self._fs(rel)
         try:
             with self._plock(pid):
                 os.makedirs(dst, exist_ok=True)
                 changed = _mirror_tree(src, dst, keep={MARKER})
                 self._write_marker(dst, pid, name)
-            with self._gate:                        # keep the map current (avoid stale scans)
-                self._map[pid] = os.path.relpath(dst, self.backup_dir)
+            with self._gate:                        # keep the map current (logical, never OS-sep)
+                self._map[pid] = rel
             return changed
         except Exception as exc:                     # noqa: BLE001 — never break the hub
             log.warning("backup mirror failed for %s: %s", pid, exc)
