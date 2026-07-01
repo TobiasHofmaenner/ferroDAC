@@ -121,6 +121,21 @@ def test_set_folder_reassign_moves_and_clears_old(tmp_path):
     assert ProjectBackup(str(projects), str(backup)).folder_of("p1") == "b"
 
 
+def test_folder_paths_stay_forward_slash(tmp_path):
+    """Backend folders are LOGICAL, forward-slash paths (they cross the wire + go in
+    markers) regardless of the server OS — a backslash/mixed input normalises to '/'."""
+    projects, backup = tmp_path / "projects", tmp_path / "backup"
+    backup.mkdir()
+    b = ProjectBackup(str(projects), str(backup))
+    res = b.set_folder("p1", "P", "experiments\\rga")       # Windows-style input
+    assert res["ok"] and res["folder"] == "experiments/rga"
+    assert b.folder_of("p1") == "experiments/rga"           # never a backslash on the wire
+    assert b._norm_rel("a/b/../c") == "a/c"                 # logical normalisation
+    assert b._norm_rel("/abs") == "abs"                    # leading slash stripped, still confined
+    assert b._norm_rel("../escape") is None                # parent escape → reject
+    assert b._norm_rel("C:\\Windows") is None              # drive-letter / absolute → reject
+
+
 def test_set_folder_rejects_escape(tmp_path):
     projects, backup = tmp_path / "projects", tmp_path / "backup"
     _mk_project(str(projects), "p1")

@@ -46,6 +46,12 @@ class ProjectBackup:
         with self._gate:
             return self._locks.setdefault(pid, threading.Lock())
 
+    def _fs(self, rel: str) -> str:
+        """A forward-slash LOGICAL folder path (relative to root) -> a filesystem path.
+        Backend folders are logical paths (they cross the wire + go in markers), always
+        '/'-separated; only here do we map to the OS separator."""
+        return os.path.join(self.backup_dir, *rel.split("/")) if rel else self.backup_dir
+
     # -- folder map (rebuilt by scanning markers) ----------------------------
     def _refresh_map(self) -> None:
         found: dict[str, str] = {}
@@ -54,7 +60,8 @@ class ProjectBackup:
                 m = _read_marker(os.path.join(cur, MARKER))
                 pid = m.get("id")
                 if pid:
-                    found.setdefault(pid, os.path.relpath(cur, self.backup_dir))
+                    rel = os.path.relpath(cur, self.backup_dir).replace(os.sep, "/")
+                    found.setdefault(pid, "" if rel == "." else rel)
                 dirs[:] = []                    # a project backup — don't recurse below it
         with self._gate:
             self._map = found
@@ -71,7 +78,7 @@ class ProjectBackup:
 
     def dest_for(self, pid: str) -> str:
         rel = self._mapped(pid) or pid          # mapped folder, else default <id>
-        return os.path.join(self.backup_dir, rel)
+        return self._fs(rel)
 
     def last_backup(self, pid: str) -> str:
         """ISO-8601 UTC mtime of the project's marker (when it last mirrored), '' if never."""
@@ -85,12 +92,16 @@ class ProjectBackup:
 
     # -- picker / claim (Phase 2) --------------------------------------------
     def _norm_rel(self, relpath: str):
-        rel = os.path.normpath((relpath or "").strip().lstrip("/\\"))
+        """Normalise a picker path to a forward-slash LOGICAL folder (relative to root),
+        or None if it escapes the root / is absolute. OS-independent."""
+        import posixpath
+        rel = posixpath.normpath((relpath or "").strip().replace("\\", "/").strip("/"))
         if rel in (".", ""):
             return ""
-        if os.path.isabs(rel) or rel == ".." or rel.startswith(".." + os.sep):
-            return None                          # escape attempt → reject
-        abs_target = os.path.abspath(os.path.join(self.backup_dir, rel))
+        if (rel == ".." or rel.startswith("../") or rel.startswith("/")
+                or (len(rel) > 1 and rel[1] == ":")):     # abs / drive-letter / escape
+            return None
+        abs_target = os.path.abspath(self._fs(rel))
         if not abs_target.startswith(os.path.abspath(self.backup_dir) + os.sep):
             return None                          # outside the root
         return rel
@@ -101,7 +112,7 @@ class ProjectBackup:
         rel = self._norm_rel(relpath)
         if rel is None:
             return []
-        base = os.path.join(self.backup_dir, rel)
+        base = self._fs(rel)
         out = []
         try:
             names = sorted(os.listdir(base))
@@ -116,7 +127,7 @@ class ProjectBackup:
                 kids = any(os.path.isdir(os.path.join(full, c)) for c in os.listdir(full))
             except OSError:
                 kids = False
-            out.append({"name": name, "path": (os.path.join(rel, name) if rel else name),
+            out.append({"name": name, "path": (f"{rel}/{name}" if rel else name),
                         "project_id": m.get("id", ""), "project_name": m.get("name", ""),
                         "has_children": kids and not m})   # don't drill into a project backup
         return out
@@ -129,7 +140,7 @@ class ProjectBackup:
         if rel is None or rel == "":
             return {"ok": False, "claimed": False, "folder": "",
                     "detail": "Pick a folder inside the backup area."}
-        target = os.path.join(self.backup_dir, rel)
+        target = self._fs(rel)
         marker = os.path.join(target, MARKER)
         claimed = False
         if os.path.isfile(marker):
@@ -143,7 +154,7 @@ class ProjectBackup:
                     "detail": "That folder isn't empty and isn't a ferroDAC backup."}
         old = self._mapped(pid)                 # reassigning? drop the superseded copy
         if old and self._norm_rel(old) != rel:
-            old_abs = os.path.join(self.backup_dir, old)
+            old_abs = self._fs(old)
             if _read_marker(os.path.join(old_abs, MARKER)).get("id") == pid:
                 shutil.rmtree(old_abs, ignore_errors=True)   # it's this project's old backup
         os.makedirs(target, exist_ok=True)
