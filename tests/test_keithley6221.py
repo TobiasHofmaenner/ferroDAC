@@ -1,7 +1,11 @@
 """Keithley 6221 current-source driver: a reusable pyserial-free-of-ferroDAC
 controller (Keithley6221) plus a thin BaseDevice wrapper. Exercised here with a
 fake serial port that emulates the 6221's SCPI (115200/CR) — no hardware."""
-import ferrodac.devices.keithley6221 as mod
+import pytest
+
+pytest.importorskip("serial")  # driver needs pyserial; skip where it isn't installed
+
+import ferrodac.devices.keithley6221 as mod  # noqa: E402
 from ferrodac.devices.keithley6221 import (
     Keithley6221,
     Keithley6221Device,
