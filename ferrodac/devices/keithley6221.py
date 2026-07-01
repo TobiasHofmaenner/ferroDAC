@@ -147,14 +147,20 @@ class Keithley6221:
         self._write("*RST")
         time.sleep(0.2)
 
+    def clear_status(self) -> None:
+        """*CLS: clear the status byte + error queue WITHOUT touching the source state."""
+        self._write("*CLS")
+
     def error(self) -> tuple[int, str]:
-        """Pop one entry off the error queue -> (code, message). (0, 'No error') when clear."""
+        """Pop one entry off the error queue -> (code, message). (0, 'No error') when clear.
+        A response whose code can't be parsed is treated as an ERROR (raised), not silently
+        as 'no error' — this is the post-write safety check, so it must fail loud."""
         raw = self._query("SYST:ERR?")
         code, _, msg = raw.partition(",")
         try:
             return int(float(code)), msg.strip().strip('"')
-        except ValueError:
-            return 0, raw
+        except ValueError as exc:
+            raise Keithley6221Error(f"unparseable SYST:ERR? response {raw!r}") from exc
 
     def raise_on_error(self) -> None:
         code, msg = self.error()
@@ -228,7 +234,8 @@ def _parse_idn(idn: str) -> Optional[tuple[str, str, str]]:
     if len(parts) < 4 or "6221" not in parts[1].upper():
         return None
     model = parts[1].upper().replace("MODEL", "").strip() or "6221"
-    return model, parts[2], parts[3].split()[0]
+    fw = parts[3].split()                        # a truncated IDN must not IndexError
+    return model, parts[2], (fw[0] if fw else "")
 
 
 def probe_port(port: str) -> Optional[ProbeResult]:
@@ -327,12 +334,26 @@ class Keithley6221Device(BaseDevice):
     def _connect(self) -> None:
         if not HAVE_SERIAL:
             raise RuntimeError("pyserial not available")
+        if self._k is not None:                   # reconnect w/o disconnect → don't leak the handle
+            try:
+                self._k.close()
+            finally:
+                self._k = None
         k = Keithley6221(self._port).open()
         try:
             parsed = _parse_idn(k.idn())
             if parsed is None:
                 raise RuntimeError("not a Keithley 6221 on this port")
             self._firmware = parsed[2]
+            k.clear_status()                      # drop a stale error queue (no state change)
+            # Seed the sink values from the REAL instrument state so describe()/the panel
+            # reflect what the source is ACTUALLY doing (least surprise; the tpg256a
+            # convention). We deliberately do NOT *RST — an operator's live run is preserved,
+            # but it's shown truthfully rather than as a hardcoded "off".
+            self._sink_values["output"] = k.get_output()
+            self._sink_values["current"] = k.get_current()
+            self._sink_values["compliance"] = k.get_compliance()
+            self._sink_values["range_auto"] = k.get_range_auto()
         except Exception:
             k.close()
             raise
@@ -350,6 +371,22 @@ class Keithley6221Device(BaseDevice):
                 self._k = None
         with type(self)._cls_lock:
             type(self)._active_ports.discard(self._port)
+
+    # -- control ------------------------------------------------------------- #
+    def write(self, sink_id: str, value=None) -> None:
+        # REJECT an out-of-range current/compliance loudly here, BEFORE BaseDevice.write()
+        # silently CLAMPS the SETPOINT to the Param's full scale — for a current source,
+        # "asked for 1 A, quietly sourced 105 mA" is a data-integrity/safety trap.
+        if sink_id == "current" and value is not None:
+            a = float(value)
+            if not math.isfinite(a) or abs(a) > MAX_CURRENT:
+                raise ValueError(f"current {value} A out of range (±{MAX_CURRENT} A)")
+        elif sink_id == "compliance" and value is not None:
+            v = float(value)
+            if not (MIN_COMPLIANCE <= v <= MAX_COMPLIANCE):
+                raise ValueError(f"compliance {value} V out of range "
+                                 f"({MIN_COMPLIANCE}–{MAX_COMPLIANCE} V)")
+        super().write(sink_id, value)
 
     # -- data plane ---------------------------------------------------------- #
     def _read(self, source: Source):
@@ -378,6 +415,8 @@ class Keithley6221Device(BaseDevice):
                 self._k.range_auto(bool(value))
             elif sink.id == "zero":
                 self._k.zero()
+                self._sink_values["output"] = False   # reflect the safe-off in tracked state
+                self._sink_values["current"] = 0.0     # (ACTION → BaseDevice won't track it)
             else:
                 raise RuntimeError(f"unknown sink {sink.id!r}")
             self._k.raise_on_error()

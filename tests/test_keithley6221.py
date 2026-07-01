@@ -18,8 +18,10 @@ IDN = "KEITHLEY INSTRUMENTS INC.,MODEL 6221,1214209,A05  /700x"
 class FakeSerial:
     """Minimal 6221 emulator: holds source state, answers the queries we use."""
 
-    def __init__(self, *a, idn=IDN, **k):
+    def __init__(self, *a, idn=IDN, init_state=None, **k):
         self.state = {"curr": 0.0, "outp": 0, "comp": 10.0, "rng": 0.1, "auto": 1}
+        if init_state:
+            self.state.update(init_state)          # emulate a pre-existing instrument state
         self.err = (0, "No error")
         self._idn = idn
         self._out = b""
@@ -64,9 +66,11 @@ class FakeSerial:
                     self.state["curr"] = v
             elif u.startswith("OUTP"):
                 self.state["outp"] = 1 if "ON" in u else 0
-            elif u in ("*RST", "*CLS"):
+            elif u == "*RST":
                 self.state.update(curr=0.0, outp=0)
                 self.err = (0, "No error")
+            elif u == "*CLS":
+                self.err = (0, "No error")          # clears status/errors only — NOT the source
         except (ValueError, IndexError):
             self.err = (-222, "Parameter data out of range")
 
@@ -178,3 +182,68 @@ def test_device_write_read(monkeypatch):
     val, st = d._read(src)
     assert st == 0 and val == 0.0                 # output off -> 0
     d.disconnect()
+
+
+def test_device_rejects_out_of_range_setpoints(monkeypatch):
+    """The Device path REJECTS an out-of-range current/compliance loudly instead of
+    silently clamping the SETPOINT to full scale (the BaseDevice coercion trap)."""
+    _patch(monkeypatch)
+    Keithley6221Device._cache.clear()
+    Keithley6221Device._active_ports.clear()
+    d = Keithley6221Device.discover()[0]
+    d.connect()
+    for bad in (1.0, -0.5, float("nan")):
+        with pytest.raises(ValueError):
+            d.write("current", bad)
+    with pytest.raises(ValueError):
+        d.write("compliance", 200.0)
+    # an in-range value still lands as the REAL value (not a clamp)
+    d.write("current", 5e-6)
+    d.write("output", True)
+    assert d._read(d.describe().sources[0]) == (5e-6, 0)
+    d.disconnect()
+
+
+def test_connect_reads_back_live_state(monkeypatch):
+    """_connect seeds the sink values from the REAL instrument state, so the panel can't
+    show a fictional 'off / 10 V' over an energised source (the tpg256a convention)."""
+    _patch(monkeypatch, init_state={"outp": 1, "curr": 5e-6, "comp": 25.0, "auto": 0})
+    Keithley6221Device._cache.clear()
+    Keithley6221Device._active_ports.clear()
+    d = Keithley6221Device.discover()[0]
+    d.connect()
+    snap = {s.id: s.value for s in d.describe().sinks}
+    assert snap["output"] is True and snap["current"] == 5e-6      # not the hardcoded off/0
+    assert snap["compliance"] == 25.0 and snap["range_auto"] is False
+    d.disconnect()
+
+
+def test_zero_reflects_safe_off_in_tracked_state(monkeypatch):
+    _patch(monkeypatch)
+    Keithley6221Device._cache.clear()
+    Keithley6221Device._active_ports.clear()
+    d = Keithley6221Device.discover()[0]
+    d.connect()
+    d.write("current", 1e-5)
+    d.write("output", True)
+    assert {s.id: s.value for s in d.describe().sinks}["output"] is True
+    d.write("zero")
+    snap = {s.id: s.value for s in d.describe().sinks}
+    assert snap["output"] is False and snap["current"] == 0.0      # UI shows the safe-off
+    d.disconnect()
+
+
+def test_error_fails_loud_on_garbled_response(monkeypatch):
+    """A garbled SYST:ERR? must be raised, not silently reported as 'no error' — it's
+    the post-write safety check."""
+    _patch(monkeypatch)
+    with Keithley6221("/dev/ttyUSB0") as k:
+        monkeypatch.setattr(k, "_query",
+                            lambda cmd: "no-code-here" if "ERR" in cmd.upper() else "1\r")
+        with pytest.raises(Keithley6221Error):
+            k.error()
+
+
+def test_parse_idn_truncated_does_not_crash():
+    assert mod._parse_idn("KEITHLEY,MODEL 6221,SN,") == ("6221", "SN", "")   # empty fw, no IndexError
+    assert mod._parse_idn("too,few,parts") is None
