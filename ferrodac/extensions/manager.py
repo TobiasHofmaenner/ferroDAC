@@ -47,7 +47,10 @@ class LoadedExtension:
 
 
 def _repo_name(url: str) -> str:
-    base = url.rstrip("/").split("/")[-1]
+    # Last path component of a URL OR a local path — split on BOTH separators so a
+    # Windows local path (C:\…\repo, backslashes) doesn't become the whole encoded path
+    # as the clone-dir name (which blows past Windows' MAX_PATH on a deep source dir).
+    base = re.split(r"[/\\]", url.rstrip("/\\"))[-1]
     if base.endswith(".git"):
         base = base[:-4]
     return re.sub(r"[^\w.-]", "_", base) or "extension"
@@ -251,6 +254,6 @@ class ExtensionManager:
             try:
                 self.load_repo(d, r.get("names"))
             except (ExtensionError, ManifestError) as exc:
-                log.warning("extension %r failed to load: %s", src, exc)
+                log.warning("extension %r failed to load: %s", r.get("source"), exc)
             except Exception as exc:               # noqa: BLE001 — never block launch
-                log.warning("extension %r failed to load: %s", src, exc)
+                log.warning("extension %r failed to load: %s", r.get("source"), exc)
