@@ -27,7 +27,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pytest numpy "zarr>=3" numcodecs "grpcio>=1.60" "protobuf>=6.33.5"
+          pip install pytest numpy "zarr>=3" numcodecs "grpcio>=1.60" "protobuf>=6.33.5" pyserial
       - name: Run data-plane + gRPC suite
         run: pytest -m "not ui" -ra
 
