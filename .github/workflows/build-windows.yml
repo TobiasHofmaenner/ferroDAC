@@ -22,11 +22,28 @@ jobs:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # full history + tags → git describe works for manual builds
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           architecture: "x64"
+
+      # The git tag is the single source of truth for the version: stamp it into
+      # ferrodac/__init__.py's placeholder before freezing (no manual bump).
+      # Manual (workflow_dispatch) builds stamp `git describe` instead.
+      - name: Stamp version from the git tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V="$(git describe --tags --always --dirty)"; V="${V#v}"
+          fi
+          grep -q '__version__ = "0.0.0+dev"' ferrodac/__init__.py
+          sed -i "s/__version__ = \"0.0.0+dev\"/__version__ = \"$V\"/" ferrodac/__init__.py
+          grep '^__version__' ferrodac/__init__.py
 
       - name: Install dependencies
         run: |
