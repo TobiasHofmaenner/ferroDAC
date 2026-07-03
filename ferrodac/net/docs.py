@@ -24,7 +24,7 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain
+from . import CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain, call_soon_safe
 
 log = logging.getLogger("hub.docs")
 
@@ -56,9 +56,7 @@ class HubDocSync:
         self._thread.start()
 
     def stop(self) -> None:
-        loop = self._loop
-        if loop is not None:
-            loop.call_soon_threadsafe(self._do_stop)
+        call_soon_safe(self._loop, self._do_stop)
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         self._thread = None
@@ -94,9 +92,7 @@ class HubDocSync:
 
     # -- internals -----------------------------------------------------------
     def _send(self, msg) -> None:
-        loop = self._loop
-        if loop is not None:
-            loop.call_soon_threadsafe(self._safe_put, msg)
+        call_soon_safe(self._loop, self._safe_put, msg)
 
     def _safe_put(self, msg) -> None:
         try:
@@ -152,7 +148,11 @@ class HubDocSync:
                     async for msg in call:
                         self._dispatch(msg)
             except asyncio.CancelledError:
-                break
+                # grpc.aio also surfaces a locally-cancelled CALL this way; only
+                # OUR stop() is a shutdown — anything else is a disconnect.
+                if self._stop.is_set():
+                    break
+                self._notify(False, "doc sync disconnected: stream cancelled")
             except Exception as e:           # hub down / connection lost
                 self._notify(False, f"doc sync disconnected: {e}")
             if self._stop.is_set():

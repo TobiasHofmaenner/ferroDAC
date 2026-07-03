@@ -31,6 +31,16 @@ MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 GRPC_CHANNEL_OPTIONS = [
     ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
     ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+    # HTTP/2 keepalive: without it, a black-holed link (hub host rebooted, VPN
+    # dropped — no RST ever reaches us) leaves a streaming RPC blind for the
+    # ~15 min TCP retransmission timeout while the UI still shows connected.
+    # Ping every 30 s even without traffic; declare the link dead after 10 s of
+    # ping silence. The hub permits this rate server-side (hub/main.py) — an
+    # OLDER hub will GOAWAY these pings, so deploy the hub first.
+    ("grpc.keepalive_time_ms", 30_000),
+    ("grpc.keepalive_timeout_ms", 10_000),
+    ("grpc.keepalive_permit_without_calls", 1),
+    ("grpc.http2.max_pings_without_data", 0),
 ]
 
 try:
@@ -38,6 +48,20 @@ try:
     GRPC_AVAILABLE = True
 except Exception:
     GRPC_AVAILABLE = False
+
+
+def call_soon_safe(loop, fn, *args) -> None:
+    """``loop.call_soon_threadsafe`` that tolerates a dead worker: when a sync
+    controller's thread has exited, its (closed) loop lingers on the object, and
+    a late caller — the GUI thread's disconnect(), the engine thread's feed() —
+    got ``RuntimeError: Event loop is closed``, which aborted the reconnect
+    half-way and wedged the whole hub link until an app restart."""
+    if loop is None:
+        return
+    try:
+        loop.call_soon_threadsafe(fn, *args)
+    except RuntimeError:                    # loop already closed — worker is gone
+        pass
 
 
 def _drain(loop) -> None:

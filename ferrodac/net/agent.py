@@ -16,8 +16,8 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import (CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain, convert,
-               watch_connectivity)
+from . import (CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain, call_soon_safe,
+               convert, watch_connectivity)
 
 log = logging.getLogger("hub.agent")
 
@@ -44,9 +44,7 @@ class HubAgent:
         self._thread.start()
 
     def stop(self) -> None:
-        loop = self._loop
-        if loop is not None:
-            loop.call_soon_threadsafe(self._do_stop)
+        call_soon_safe(self._loop, self._do_stop)
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         self._thread = None
@@ -101,9 +99,7 @@ class HubAgent:
 
     # -- internals -----------------------------------------------------------
     def _send(self, msg) -> None:
-        loop = self._loop
-        if loop is not None:
-            loop.call_soon_threadsafe(self._safe_put, msg)
+        call_soon_safe(self._loop, self._safe_put, msg)
 
     def _safe_put(self, msg) -> None:
         try:
@@ -134,6 +130,11 @@ class HubAgent:
     async def _session_loop(self) -> None:
         while not self._stop.is_set():
             watcher = None
+            # A FRESH queue per session: readings that piled up while offline die
+            # with the old queue (they're the live view only — durability is the
+            # store sync), and a half-cancelled previous generator can never steal
+            # messages from the new session.
+            self._outq = asyncio.Queue()
             try:
                 async with grpc.aio.insecure_channel(
                         self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
@@ -146,7 +147,14 @@ class HubAgent:
                     async for _hub_msg in call:
                         pass                   # M1: down channel unused
             except asyncio.CancelledError:
-                break
+                # grpc.aio also surfaces a locally-cancelled CALL this way (e.g.
+                # the hub vanishing mid-write). Only OUR stop() is a shutdown;
+                # anything else is a disconnect → reconnect. Treating every
+                # CancelledError as shutdown left the agent silently dead after
+                # a hub restart (button green, store sync still running).
+                if self._stop.is_set():
+                    break
+                self._notify(False, "hub disconnected: stream cancelled")
             except Exception as e:             # hub down / connection lost
                 self._notify(False, f"hub disconnected: {e}")
             finally:
@@ -160,6 +168,9 @@ class HubAgent:
                 pass                           # backoff, then reconnect
 
     async def _outgen(self):
+        outq = self._outq                      # pin THIS session's queue (a late-
+        #                                        cancelled generator must not read
+        #                                        a successor session's queue)
         yield pb.AgentMessage(hello=pb.Hello(
             agent_id=self._agent_id, contract_version=CONTRACT_VERSION))
         with self._lock:
@@ -167,7 +178,7 @@ class HubAgent:
         for d in descs:                        # (re)announce on every (re)connect
             yield pb.AgentMessage(announce=d)
         while True:                            # link state comes from watch_connectivity
-            msg = await self._outq.get()
+            msg = await outq.get()
             if msg is None or self._stop.is_set():
                 break
             yield msg

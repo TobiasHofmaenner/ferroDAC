@@ -53,6 +53,15 @@ def build_server(hub: "Hub | None" = None, store=None
     server = grpc.aio.server(options=[
         ("grpc.max_send_message_length", max_bytes),
         ("grpc.max_receive_message_length", max_bytes),
+        # Keepalive contract with the clients (ferrodac.net.GRPC_CHANNEL_OPTIONS):
+        # clients ping every 30 s even without traffic — permit that (the HTTP/2
+        # default of 5 min would GOAWAY them) — and ping back, so the hub notices
+        # dead clients within ~70 s and retires their devices instead of holding
+        # zombie sessions after a client host drops off the network.
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.http2.min_ping_interval_without_data_ms", 20_000),
+        ("grpc.keepalive_time_ms", 60_000),
+        ("grpc.keepalive_timeout_ms", 10_000),
     ])
     rpc.add_IngestServicer_to_server(IngestServicer(hub), server)
     rpc.add_ViewerServicer_to_server(ViewerServicer(hub), server)

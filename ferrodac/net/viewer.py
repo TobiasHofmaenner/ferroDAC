@@ -17,7 +17,8 @@ import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import GRPC_CHANNEL_OPTIONS, _drain, convert, watch_connectivity
+from . import (GRPC_CHANNEL_OPTIONS, _drain, call_soon_safe, convert,
+               watch_connectivity)
 
 log = logging.getLogger("hub.viewer")
 
@@ -41,9 +42,8 @@ class HubViewer:
         self._thread.start()
 
     def stop(self) -> None:
-        loop = self._loop
-        if loop is not None and self._stop is not None:
-            loop.call_soon_threadsafe(self._stop.set)
+        if self._stop is not None:
+            call_soon_safe(self._loop, self._stop.set)
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         self._thread = None
@@ -86,7 +86,11 @@ class HubViewer:
                     await asyncio.gather(conn, watch, sub, stopper,
                                          return_exceptions=True)
             except asyncio.CancelledError:
-                break
+                # grpc.aio also surfaces a locally-cancelled CALL this way; only
+                # OUR stop() is a shutdown — anything else is a disconnect.
+                if self._stop.is_set():
+                    break
+                self._notify(False, "hub disconnected: stream cancelled")
             except Exception as e:
                 self._notify(False, f"hub disconnected: {e}")
             if self._stop.is_set():
