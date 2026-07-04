@@ -38,21 +38,30 @@ def is_project(path: str) -> bool:
 
 
 def unsafe_project_dir(path: str) -> str:
-    """A reason string if `path` is a dangerous place to make a project — a system
-    or home ROOT whose git/backup/archive ops would scan a huge tree (a project
-    must be its own dedicated folder). '' if it's fine. Guards against the
-    '/home became a git repo' class of bug."""
-    ap = os.path.abspath(path).rstrip("/") or "/"
+    """A reason string if `path` is a dangerous place to make a project — a
+    filesystem/drive root, or a system or home ROOT whose git/backup/archive ops
+    would scan a huge tree (a project must be its own dedicated folder). '' if it's
+    fine. Guards against the '/home became a git repo' class of bug. Cross-platform."""
+    ap = os.path.abspath(path)
+    reason = (f"“{ap}” is a system or home folder. Pick a location and ferroDAC "
+              "will make a dedicated project subfolder inside it.")
+    if os.path.dirname(ap) == ap:                 # a filesystem / drive root ("/" or "C:\")
+        return reason
     home = os.path.abspath(os.path.expanduser("~"))
-    roots = {"/", home, os.path.dirname(home) or "/",
-             "/home", "/root", "/usr", "/etc", "/var", "/tmp", "/opt",
-             "/mnt", "/media", "/boot", "/dev", "/proc", "/sys", "/bin", "/lib",
-             "/Users", "/Applications", "/System", "/Library",
-             os.path.abspath(os.sep)}
-    if ap in {r.rstrip("/") or "/" for r in roots}:
-        return (f"“{ap}” is a system or home folder. Pick a location and ferroDAC "
-                "will make a dedicated project subfolder inside it.")
-    return ""
+    bad = {home, os.path.dirname(home)}           # home + the dir that holds all homes
+    if os.name == "nt":
+        drive = (os.environ.get("SystemDrive", "C:") + os.sep)
+        bad |= {drive, os.path.join(drive, "Users"), os.environ.get("windir", ""),
+                os.environ.get("ProgramFiles", ""),
+                os.environ.get("ProgramFiles(x86)", "")}
+    else:
+        bad |= {"/home", "/root", "/usr", "/etc", "/var", "/tmp", "/opt", "/srv",
+                "/mnt", "/media", "/boot", "/dev", "/proc", "/sys", "/bin", "/lib",
+                "/Users", "/Applications", "/System", "/Library"}   # incl. macOS
+    key = os.path.normcase(ap.rstrip("\\/")) or os.path.normcase(os.sep)
+    badkeys = {os.path.normcase(os.path.abspath(b).rstrip("\\/"))
+               for b in bad if b}
+    return reason if key in badkeys else ""
 
 
 class Project:
