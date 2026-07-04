@@ -6,6 +6,7 @@ Widget`). The built-in `Panel` is `Panel(Widget)`, so internal panels can grow e
 conveniences without those leaking into the plugin contract. Keep every method here
 stable; bump the plugin `api` version if it changes.
 """
+from qtpy.QtCore import Signal
 from qtpy.QtWidgets import QWidget
 
 # The widget registry: kind -> (menu label, class). Built-ins populate it (see
@@ -28,13 +29,34 @@ def register_widget(label=None):
 
 
 class Widget(QWidget):
-    """A widget that displays a routed set of Sources (and/or emits control inputs)."""
+    """A widget that displays a routed set of Sources (and/or emits control inputs).
+
+    Every hook below is part of the STABLE contract with a safe default, so the
+    Dashboard calls them directly (never ``hasattr``-probes) and a third-party
+    widget implements only what it needs. Capabilities:
+      * display sinks: add_source/remove_source/feed/clear_history/trim_to/…
+      * control inputs (``is_input = True``): emit ``emitted``; current_value();
+        set_range() when routed to a device setpoint.
+      * time-axis widgets: attach_session() binds the shared clock + markers.
+      * spectrum widgets: set_cursors(); on_cursor_move callback.
+      * processor-hosting widgets: set_processor_host().
+    """
 
     kind = "widget"            # registry key (unique across loaded plugins)
     is_input = False           # True → a control INPUT (slider/button), not a data sink
     routable = True            # False → carries no data port (e.g. a document view)
     accepts = frozenset()      # input source dtypes it can display, e.g. {"float", "bool"}
     single_bind = False        # True → at most one routed source
+    source_dtype = "float"     # the dtype an is_input widget emits into the patch-bay
+
+    #: a control input's value entering the patch-bay (None = a trigger/action).
+    #: Declared here so it is part of the contract (was on InputPanel only) — every
+    #: widget carries it; only ``is_input`` widgets emit.
+    emitted = Signal(object)
+
+    #: optional callback(cursor_id, mz) a spectrum widget calls when a cursor moves
+    #: (the Dashboard assigns it). None until wired.
+    on_cursor_move = None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -42,6 +64,27 @@ class Widget(QWidget):
         self.title = ""
         self._unsub = None
         self.export_spec = None    # per-widget render-export override {width,height,dpi}; None=project default
+
+    # -- control input (is_input widgets) ------------------------------------
+    def current_value(self):
+        """The input widget's current value (``is_input`` widgets), else None."""
+        return None
+
+    def set_range(self, lo, hi, unit: str = "") -> None:
+        """A setpoint input routed to a device sink adopts the sink's range/unit.
+        Default: ignore (non-setpoint inputs and display widgets)."""
+
+    # -- session / cursors / processor host (optional capabilities) ----------
+    def attach_session(self, clock, markers) -> None:
+        """Bind the shared session clock + marker model. Time-axis widgets override
+        (to draw markers / a playhead). Default: ignore."""
+
+    def set_cursors(self, cursors) -> None:
+        """Update the widget's trace cursors (spectrum widgets). Default: ignore."""
+
+    def set_processor_host(self, add, remove, get, procs_for) -> None:
+        """Wire a widget that hosts data-plane processors (e.g. the RGA gas
+        analysis panel) to the Dashboard's processor API. Default: ignore."""
 
     # -- data lifecycle (the Dashboard + replay drive these) -----------------
     def add_source(self, key: str, source) -> None: ...

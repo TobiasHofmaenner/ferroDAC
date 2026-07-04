@@ -3937,9 +3937,8 @@ class MainWindow(QMainWindow):
 
     def _update_trace_cursors(self):
         for panel in self.dashboard._panels.values():
-            if getattr(panel, "kind", "") not in ("spectrum", "specwf") \
-                    or not hasattr(panel, "set_cursors"):
-                continue
+            if getattr(panel, "kind", "") not in ("spectrum", "specwf"):
+                continue                            # set_cursors is a contract no-op elsewhere
             cursors = []
             for src_key in getattr(panel, "_curves", {}):
                 for cur in self.dashboard.cursors_for(src_key):

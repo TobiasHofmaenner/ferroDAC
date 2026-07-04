@@ -150,3 +150,30 @@ def test_panel_subclasses_widget(qapp):
             assert callable(getattr(c, meth))
     finally:
         c.deleteLater()
+
+
+@pytest.mark.ui
+def test_widget_contract_is_complete_with_safe_defaults(qapp):
+    """A bare third-party Widget only implements what it uses — every optional
+    capability the Dashboard drives (session, cursors, processor host, input value/
+    range, the emitted signal) is a declared no-op default, so the Dashboard calls
+    them directly instead of hasattr-probing (the audit's side-channel gap)."""
+    from ferrodac.plugin import Widget
+
+    class Bare(Widget):
+        kind = "bare_test_widget"
+
+    w = Bare()
+    try:
+        assert w.current_value() is None
+        assert w.on_cursor_move is None
+        w.set_range(0.0, 1.0, "V")                 # all no-ops, no crash
+        w.attach_session(None, None)
+        w.set_cursors([])
+        w.set_processor_host(None, None, None, None)
+        got = []
+        w.emitted.connect(got.append)              # the input signal is on the contract
+        w.emitted.emit(42)
+        assert got == [42]
+    finally:
+        w.deleteLater()

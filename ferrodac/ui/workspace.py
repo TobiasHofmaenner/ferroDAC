@@ -349,13 +349,11 @@ class Dashboard(QObject):
             if self.default_sink_id is None and kind == "chart":
                 self.default_sink_id = pid
 
-        if hasattr(panel, "attach_session"):
-            panel.attach_session(self.clock, self.markers)
-        if hasattr(panel, "on_cursor_move"):
-            panel.on_cursor_move = lambda cid, mz: self.update_cursor(cid, mz=mz)
-        if hasattr(panel, "set_processor_host"):
-            panel.set_processor_host(self.add_processor, self.remove_processor,
-                                     self.processor, self.processors_for)
+        # Contract hooks (Widget provides safe no-op defaults — no hasattr probing).
+        panel.attach_session(self.clock, self.markers)
+        panel.on_cursor_move = lambda cid, mz: self.update_cursor(cid, mz=mz)
+        panel.set_processor_host(self.add_processor, self.remove_processor,
+                                 self.processor, self.processors_for)
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -988,9 +986,8 @@ class Dashboard(QObject):
             if proc is not None:
                 proc.bind_input(source_key)             # route a source in → feed the processor
         elif sink.kind == "device":
-            if src.kind == "virtual" and hasattr(src.panel, "set_range") \
-                    and sink.dtype == "float":
-                src.panel.set_range(sink.smin, sink.smax, sink.unit)
+            if src.kind == "virtual" and sink.dtype == "float":
+                src.panel.set_range(sink.smin, sink.smax, sink.unit)   # no-op if not a setpoint
             if src.kind == "virtual" and src.dtype in ("float", "bool"):
                 self._write_to_device(sink, src.panel.current_value())
 

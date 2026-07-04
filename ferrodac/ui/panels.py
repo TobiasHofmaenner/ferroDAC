@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import QRect, QRectF, Qt, QTimer, Signal
+from qtpy.QtCore import QRect, QRectF, Qt, QTimer
 from qtpy.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
@@ -1390,8 +1390,7 @@ class ImagePanel(Panel):
 class InputPanel(Panel):
     is_input = True
     source_dtype = "float"
-
-    emitted = Signal(object)   # value (None = trigger, for actions)
+    # `emitted` is inherited from the Widget contract (declared once there).
 
     def __init__(self, parent=None):
         super().__init__(parent)
