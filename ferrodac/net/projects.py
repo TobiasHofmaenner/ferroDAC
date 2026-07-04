@@ -19,43 +19,27 @@ import asyncio
 import logging
 import threading
 
-import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import GRPC_CHANNEL_OPTIONS, _drain, call_soon_safe, convert
+from . import convert
+from .session import ReconnectingClient
 
 log = logging.getLogger("hub.projects")
 
 
-class HubProjectSync:
+class HubProjectSync(ReconnectingClient):
+    _thread_name = "hub-projects"
+    _disconnect_label = "project sync"
+
     def __init__(self, addr: str, agent_id: str = "ferrodac",
                  on_project=None, on_state=None):
-        self._addr = addr
+        super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
         self._on_project = on_project          # (record dict) — an incoming project
-        self._on_state = on_state
-        self._thread: "threading.Thread | None" = None
-        self._loop: "asyncio.AbstractEventLoop | None" = None
-        self._stop: "asyncio.Event | None" = None
         self._stub = None
         self._lock = threading.Lock()
         self._pending: dict = {}               # id -> pb.Project (replayed on reconnect)
-
-    # -- lifecycle -----------------------------------------------------------
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="hub-projects", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        if self._stop is not None:
-            call_soon_safe(self._loop, self._stop.set)
-        if self._thread is not None:
-            self._thread.join(timeout=3.0)
-        self._thread = None
 
     # -- public API (any thread) --------------------------------------------
     def publish(self, rec: dict) -> None:
@@ -88,56 +72,19 @@ class HubProjectSync:
         except Exception:                      # transient — replayed on reconnect
             pass
 
-    def _notify(self, connected: bool, detail: str) -> None:
-        log.info("%s", detail)
-        if self._on_state is not None:
-            try:
-                self._on_state(connected, detail)
-            except Exception:
-                pass
-
-    def _run(self) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self._stop = asyncio.Event()
-        self._loop = loop
+    async def _run_session(self, ch) -> None:
+        self._stub = rpc.ProjectsStub(ch)
+        self._notify(True, f"project sync connected to {self._addr}")
         try:
-            loop.run_until_complete(self._main())
+            await self._replay()               # re-assert local edits on (re)connect
+            watch = asyncio.create_task(self._watch())
+            stopper = asyncio.create_task(self._stop.wait())
+            await asyncio.wait({watch, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            for t in (watch, stopper):
+                t.cancel()
+            await asyncio.gather(watch, stopper, return_exceptions=True)
         finally:
-            _drain(loop)
-            loop.close()
-
-    async def _main(self) -> None:
-        while not self._stop.is_set():
-            try:
-                async with grpc.aio.insecure_channel(
-                        self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
-                    self._stub = rpc.ProjectsStub(ch)
-                    self._notify(True, f"project sync connected to {self._addr}")
-                    await self._replay()       # re-assert local edits on (re)connect
-                    watch = asyncio.create_task(self._watch())
-                    stopper = asyncio.create_task(self._stop.wait())
-                    await asyncio.wait({watch, stopper},
-                                       return_when=asyncio.FIRST_COMPLETED)
-                    for t in (watch, stopper):
-                        t.cancel()
-                    await asyncio.gather(watch, stopper, return_exceptions=True)
-            except asyncio.CancelledError:
-                # grpc.aio also surfaces a locally-cancelled CALL this way; only
-                # OUR stop() is a shutdown — anything else is a disconnect.
-                if self._stop.is_set():
-                    break
-                self._notify(False, "project sync disconnected: stream cancelled")
-            except Exception as e:
-                self._notify(False, f"project sync disconnected: {e}")
-            finally:
-                self._stub = None
-            if self._stop.is_set():
-                break
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass                           # backoff, then reconnect
+            self._stub = None
 
     async def _replay(self) -> None:
         with self._lock:

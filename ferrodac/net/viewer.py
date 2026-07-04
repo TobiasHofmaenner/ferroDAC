@@ -11,94 +11,39 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 
-import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import (GRPC_CHANNEL_OPTIONS, _drain, call_soon_safe, convert,
-               watch_connectivity)
+from . import convert, watch_connectivity
+from .session import ReconnectingClient
 
 log = logging.getLogger("hub.viewer")
 
 
-class HubViewer:
+class HubViewer(ReconnectingClient):
+    _thread_name = "hub-viewer"
+    _disconnect_label = "hub"
+
     def __init__(self, addr: str, on_catalog=None, on_readings=None,
                  on_state=None):
-        self._addr = addr
+        super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._on_catalog = on_catalog          # (event_type: str, pb.DeviceDescriptor)
         self._on_readings = on_readings        # (list[app Reading])
-        self._on_state = on_state
-        self._thread: "threading.Thread | None" = None
-        self._loop: "asyncio.AbstractEventLoop | None" = None
-        self._stop: "asyncio.Event | None" = None
 
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="hub-viewer", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        if self._stop is not None:
-            call_soon_safe(self._loop, self._stop.set)
-        if self._thread is not None:
-            self._thread.join(timeout=3.0)
-        self._thread = None
-
-    def _notify(self, connected: bool, detail: str) -> None:
-        log.info("%s", detail)
-        if self._on_state is not None:
-            try:
-                self._on_state(connected, detail)
-            except Exception:
-                pass
-
-    def _run(self) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self._stop = asyncio.Event()
-        self._loop = loop
-        try:
-            loop.run_until_complete(self._main())
-        finally:
-            _drain(loop)
-            loop.close()
-
-    async def _main(self) -> None:
-        while not self._stop.is_set():
-            try:
-                async with grpc.aio.insecure_channel(
-                        self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
-                    v = rpc.ViewerStub(ch)
-                    # REAL link from the channel state (not 'we opened a channel')
-                    conn = asyncio.create_task(
-                        watch_connectivity(ch, self._addr, self._notify))
-                    watch = asyncio.create_task(self._watch(v))
-                    sub = asyncio.create_task(self._subscribe(v))
-                    stopper = asyncio.create_task(self._stop.wait())
-                    await asyncio.wait({conn, watch, sub, stopper},
-                                       return_when=asyncio.FIRST_COMPLETED)
-                    for t in (conn, watch, sub, stopper):
-                        t.cancel()
-                    await asyncio.gather(conn, watch, sub, stopper,
-                                         return_exceptions=True)
-            except asyncio.CancelledError:
-                # grpc.aio also surfaces a locally-cancelled CALL this way; only
-                # OUR stop() is a shutdown — anything else is a disconnect.
-                if self._stop.is_set():
-                    break
-                self._notify(False, "hub disconnected: stream cancelled")
-            except Exception as e:
-                self._notify(False, f"hub disconnected: {e}")
-            if self._stop.is_set():
-                break
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass
+    async def _run_session(self, ch) -> None:
+        v = rpc.ViewerStub(ch)
+        # REAL link from the channel state (not 'we opened a channel'); watch the
+        # catalog + subscribe to readings until any ends (disconnect) or we stop.
+        conn = asyncio.create_task(watch_connectivity(ch, self._addr, self._notify))
+        watch = asyncio.create_task(self._watch(v))
+        sub = asyncio.create_task(self._subscribe(v))
+        stopper = asyncio.create_task(self._stop.wait())
+        await asyncio.wait({conn, watch, sub, stopper},
+                           return_when=asyncio.FIRST_COMPLETED)
+        for t in (conn, watch, sub, stopper):
+            t.cancel()
+        await asyncio.gather(conn, watch, sub, stopper, return_exceptions=True)
 
     async def _watch(self, v) -> None:
         async for ev in v.WatchCatalog(pb.CatalogRequest()):

@@ -12,48 +12,34 @@ import asyncio
 import logging
 import threading
 
-import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import (CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain, call_soon_safe,
-               convert, watch_connectivity)
+from . import CONTRACT_VERSION, call_soon_safe, convert, watch_connectivity
+from .session import ReconnectingClient
 
 log = logging.getLogger("hub.agent")
 
 
-class HubAgent:
+class HubAgent(ReconnectingClient):
+    _thread_name = "hub-agent"
+    _disconnect_label = "hub"
+
     def __init__(self, addr: str, agent_id: str = "ferrodac", on_state=None):
-        self._addr = addr
+        super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
-        self._on_state = on_state              # callback(connected: bool, detail: str)
-        self._thread: "threading.Thread | None" = None
-        self._loop: "asyncio.AbstractEventLoop | None" = None
         self._outq: "asyncio.Queue | None" = None
-        self._stop: "asyncio.Event | None" = None
         self._lock = threading.Lock()
         self._devices: dict = {}               # uuid -> pb.DeviceDescriptor
         self._id2uuid: dict = {}               # device-id (instance_id OR data_id) -> uuid
 
-    # -- lifecycle -----------------------------------------------------------
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="hub-agent", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        call_soon_safe(self._loop, self._do_stop)
-        if self._thread is not None:
-            self._thread.join(timeout=3.0)
-        self._thread = None
+    def _on_loop_created(self, loop) -> None:
+        self._outq = asyncio.Queue()           # so _send has a queue before session 1
 
     def _do_stop(self) -> None:
-        if self._stop is not None:
-            self._stop.set()
+        super()._do_stop()                     # set the stop event…
         if self._outq is not None:
-            self._outq.put_nowait(None)        # unblock the out generator
+            self._outq.put_nowait(None)        # …and unblock the out generator
 
     # -- public API (any thread) --------------------------------------------
     def announce(self, descriptor) -> None:
@@ -107,65 +93,21 @@ class HubAgent:
         except Exception:
             pass
 
-    def _notify(self, connected: bool, detail: str) -> None:
-        log.info("%s", detail)
-        if self._on_state is not None:
-            try:
-                self._on_state(connected, detail)
-            except Exception:
-                pass
-
-    def _run(self) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    async def _run_session(self, ch) -> None:
+        # A FRESH queue per session: readings that piled up while offline die with
+        # the old queue (they're the live view only — durability is the store sync),
+        # and a half-cancelled previous generator can never steal from the new one.
         self._outq = asyncio.Queue()
-        self._stop = asyncio.Event()
-        self._loop = loop                      # set last → _send sees a ready queue
+        # report the REAL link from the channel state, not from the outgoing
+        # generator running (which fires even when the hub is down)
+        watcher = asyncio.ensure_future(
+            watch_connectivity(ch, self._addr, self._notify))
         try:
-            loop.run_until_complete(self._session_loop())
+            call = rpc.IngestStub(ch).Session(self._outgen())
+            async for _hub_msg in call:
+                pass                           # M1: down channel unused
         finally:
-            _drain(loop)
-            loop.close()
-
-    async def _session_loop(self) -> None:
-        while not self._stop.is_set():
-            watcher = None
-            # A FRESH queue per session: readings that piled up while offline die
-            # with the old queue (they're the live view only — durability is the
-            # store sync), and a half-cancelled previous generator can never steal
-            # messages from the new session.
-            self._outq = asyncio.Queue()
-            try:
-                async with grpc.aio.insecure_channel(
-                        self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
-                    # report the REAL link from the channel state, not from the
-                    # outgoing generator running (which fires even when the hub is down)
-                    watcher = asyncio.ensure_future(
-                        watch_connectivity(ch, self._addr, self._notify))
-                    stub = rpc.IngestStub(ch)
-                    call = stub.Session(self._outgen())
-                    async for _hub_msg in call:
-                        pass                   # M1: down channel unused
-            except asyncio.CancelledError:
-                # grpc.aio also surfaces a locally-cancelled CALL this way (e.g.
-                # the hub vanishing mid-write). Only OUR stop() is a shutdown;
-                # anything else is a disconnect → reconnect. Treating every
-                # CancelledError as shutdown left the agent silently dead after
-                # a hub restart (button green, store sync still running).
-                if self._stop.is_set():
-                    break
-                self._notify(False, "hub disconnected: stream cancelled")
-            except Exception as e:             # hub down / connection lost
-                self._notify(False, f"hub disconnected: {e}")
-            finally:
-                if watcher is not None:
-                    watcher.cancel()
-            if self._stop.is_set():
-                break
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass                           # backoff, then reconnect
+            watcher.cancel()
 
     async def _outgen(self):
         outq = self._outq                      # pin THIS session's queue (a late-

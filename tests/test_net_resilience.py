@@ -43,7 +43,7 @@ def _desc(uuid="fake-uuid-1", name="Fake Gauge"):
 def test_session_loop_survives_a_cancelled_call(monkeypatch):
     """A CancelledError from the channel/call while stop() was NOT requested is a
     disconnect → the loop must retry, not silently end (the wedged-agent bug)."""
-    import ferrodac.net.agent as agent_mod
+    import ferrodac.net.session as session_mod   # the reconnect FSM opens the channel
 
     attempts = {"n": 0}
 
@@ -57,7 +57,7 @@ def test_session_loop_survives_a_cancelled_call(monkeypatch):
         async def __aexit__(self, *exc):
             return False
 
-    monkeypatch.setattr(agent_mod.grpc.aio, "insecure_channel", CancelledChannel)
+    monkeypatch.setattr(session_mod.grpc.aio, "insecure_channel", CancelledChannel)
     states = []
     ag = HubAgent("127.0.0.1:1", agent_id="t",
                   on_state=lambda c, d: states.append((c, d)))

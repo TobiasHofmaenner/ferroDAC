@@ -20,52 +20,39 @@ import base64
 import logging
 import threading
 
-import grpc
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import CONTRACT_VERSION, GRPC_CHANNEL_OPTIONS, _drain, call_soon_safe
+from . import CONTRACT_VERSION, call_soon_safe
+from .session import ReconnectingClient
 
 log = logging.getLogger("hub.docs")
 
 
-class HubDocSync:
+class HubDocSync(ReconnectingClient):
+    _thread_name = "hub-docs"
+    _disconnect_label = "doc sync"
+
     def __init__(self, addr: str, agent_id: str = "ferrodac",
                  on_seed=None, on_update=None, on_awareness=None,
                  on_presence=None, on_state=None):
-        self._addr = addr
+        super().__init__(addr, on_state)     # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
         self._on_seed = on_seed              # (doc_id, should_seed: bool, text: str)
         self._on_update = on_update          # (doc_id, update_b64: str)
         self._on_awareness = on_awareness    # (doc_id, state_b64: str)
         self._on_presence = on_presence      # (doc_id, actors: list[str])
-        self._on_state = on_state            # (connected: bool, detail: str)
-        self._thread: "threading.Thread | None" = None
-        self._loop: "asyncio.AbstractEventLoop | None" = None
         self._outq: "asyncio.Queue | None" = None
-        self._stop: "asyncio.Event | None" = None
         self._lock = threading.Lock()
         self._joined: dict = {}              # doc_id -> (actor, color), replayed on reconnect
 
-    # -- lifecycle (mirror HubAgent) ----------------------------------------
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="hub-docs", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        call_soon_safe(self._loop, self._do_stop)
-        if self._thread is not None:
-            self._thread.join(timeout=3.0)
-        self._thread = None
+    def _on_loop_created(self, loop) -> None:
+        self._outq = asyncio.Queue()         # so _send has a queue before session 1
 
     def _do_stop(self) -> None:
-        if self._stop is not None:
-            self._stop.set()
+        super()._do_stop()                   # set the stop event…
         if self._outq is not None:
-            self._outq.put_nowait(None)      # unblock the out generator
+            self._outq.put_nowait(None)      # …and unblock the out generator
 
     # -- public API (any thread) — base64 in/out at the Qt/JS seam ----------
     def join(self, doc_id: str, actor: str = "", color: str = "") -> None:
@@ -100,14 +87,6 @@ class HubDocSync:
         except Exception:
             pass
 
-    def _notify(self, connected: bool, detail: str) -> None:
-        log.info("%s", detail)
-        if self._on_state is not None:
-            try:
-                self._on_state(connected, detail)
-            except Exception:
-                pass
-
     def _dispatch(self, msg) -> None:
         """Hand an incoming DocServerMsg to the right callback (worker thread)."""
         which = msg.WhichOneof("msg")
@@ -126,41 +105,10 @@ class HubDocSync:
         except Exception:                    # a callback must never kill the stream
             log.exception("doc callback failed")
 
-    def _run(self) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self._outq = asyncio.Queue()
-        self._stop = asyncio.Event()
-        self._loop = loop                    # set last → _send sees a ready queue
-        try:
-            loop.run_until_complete(self._session_loop())
-        finally:
-            _drain(loop)
-            loop.close()
-
-    async def _session_loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                async with grpc.aio.insecure_channel(
-                        self._addr, options=GRPC_CHANNEL_OPTIONS) as ch:
-                    stub = rpc.DocsStub(ch)
-                    call = stub.Session(self._outgen())
-                    async for msg in call:
-                        self._dispatch(msg)
-            except asyncio.CancelledError:
-                # grpc.aio also surfaces a locally-cancelled CALL this way; only
-                # OUR stop() is a shutdown — anything else is a disconnect.
-                if self._stop.is_set():
-                    break
-                self._notify(False, "doc sync disconnected: stream cancelled")
-            except Exception as e:           # hub down / connection lost
-                self._notify(False, f"doc sync disconnected: {e}")
-            if self._stop.is_set():
-                break
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass                         # backoff, then reconnect
+    async def _run_session(self, ch) -> None:
+        call = rpc.DocsStub(ch).Session(self._outgen())
+        async for msg in call:
+            self._dispatch(msg)
 
     async def _outgen(self):
         yield pb.DocClientMsg(hello=pb.Hello(
