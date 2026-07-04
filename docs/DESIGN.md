@@ -1434,3 +1434,86 @@ storage by ownership — structured truth in the hub/Zarr; human files in a file
 *use* rather than rebuild; reference-live + freeze-at-record-time for integrity. The
 project local backup ships first as a **client-side zip** (readable files + an invisible
 history bundle), read-only purely by virtue of being a zip.
+
+## 21. Execution model — thread affinity as a platform contract (recorded 2026-07-04)
+
+The 2026-07 audit's core finding: the data model was right but **no contract said where
+code runs**, so the whole data plane (zarr writes, O(N) rollups, protobuf conversion,
+processors, chart ingest) executed on the GUI thread. §21 makes thread placement a
+platform-owned, SDK-publishable contract. Design chosen by a three-way panel
+(minimal-diff / contract-first / robustness-first) + grafts; every element has a
+day-one in-repo consumer.
+
+### 21.1 Invariants (normative)
+
+- **I-1 Qt finalization.** `gc` is disabled process-wide and collected from a
+  GUI-thread QTimer (`diagnostics.install_gui_thread_gc` — the segfault fix; never
+  remove). Therefore QObjects are created, used, and destroyed on the GUI thread
+  ONLY. Code on any worker lane, in processors, or in task fns must not construct,
+  call, or hold the last reference to a QObject. Cross-thread effects go through Qt
+  signals connected with explicit `Qt.QueuedConnection` (the hubclient discipline).
+  The diagnostics Qt-message handler is the runtime tripwire.
+- **I-2 Durable writer QoS.** StoreWriter delivery is lossless and per-source ordered;
+  crash loss stays bounded by its ~2 s flush cadence. Display sinks are lossy by design.
+- **I-3 Qt-free core.** `core/bus.py` and `store/replay.py` stay importable and
+  drivable without Qt (server, selftests). Worker lanes are plain `threading.Thread`s.
+- **I-4 SDK additive-only.** `Processor.process` / `Widget.feed` signatures never
+  change; their execution THREAD is documented with a default and an opt-out.
+
+### 21.2 Bus lanes (implemented)
+
+`Bus.subscribe(sink, thread="inline"|"worker", mode="lossless"|"conflate", name=...)`
+returns a callable `Subscription` (back-compat: calling it unsubscribes).
+
+- `inline` (default — every pre-§21 subscriber unchanged): the sink runs during
+  `drain()` on whatever thread pumps the bus. In the live app that is the GUI thread —
+  the only lane that may touch Qt.
+- `worker`: the Bus creates a dedicated pump — ONE plain thread **per worker sink**
+  (`fd-bus-<name>`), so a blocked/slow sink (e.g. a third-party plugin) can only stall
+  itself, never the store writer. `drain()` just enqueues the batch per lane (O(1))
+  and never waits on workers.
+- Modes: `lossless` = unbounded FIFO, never drops, backlog logged past a high-water
+  mark, fully delivered on close (the writer). `conflate` = backlog beyond 8 batches
+  is merged in order; beyond a reading cap the oldest are dropped and counted (agent
+  feed, processors — the live view is lossy by design).
+- Ordering: per sink, batches arrive in drain order, publish order within a batch →
+  per-source order holds for every sink. No cross-lane ordering (the writer may lag
+  the chart) — that relaxation is what buys isolation.
+- `drain(max_batch)` caps a post-stall catch-up batch (the audit's death-spiral
+  amplifier); the remainder stays queued for the next tick. Delay, never loss.
+- Memory model: every cross-thread handoff is a lock/Condition pair or a queued Qt
+  signal — each establishes happens-before. ZarrStore serializes all access behind an
+  internal RLock (single writer + serialized readers; chosen over a store thread by
+  all three panel designs); HistoryBuffer has its own lock; `Resolver.tiers` is
+  rebound atomically and readers bind it locally. Residual (documented): a long raw
+  read holds the store lock and can delay a flush by its duration — off-GUI, so never
+  a freeze; Tier-1 chunking shrinks it.
+- Shutdown: `Subscription.close(timeout)` delivers a lossless backlog then joins its
+  own pump — so `StoreWriter.stop()` is self-sufficient and closeEvent order is
+  forgiving. `Engine.shutdown()` stops the timer, stops devices, drains once, then
+  `bus.close()`.
+- Observability (Tier-0 deliverable, not an afterthought): pumps warn on backlog
+  high-water; `bus.stats()`/`engine.stats()` expose depths/drops/errors/drain-ms;
+  `diagnostics.install_gui_watchdog()` logs any GUI stall > threshold WITH the main
+  thread's stack — the audit's months-invisible costs become log lines.
+
+### 21.3 Async reads + tasks (target; next steps on these rails)
+
+- **ReadService** (Qt-free, `store/asyncread.py`): ALL UI-initiated resolver reads run
+  on a small dedicated pool (2 threads, so a 4 s hub-RPC timeout can't starve local
+  reads); results marshal to the GUI via one `GuiBridge` QObject (QueuedConnection);
+  key-based coalescing/supersession (a newer Timeline tick obsoletes the in-flight
+  query for the same series); a ~2 s coverage TTL cache; `sync()` accessor for task
+  threads. The tier protocol itself stays synchronous.
+- **TaskRunner** (Qt-free `core/tasks.py` + thin `ui/taskui.py`): every user-triggered
+  wait runs as a task with what/why/progress/ETA/cancel; status-bar chip immediately,
+  non-modal escalation after ~1.5 s; reentrancy via keys (park/scrub = supersede,
+  duplicate export = reject); exit-while-busy shows a Wait/Cancel gate. No
+  `processEvents` anywhere. First consumers: park/scrub re-stream (with a GUI-paced
+  chunk pump + a generation counter so a superseded re-stream can never smear stale
+  readings into a newer view) and stop-recording/crash-recovery CSV export.
+- **Processors** then move to a worker lane on the playback bus with exactly one GUI
+  marshal (derived control writes reach `manager.write`, which creates QThreads →
+  QueuedConnection signal), and the lane/mode constants + threading doc are published
+  through `ferrodac.plugin` (`Widget.feed` guaranteed GUI; `Processor.process` default
+  worker with a `requires_gui = True` opt-out).

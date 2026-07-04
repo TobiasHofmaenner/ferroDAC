@@ -71,6 +71,54 @@ def install_gui_thread_gc(interval_ms: int = 2000):
     return _gc_timer
 
 
+_wd_thread = None       # kept alive: the GUI-stall watchdog checker
+
+
+def install_gui_watchdog(threshold_ms: int = 500, beat_ms: int = 100):
+    """Make GUI-thread stalls LOUD (DESIGN §21.2): a GUI QTimer stamps a
+    heartbeat; a plain daemon thread watches it and, when the gap exceeds
+    `threshold_ms`, logs the stall WITH the main thread's Python stack — i.e.
+    it names the blocking call while it is still blocking. Logs the total
+    duration when the GUI comes back. The audit's months-invisible per-tick
+    costs become log lines. Returns the heartbeat timer."""
+    global _wd_thread
+    if os.environ.get("FERRODAC_NO_DIAG"):
+        return None
+    import time as _time
+
+    from qtpy.QtCore import QTimer
+    cell = {"beat": _time.monotonic(), "stalled_since": None}
+    timer = QTimer()
+    timer.timeout.connect(lambda: cell.__setitem__("beat", _time.monotonic()))
+    timer.start(max(20, int(beat_ms)))
+
+    def _watch() -> None:
+        main = threading.main_thread()
+        while True:
+            _time.sleep(0.25)
+            now = _time.monotonic()
+            gap = now - cell["beat"]
+            if gap > threshold_ms / 1000.0:
+                if cell["stalled_since"] is None:
+                    cell["stalled_since"] = cell["beat"]
+                    frame = sys._current_frames().get(main.ident)
+                    stack = "".join(traceback.format_stack(frame)) if frame else "?"
+                    _write(f"[watchdog] GUI thread stalled > {gap * 1000:.0f} ms — "
+                           f"main-thread stack:\n"
+                           + "".join("    " + ln for ln in stack.splitlines(True)))
+            elif cell["stalled_since"] is not None:
+                total = (now - cell["stalled_since"]) * 1000.0
+                cell["stalled_since"] = None
+                _write(f"[watchdog] GUI thread responsive again "
+                       f"(stall ≈ {total:.0f} ms)\n")
+
+    _wd_thread = threading.Thread(target=_watch, name="fd-gui-watchdog",
+                                  daemon=True)
+    _wd_thread.start()
+    timer._fd_watchdog = _wd_thread     # keep both alive together
+    return timer
+
+
 def _write(s: str) -> None:
     try:
         sys.stderr.write(s)

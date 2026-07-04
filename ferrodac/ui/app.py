@@ -4362,7 +4362,7 @@ def main(argv=None) -> int:
     # crash + threading diagnostics: a segfault now prints a Python stack of every
     # thread, and a Qt call from the wrong thread is flagged with its origin stack.
     from ..diagnostics import install as _install_diagnostics
-    from ..diagnostics import install_gui_thread_gc
+    from ..diagnostics import install_gui_thread_gc, install_gui_watchdog
     _install_diagnostics(os.path.dirname(logpath) if logpath else "")
 
     # QtWebEngine (the in-app Docs view) wants shared GL contexts set BEFORE the
@@ -4376,6 +4376,8 @@ def main(argv=None) -> int:
     app = QApplication(sys.argv if argv is None else argv)
     install_gui_thread_gc()                # collect garbage on the GUI thread only —
     #                                        prevents the zarr_io cross-thread-GC segfault
+    _watchdog = install_gui_watchdog()     # log any GUI stall >0.5 s with its stack —
+    #                                        keep freezes observable (DESIGN §21.2)
     app.setApplicationName("ferroDAC")
     icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                              "assets", "app.png")

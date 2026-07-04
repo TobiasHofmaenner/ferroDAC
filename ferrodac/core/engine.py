@@ -14,6 +14,8 @@ This is the one door everything hangs off:
 
 from __future__ import annotations
 
+import time
+
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 from qtpy.QtCore import QObject, QTimer, Signal
 
@@ -25,10 +27,13 @@ class Engine(QObject):
     #: emitted on the GUI thread after each drain (consumers may read latest())
     tick = Signal()
 
-    def __init__(self, drain_ms: int = 50, parent=None):
+    def __init__(self, drain_ms: int = 50, parent=None, max_batch: int = 5000):
         super().__init__(parent)
         self._bus = Bus()
         self._devices: dict[str, object] = {}
+        self._max_batch = max_batch     # caps a post-stall catch-up batch (§21.2)
+        self._drain_ms = 0.0            # EWMA of the GUI drain cost
+        self._drain_ms_max = 0.0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._drain)
         self._timer.start(drain_ms)
@@ -41,11 +46,19 @@ class Engine(QObject):
     def publish(self, reading: Reading) -> None:
         self._bus.publish(reading)
 
-    def subscribe(self, sink):
-        return self._bus.subscribe(sink)
+    def subscribe(self, sink, **kw):
+        """Register a bus sink. Affinity/QoS kwargs (`thread=`, `mode=`, `name=`)
+        pass through to Bus.subscribe — DESIGN §21.2."""
+        return self._bus.subscribe(sink, **kw)
 
     def latest(self) -> dict:
         return self._bus.latest()
+
+    def stats(self) -> dict:
+        """Drain timing + per-sink lane stats — the observability hook (§21.2)."""
+        return {"drain_ms": round(self._drain_ms, 2),
+                "drain_ms_max": round(self._drain_ms_max, 2),
+                **self._bus.stats()}
 
     # -- device streaming ----------------------------------------------------
     def start_device(self, device) -> None:
@@ -65,7 +78,11 @@ class Engine(QObject):
 
     # -- drain (GUI thread): pump the bus, then notify -----------------------
     def _drain(self) -> None:
-        if self._bus.drain():            # fans out to sinks + updates latest
+        t0 = time.monotonic()
+        if self._bus.drain(self._max_batch):   # inline sinks + worker enqueues
+            dt = (time.monotonic() - t0) * 1000.0
+            self._drain_ms += 0.1 * (dt - self._drain_ms)
+            self._drain_ms_max = max(self._drain_ms_max, dt)
             self.tick.emit()
 
     def shutdown(self) -> None:
@@ -75,3 +92,5 @@ class Engine(QObject):
                 d.stop()
             except Exception:
                 pass
+        self._bus.drain()                # flush stragglers to every lane…
+        self._bus.close(timeout=10.0)    # …then join the pumps (lossless flushed)

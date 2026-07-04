@@ -20,8 +20,8 @@ class _Engine:
     def __init__(self):
         self._subs = []
 
-    def subscribe(self, cb):
-        self._subs.append(cb)
+    def subscribe(self, cb, **_kw):        # affinity kwargs (§21.2): this fake
+        self._subs.append(cb)               # delivers synchronously either way
         return lambda: self._subs.remove(cb)
 
     def publish(self, batch):

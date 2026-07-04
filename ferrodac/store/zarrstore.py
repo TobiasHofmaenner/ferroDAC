@@ -18,7 +18,9 @@ The config/state stream is sparse, so it lives in the source's attrs as
 
 from __future__ import annotations
 
+import functools
 import math
+import threading
 from urllib.parse import quote
 
 import numpy as np
@@ -27,6 +29,19 @@ import zarr
 _F = 16              # rollup downsample factor between pyramid levels
 _TOP = 512           # build levels until the top tier has <= this many buckets
 _CHUNK = 1 << 20     # raw array chunk (~1M samples)
+
+
+def _locked(fn):
+    """Serialize a public method behind the store's RLock (DESIGN §21.2): one
+    writer (the store-writer pump) + many readers (resolver, sync, export, GUI
+    shutdown) share this object, and zarr does not promise read-during-resize
+    safety on one open group. RLock because publics call publics. Rule for new
+    code: public methods take the lock; ``_``-helpers assume it is held."""
+    @functools.wraps(fn)
+    def wrapper(self, *a, **k):
+        with self._lock:
+            return fn(self, *a, **k)
+    return wrapper
 
 
 def _downsample(t, mn, mx, factor):
@@ -47,6 +62,7 @@ class ZarrStore:
 
     def __init__(self, root, mode: str = "a"):
         self.root = zarr.open_group(store=str(root), mode=mode)
+        self._lock = threading.RLock()   # see _locked — cross-thread store access
 
     # -- sources -------------------------------------------------------------
     @staticmethod
@@ -60,6 +76,7 @@ class ZarrStore:
         # exactly as the old scheme did, so colon-free keys keep the same group.
         return quote(str(key), safe="")
 
+    @_locked
     def add_source(self, uuid, name="", unit="", dtype="scalar"):
         g = self.root.require_group(self._gname(uuid))
         if "key" not in g.attrs:                     # init once, original key kept
@@ -69,10 +86,12 @@ class ZarrStore:
             g.attrs["config"] = []
         return g
 
+    @_locked
     def sources(self) -> list:
         return [self.root[n].attrs.get("key", n)
                 for n in self.root.group_keys() if n != self._DEVICES]
 
+    @_locked
     def source_dtype(self, uuid) -> str:
         """The stored datatype tag of a source ("scalar" | "trace" | …) — lets
         the replay path pick read_raw vs read_raw_trace. "scalar" if unknown."""
@@ -81,6 +100,7 @@ class ZarrStore:
         except KeyError:
             return "scalar"
 
+    @_locked
     def source_meta(self, uuid):
         """(name, unit, dtype) for a recorded source — so the dashboard can show
         historic channels as routable ports even with no live device."""
@@ -99,6 +119,7 @@ class ZarrStore:
     def _device(self, device_id):
         return self.root[self._DEVICES][self._gname(device_id)]
 
+    @_locked
     def put_device(self, device_id, fields: dict) -> None:
         """Create/refresh a device's identity + current metadata snapshot."""
         g = self.root.require_group(self._DEVICES).require_group(self._gname(device_id))
@@ -107,6 +128,7 @@ class ZarrStore:
             g.attrs["meta"] = []
         g.attrs["current"] = dict(fields or {})
 
+    @_locked
     def emit_device_meta(self, device_id, t: float, field: str, value) -> None:
         """Append a metadata change [t, field, value] to a device's change-log."""
         g = self._device(device_id)
@@ -114,6 +136,7 @@ class ZarrStore:
         ev.append([float(t), str(field), value])
         g.attrs["meta"] = ev
 
+    @_locked
     def device_record_at(self, device_id, t: float) -> dict:
         """The device's metadata as of time t: the change-log folded (events with
         et <= t win). Falls back to the current snapshot when the log is empty or t
@@ -129,6 +152,7 @@ class ZarrStore:
                 rec[k] = v
         return rec or dict(g.attrs.get("current", {}))
 
+    @_locked
     def device_records(self) -> list:
         """Current record of every known device — for /dev historic enumeration."""
         if self._DEVICES not in self.root:
@@ -136,6 +160,7 @@ class ZarrStore:
         dg = self.root[self._DEVICES]
         return [dict(dg[n].attrs.get("current", {})) for n in dg.group_keys()]
 
+    @_locked
     def device_ids(self) -> list:
         if self._DEVICES not in self.root:
             return []
@@ -143,6 +168,7 @@ class ZarrStore:
         return [dg[n].attrs.get("device_id", n) for n in dg.group_keys()]
 
     # -- store-and-forward sync (epoch-incremental copy, DESIGN §12.1) --------
+    @_locked
     def epoch_lengths(self) -> dict:
         """{(source_key, epoch): n} — per-epoch sample counts. The hub reports
         these as the sync truth; the agent uploads any epoch tail the hub lacks."""
@@ -156,6 +182,7 @@ class ZarrStore:
                 out[(key, ep)] = int(g[ep].attrs.get("n", 0))
         return out
 
+    @_locked
     def read_epoch(self, uuid, epoch, start, end) -> dict:
         """Raw samples [start:end] of one epoch BY INDEX — the unsynced tail to
         upload. Self-describing so the hub can apply it verbatim."""
@@ -167,6 +194,7 @@ class ZarrStore:
         return {"dtype": "scalar", "t": np.asarray(eg["t"][start:end]),
                 "v": np.asarray(eg["v"][start:end])}
 
+    @_locked
     def apply_chunk(self, uuid, epoch, chunk) -> int:
         """Append a synced chunk (from read_epoch) at the same source/epoch — the
         hub side of store-and-forward. Idempotent-friendly: returns the new n."""
@@ -187,12 +215,14 @@ class ZarrStore:
         return self.root[self._gname(uuid)]
 
     # -- config / state stream (sparse; folds to state-at-T) -----------------
+    @_locked
     def emit_config(self, uuid, t: float, key: str, value) -> None:
         g = self._source(uuid)
         ev = list(g.attrs.get("config", []))
         ev.append([float(t), str(key), value])
         g.attrs["config"] = ev
 
+    @_locked
     def config_at(self, uuid, t: float) -> dict:
         state: dict = {}
         for et, k, v in self._source(uuid).attrs.get("config", []):
@@ -200,11 +230,13 @@ class ZarrStore:
                 state[k] = v
         return state
 
+    @_locked
     def config_events(self, uuid, t0=None, t1=None) -> list:
         return [(et, k, v) for et, k, v in self._source(uuid).attrs.get("config", [])
                 if (t0 is None or et >= t0) and (t1 is None or et <= t1)]
 
     # -- write samples (chunk-wise append into the current/declared epoch) ---
+    @_locked
     def append(self, uuid, t, v, epoch: str = None) -> None:
         g = self._source(uuid)
         t = np.asarray(t, dtype="f8").ravel()
@@ -229,6 +261,7 @@ class ZarrStore:
         eg.attrs["n"] = int(n0 + len(t))
         eg.attrs["dirty"] = True
 
+    @_locked
     def finalize_rollups(self, uuid, epoch: str = None) -> None:
         """(Re)build the min/max pyramid for an epoch (call on flush/close)."""
         g = self._source(uuid)
@@ -257,6 +290,7 @@ class ZarrStore:
             g[name][:] = arr
 
     # -- read (the resolver tier protocol) -----------------------------------
+    @_locked
     def coverage(self, uuid) -> list:
         try:
             g = self._source(uuid)
@@ -269,6 +303,7 @@ class ZarrStore:
                 out.append((float(a["t0"]), float(a["t1"])))
         return out
 
+    @_locked
     def read_raw(self, uuid, t0, t1):
         """FULL-RESOLUTION raw samples in [t0,t1] across epochs — **no rollup,
         no downsampling** (the analysis path: downsampling would low-pass-filter
@@ -301,6 +336,7 @@ class ZarrStore:
         return t, v
 
     # -- traces (2-D: a spectrum/scan per timestamp) -------------------------
+    @_locked
     def append_trace(self, uuid, t, x, y, epoch: str) -> None:
         """Append one scan (axis `x`, intensities `y`) at time `t`. The axis is
         fixed within an epoch; the writer rolls to a new epoch on an axis change
@@ -330,6 +366,7 @@ class ZarrStore:
         ya.resize((n0 + 1, m)); ya[n0] = y
         eg.attrs["t0"] = float(ta[0]); eg.attrs["t1"] = float(t); eg.attrs["n"] = n0 + 1
 
+    @_locked
     def read_raw_trace(self, uuid, t0, t1) -> list:
         """FULL-RES trace scans in [t0,t1] as per-epoch blocks (the axis differs
         per epoch): list of (times[k], Y[k, m], x[m]). For analysis/replay."""
@@ -352,6 +389,7 @@ class ZarrStore:
                             np.asarray(eg["x"][:])))
         return out
 
+    @_locked
     def query_trace(self, uuid, t0, t1, max_scans=400) -> list:
         """For the waterfall *display*: scans in the window, time-decimated to
         ~max_scans representative spectra (display only — never for math)."""
@@ -363,6 +401,7 @@ class ZarrStore:
             out.append((t, Y, x))
         return out
 
+    @_locked
     def query(self, uuid, t0, t1, max_points=2000):
         """Windowed, resolution-aware min/max envelope, stitched across epochs.
 

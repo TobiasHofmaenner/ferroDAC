@@ -132,7 +132,11 @@ class HubController(QObject):
                                    on_state=self._state_cb("agent"))
             self._agent.start()
             self._agent.set_devices(self.manager.active_descriptors())
-            self._agent_unsub = self.engine.subscribe(self._feed_agent)
+            # per-reading protobuf conversion runs on its own bus pump, not the
+            # GUI drain; the live feed is lossy by design → conflate (§21.2)
+            self._agent_unsub = self.engine.subscribe(
+                self._feed_agent, thread="worker", mode="conflate",
+                name="hub-agent")
             self.manager.active_changed.connect(self._on_active_changed)
             # store-and-forward: upload the local durable store to the hub (live
             # tails + backfill of anything recorded while offline). Headless —

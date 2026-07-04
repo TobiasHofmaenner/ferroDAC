@@ -60,6 +60,10 @@ class RamTier:
 
 
 class Resolver:
+    # `tiers` is REBOUND atomically on mutation (never mutated in place) and
+    # readers bind it locally first — so resolver reads running on worker
+    # threads (DESIGN §21.3) can never see a half-edited list when the GUI
+    # attaches/detaches the hub tier. No lock on the read path.
     def __init__(self, tiers):
         self.tiers = list(tiers)                         # nearest → far
         self._remote = None
@@ -69,16 +73,16 @@ class Resolver:
         the hub fills history we lack locally). Replaces any prior remote."""
         self.clear_remote()
         self._remote = tier
-        self.tiers.append(tier)
+        self.tiers = [*self.tiers, tier]
 
     def clear_remote(self) -> None:
-        if self._remote is not None and self._remote in self.tiers:
-            self.tiers.remove(self._remote)
+        if self._remote is not None:
+            self.tiers = [t for t in self.tiers if t is not self._remote]
         self._remote = None
 
     def coverage(self, series):
         ivs = []
-        for tier in self.tiers:
+        for tier in list(self.tiers):
             ivs += list(tier.coverage(series))
         return _merge(ivs)
 
@@ -144,7 +148,7 @@ class Resolver:
     def source_dtype(self, series) -> str:
         """First tier that actually knows the source's dtype ('trace'|'scalar');
         lets the replay pick read_raw vs read_raw_trace for hub-only sources too."""
-        for tier in self.tiers:
+        for tier in list(self.tiers):
             f = getattr(tier, "source_dtype", None)
             if f is None:
                 continue
@@ -156,7 +160,8 @@ class Resolver:
     def _partition(self, series, t0, t1):
         """Tile [t0,t1] into (a, b, tier|None) segments — nearest covering tier
         wins each segment; None = a true gap (no tier has it)."""
-        covs = [list(tier.coverage(series)) for tier in self.tiers]
+        tiers = list(self.tiers)                         # atomic snapshot (§21.2)
+        covs = [list(tier.coverage(series)) for tier in tiers]
         edges = {t0, t1}
         for cov in covs:
             for a, b in cov:
@@ -171,7 +176,7 @@ class Resolver:
             owner = None
             for i, cov in enumerate(covs):
                 if any(lo <= mid <= hi for lo, hi in cov):
-                    owner = self.tiers[i]                # nearest tier wins
+                    owner = tiers[i]                     # nearest tier wins
                     break
             if segs and segs[-1][2] is owner:            # merge adjacent same-owner
                 segs[-1] = (segs[-1][0], b, owner)

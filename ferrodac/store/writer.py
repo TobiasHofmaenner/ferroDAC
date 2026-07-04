@@ -79,18 +79,25 @@ class StoreWriter:
 
     # -- lifecycle -----------------------------------------------------------
     def attach(self, engine) -> None:
+        # The durable write path runs on its OWN bus pump thread (DESIGN §21.2):
+        # lossless + per-source ordered, and a slow disk can never stall the GUI.
         if self._unsub is None:
-            self._unsub = engine.subscribe(self.feed)
+            self._unsub = engine.subscribe(self.feed, thread="worker",
+                                           mode="lossless", name="store-writer")
 
     def stop(self) -> None:
         if self._unsub is not None:
-            self._unsub()
+            close = getattr(self._unsub, "close", None)
+            if close is not None:
+                close(timeout=10.0)     # deliver the backlog, then join the pump —
+            else:                       # self-sufficient regardless of shutdown order
+                self._unsub()
             self._unsub = None
-        self.flush_all()
-        for key in list(self._known):           # final rollups for fast historic query
-            self._rollup(key)
+        self.flush_all()                # caller thread; race-free (pump is joined,
+        for key in list(self._known):   # ZarrStore serializes behind its RLock)
+            self._rollup(key)           # final rollups for fast historic query
 
-    # -- ingest (engine thread) ----------------------------------------------
+    # -- ingest (the writer's bus pump thread — single-threaded by contract) --
     def feed(self, batch) -> None:
         now = time.monotonic()
         for r in batch:
