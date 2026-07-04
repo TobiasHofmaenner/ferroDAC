@@ -83,6 +83,34 @@ def test_removing_the_last_source_hides_its_extra_axis(qapp):
     assert _primary(p).keys == {"g/p"}         # primary untouched
 
 
+def test_temperature_defaults_to_linear_and_keeps_its_unit_label(qapp):
+    """A temperature chart must default to a LINEAR Y axis — on log, ~20 °C data sits
+    inside one decade so pyqtgraph shows no ticks and the axis (with its °C label)
+    collapses. Pressure stays log (vacuum spans decades)."""
+    t = _chart(qapp)
+    t.add_source("s/t", _src("temp", "°C"))
+    assert t._logy is False
+    assert t.plot.getAxis("left").labelText == "[°C]"
+
+    p = _chart(qapp)
+    p.add_source("g/p", _src("P", "mbar"))
+    assert p._logy is True                     # pressure keeps the log default
+
+
+def test_explicit_log_choice_overrides_and_persists(qapp):
+    """A user's explicit Log-Y toggle wins over the per-dimension default and is the
+    only case a `logy` is saved (so a fresh auto chart restores to its default)."""
+    t = _chart(qapp)
+    t.apply_config({"logy": True})             # force log on a temp chart
+    t.add_source("s/t", _src("temp", "°C"))
+    assert t._logy is True
+    assert "logy" in t.state()                 # explicit → persisted
+
+    auto = _chart(qapp)
+    auto.add_source("s/t", _src("temp", "°C"))
+    assert "logy" not in auto.state()          # auto default → not persisted
+
+
 def test_uncertainty_bands_toggle_convert_and_scale(qapp):
     p = _chart(qapp)
     p.apply_config({"logy": False})           # linear axis → assert raw values directly

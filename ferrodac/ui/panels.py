@@ -282,6 +282,8 @@ class ChartPanel(Panel):
         self._t0 = None
         self._ylabel = ""
         self._logy = True
+        self._logy_explicit = False           # True once the user toggles it → stops the
+        #                                       per-dimension default from overriding
         self.clock = None
         self.markers = None
         self._marker_lines: dict = {}
@@ -309,6 +311,7 @@ class ChartPanel(Panel):
             self._apply_primary_label()       # manual label overrides the auto [unit]
         if "logy" in values:
             self._logy = bool(values["logy"])
+            self._logy_explicit = True                           # user chose → keep it
             self.plot.setLogMode(x=False, y=self._logy)          # primary axis + its curves
             for slot in self._axes.values():                     # extra axes + their curves
                 if not slot.primary:
@@ -331,14 +334,19 @@ class ChartPanel(Panel):
         self.plot.setTitle(name or None)
 
     def state(self):
-        return {"ylabel": self._ylabel, "logy": self._logy,
-                "show_sigma": self._bands_on, "sigma_k": self._k}
+        d = {"ylabel": self._ylabel,
+             "show_sigma": self._bands_on, "sigma_k": self._k}
+        if self._logy_explicit:              # only persist a log choice the user MADE, so a
+            d["logy"] = self._logy           # restored auto chart keeps the per-dimension default
+        return d
 
     def set_state(self, st):
-        self.apply_config({"ylabel": st.get("ylabel", ""),
-                           "logy": st.get("logy", True),
-                           "show_sigma": st.get("show_sigma", False),
-                           "sigma_2": float(st.get("sigma_k", 1.0)) >= 2.0})
+        cfg = {"ylabel": st.get("ylabel", ""),
+               "show_sigma": st.get("show_sigma", False),
+               "sigma_2": float(st.get("sigma_k", 1.0)) >= 2.0}
+        if "logy" in st:                     # a saved explicit choice (older layouts too)
+            cfg["logy"] = bool(st["logy"])
+        self.apply_config(cfg)
         self.set_display_name(self.title)    # apply the restored name as plot title
 
     # -- shared session time base + markers ----------------------------------
@@ -465,9 +473,22 @@ class ChartPanel(Panel):
             return None
         return lambda y: units.convert(y, src, dst)
 
+    @staticmethod
+    def _default_logy(unit: str) -> bool:
+        """Log Y suits PRESSURE (vacuum spans many decades and is strictly positive);
+        linear suits everything else (temperature/voltage/… sit in a narrow band and can
+        be ≤0, where a log axis shows no ticks — its labels and unit collapse). The user
+        can still force either via the config toggle."""
+        return units.compatible(unit or "", "Pa")
+
     def _alloc_slot(self, dimkey, unit):
         display_unit = units.canonical(unit) or unit
         if not self._axes:                    # first dimension → the built-in left axis
+            if not self._logy_explicit:       # data-driven default (until the user picks)
+                want = self._default_logy(unit)
+                if want != self._logy:
+                    self._logy = want
+                    self.plot.setLogMode(x=False, y=self._logy)
             slot = _AxisSlot(dimkey, self._pi.vb, self._pi.getAxis("left"),
                              display_unit, primary=True)
             self._axes[dimkey] = slot
