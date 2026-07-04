@@ -1253,16 +1253,56 @@ keep the membership model general and these stay cheap to add later.
 | Phase | Deliverable | Status |
 |---|---|---|
 | **U1** | `core/units.py` unit authority (thin pint adapter) + tests | **DONE** (28 tests) |
-| **U2** | dimensional routing + charts multi-axis + processor `units_out()` | |
-| **X1** | `core/uncertainty.py` model types `Abs/Rel/FloorRel/Measured/Spec(random,systematic)` | |
-| **X2** | `Source(uncertainty=…)` + `set_uncertainty` provenance time-resolution + real drivers | |
-| **X3** | `store/uncertainty.py` windowed reconstruction engine (analytic + exact ufloat) | |
-| **X4** | surfaces — chart bands/toggle + GUM CSV columns + manifest | |
-| **R** | resume the paused refactor (remove dead `DataflowGraph`; remaining glue-layer) | |
+| **U2** | dimensional routing + charts multi-axis + processor `units_out()` | **DONE** |
+| **X1** | `core/uncertainty.py` model types `Abs/Rel/FloorRel/Measured/Spec(random,systematic)` | **DONE** |
+| **X2** | `Source(uncertainty=…)` + `set_uncertainty` provenance time-resolution + real drivers | **DONE** (a/b) |
+| **X3** | `store/uncertainty.py` windowed reconstruction engine (adversarially hardened) | **DONE** |
+| **X3b** | processor-CREATED σ rides INLINE (`Reading.sigma`, `_sigma`, CurveBuffer σ lane) → gas-fit bands | **DONE** (plumbing) |
+| **X4** | surfaces — chart bands/toggle + GUM `u(x)` CSV columns + manifest | **DONE** (a/b) |
+| **R** | resume the paused refactor (remove dead `DataflowGraph`; remaining glue-layer) | todo |
 
 Pressure-test cases for the engine: **gauge** (static model), **Keithley** (epoch model +
 random/systematic split), **ratio of two channels** (the correlation case where scalar-σ
 over-estimates and the ufloat path earns its keep).
+
+### 19.7 Deconvolution σ review (2026-07-04) — the gas-fit band is NOT yet a calibrated 1σ
+
+X3b surfaces the RGA gas-deconvolution's bootstrap `sd` as a chart band. An empirical
+review (scratch repro against synthetic spectra) found the **core fit is sound**
+(inverse-*variance* weighting applied correctly, exact NNLS coordinate-descent fallback,
+`x_g/rsf` self-consistent with the library's total-ionization RSFs) — **but the bootstrap
+`sd` is not trustworthy as a 1σ and must be fixed before the band is presented as
+calibrated.** Two verified killers, both of which hit the sparse/stick RGA case:
+
+- **B1 — noise estimate collapses to 0.** `deconvolve._noise_sigma` is MAD-around-the-
+  median; on a mostly-zero spectrum `median=0` → MAD=0 → `sb=0` → the parametric
+  bootstrap is frozen → **every gas reports `0 ± 0`** (false certainty). (Same estimator
+  *over*estimates ~15× on a peak-dominated zoom — MAD is only a baseline estimator when
+  the baseline is the majority class.)
+- **Non-negativity boundary manufactures detections.** `clip(≥0)` + NNLS `x≥0` fold the
+  sampling distribution at zero: an absent gas can report a multi-σ "detection" (verified:
+  a spectrum with **no CO₂** → **CO₂ = 137 ± 47**), and absent/weak gases get symmetric
+  `±σ` bands dipping below the physical floor. For "is gas X present?" this is backwards.
+
+Also: a point-estimate false-positive (a ~1.5-count noise blip on a minor peak drove a
+spurious CO₂≈141 while its base peak was dropped — the keep-filter can drop a gas's anchor
+while promoting a noise blip on a minor mass); the reported centre is the flickering,
+boundary-biased **MC median** rather than the deterministic fit; `deconvolve_mc(seed=None)`
+is non-reproducible; `rsf ≤ 0` is silently coerced to 1.0.
+
+**Fix plan (the sanctioned deconvolution refactor):**
+1. **Quick, high-impact:** robust baseline-noise estimator with a **positive floor** (kills
+   B1's frozen bootstrap / `0±0`); use the **deterministic** point estimate as the band
+   centre, MC only for the spread.
+2. **Honest representation near a bound:** report an **asymmetric interval** (16/84th
+   percentile) and a one-sided **upper limit** for gases with >~50 % bootstrap mass at 0.
+   Requires the inline-σ plumbing to carry `(σ_lo, σ_hi)` instead of a single σ (open
+   design Q: asymmetric bands everywhere, or only for fit-derived σ?).
+3. **Coherent fit constraints:** don't keep a minor peak while dropping that gas's base
+   peak (kills the phantom point-detections); guard `rsf ≤ 0`; seed the MC per-frame.
+
+Until (1)+(2) land, treat the gas band as a rough guide, not a calibrated 1σ (a ⚠ caveat
+is in the code at `analysis/deconvolve.py` + `analysis/gas.py`).
 
 ---
 

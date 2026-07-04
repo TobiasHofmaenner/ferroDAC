@@ -139,6 +139,8 @@ class GasAnalyzer(Processor):
         # The fit CREATES uncertainty: publish the bootstrap 1σ (MC only) inline with
         # each partial pressure (DESIGN §19.0), so the charts draw it as a band. Travels
         # IN the result dict (not via self.last_sd) so it can't race the offload worker.
+        # ⚠ this bootstrap sd is NOT a calibrated 1σ yet — see deconvolve_mc + DESIGN §19.7
+        # (noise-floor collapse + x≥0 boundary folding). Rough guide until those fixes land.
         if self.last_sd:
             out["_sigma"] = {f"gas/{self.id}/{n}": s
                              for n, s in self.last_sd.items() if s == s}

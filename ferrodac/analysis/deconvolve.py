@@ -139,7 +139,13 @@ def deconvolve_mc(x, y, gases, runs: int = 64, sparsity: float = 0.0,
     """Monte-Carlo (parametric bootstrap): fit the spectrum `runs` times, each
     perturbed by its own measured noise. Returns ``(median, sd, residual, pairs)``
     — per-gas median partial pressure, its uncertainty (1 sigma), the residual of
-    the median fit, and unresolvable (anti-correlated) gas pairs."""
+    the median fit, and unresolvable (anti-correlated) gas pairs.
+
+    ⚠ `sd` is NOT a calibrated 1σ yet (review 2026-07-04, DESIGN §19.7): `_noise_sigma`
+    (MAD) collapses to 0 on sparse/stick spectra → `sd≡0` false certainty and a frozen
+    bootstrap; and the x≥0 boundary (clip + NNLS) folds the distribution for absent/weak
+    gases → phantom multi-σ "detections" and symmetric ±σ below the physical floor. Use
+    as a rough guide only until the noise-floor + asymmetric-interval fixes land."""
     gases = list(gases)
     prep = _prepare(x, y, gases, sigma, min_snr) if gases else None
     if prep is None:
