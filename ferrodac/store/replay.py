@@ -295,10 +295,27 @@ class ReplayController:
                 self._render(t0, t1)                 # every tick (that's a load loop)
             return
         self._was_following = False
-        # parked: re-stream on a navigation, or each play-step (window moved); a plain
-        # pause/freeze (window unchanged, not playing) shows what's already there.
-        if navigated or (self.tc.playing and (t0, t1) != self._last_window):
-            self._render(t0, t1, progress=not self.tc.playing)
+        if navigated:                                # scrub / seek → full re-render
+            self._render(t0, t1)
+        elif self.tc.playing and (t0, t1) != self._last_window:
+            self._advance(t0, t1)                    # play-step → incremental append
+
+    def _advance(self, t0, t1) -> None:
+        """A playback step: the head walked forward, so stream ONLY the newly-entered
+        slice (prev-front → new-front) and let the panels append + trim — instead of
+        clearing and re-streaming the WHOLE window every frame (which, once park/scrub
+        went off-thread, flashed a 'Loading history' task 20×/s). A discontinuity
+        (speed seek, or the front jumping backward) falls back to a full render."""
+        prev = self._last_window
+        self._last_window = (t0, t1)
+        if prev is not None and prev[1] <= t1 and t0 <= t1 and prev[1] >= t0 - 1e-9:
+            seg0, seg1 = prev[1], t1                 # continuous forward advance
+            if seg1 > seg0:
+                # small slice → stream inline (no task, no clear); the panel buffers
+                # append it and the play tick trims the back edge (like live).
+                self.playback.stream(list(self._sources()), seg0, seg1)
+        else:
+            self._render(t0, t1)                     # discontinuous → re-render fresh
 
     def _render(self, t0, t1, progress=True) -> None:
         """Clear the panels and re-stream the exact window [t0,t1] in time order."""

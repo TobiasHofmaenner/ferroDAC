@@ -171,3 +171,40 @@ def test_replay_async_load_matches_sync(qapp, tmp_path):
     rc.stop()
     runner.shutdown()
     engine.shutdown()
+
+
+def test_playback_advances_incrementally(qapp, tmp_path):
+    """Pressing play must NOT re-stream (and re-clear) the whole window every frame
+    — each play-step streams only the newly-entered slice. Regression: play used to
+    flash a 'Loading history' task 20×/s and reload all the data."""
+    import numpy as np
+
+    from ferrodac.core.engine import Engine
+    from ferrodac.store import ReplayController, TimeContext, ZarrStore
+
+    st = ZarrStore(str(tmp_path / "s.zarr"))
+    st.add_source("dev/ch", name="ch")
+    t = 1000.0 + np.arange(2000) * 0.1            # 200 s of 10 Hz data
+    st.append("dev/ch", t, np.arange(2000, dtype="f8"), epoch="e1")
+
+    engine = Engine()
+    resets = {"n": 0}
+    got = []
+    tc = TimeContext(width=10.0, now_fn=lambda: 1200.0)   # "now" past the data
+    rc = ReplayController(
+        engine, st, tc, sources=lambda: ["dev/ch"], reader=st,
+        on_reset=lambda: resets.__setitem__("n", resets["n"] + 1))
+    rc.bus.subscribe(lambda batch: got.extend(r.value for r in batch))
+
+    rc.tc.park_window(1000.0, 1010.0)             # park a 10 s window (1 full render)
+    assert resets["n"] == 1
+    got.clear()
+    rc.tc.playing = True                           # start playing
+    for _ in range(20):                            # 20 play frames
+        rc.tc.tick_play(0.5)                        # head walks +0.5 s each frame
+    # incremental: NO extra clears, and only the newly-entered ~10 s of data streamed
+    assert resets["n"] == 1, "playback re-cleared the panels (not incremental)"
+    assert 0 < len(got) < 400, f"streamed too much — not incremental ({len(got)})"
+    assert got == sorted(got)                      # forward, in time order
+    rc.stop()
+    engine.shutdown()

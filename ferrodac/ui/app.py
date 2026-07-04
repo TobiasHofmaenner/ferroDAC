@@ -73,6 +73,20 @@ from .workspace import Dashboard, WorkspaceArea
 # --------------------------------------------------------------------------- #
 #  Source card (right dock) — live value + routing dropdown
 # --------------------------------------------------------------------------- #
+def _origin_badge(port):
+    """(text, fg, bg) for a small pill showing where a source's data comes from —
+    so a card is never ambiguous about local vs a remote client vs stored/derived."""
+    kind = getattr(port, "kind", "device")
+    if kind == "remote":
+        return ("☁ Cloud", "#58a6ff", "#102132")     # streamed by a remote client
+    if kind == "historic":
+        return ("🕓 Stored", "#8b96a5", "#1a1f2a")     # from the store, no live device
+    if kind == "virtual":
+        return (("ƒ Derived", "#d2a8ff", "#221a2e") if getattr(port, "proc_id", "")
+                else ("⌁ Input", "#e3b341", "#282112"))
+    return ("⬤ Local", "#3fb950", "#13251a")           # a device on this machine
+
+
 class SourceCard(QFrame):
     """One source port (device output or virtual input), with a Route dropdown
     listing datatype-compatible sinks."""
@@ -104,6 +118,13 @@ class SourceCard(QFrame):
         top.addWidget(name)
         top.addStretch(1)
 
+        btext, bfg, bbg = _origin_badge(port)         # local / cloud / stored / derived
+        badge = QLabel(btext)
+        badge.setStyleSheet(
+            f"color:{bfg}; background:{bbg}; border-radius:6px; padding:1px 6px;"
+            " font-size:10px; font-weight:700;")
+        top.addWidget(badge)
+
         route = QToolButton()
         route.setText("Route ▾")
         route.setPopupMode(QToolButton.InstantPopup)
@@ -121,13 +142,22 @@ class SourceCard(QFrame):
         top.addWidget(route)
         lay.addLayout(top)
 
+        # the device (origin) on its own clear line — two devices' identically-named
+        # channels (both "Pirani") are told apart, and a remote card names its device.
+        origin = (port.origin or "").strip()
+        if origin and origin.lower() not in port.name.lower():
+            dev = QLabel(origin)
+            dev.setStyleSheet("color:#aeb8c6; font-size:11px;")
+            dev.setToolTip(f"Device: {origin}")
+            lay.addWidget(dev)
+
         self.value_label = QLabel("—")
         self.value_label.setStyleSheet(
             f"color:{color}; font-family:monospace; font-size:15px;"
         )
         lay.addWidget(self.value_label)
 
-        bits = [port.origin, port.dtype]
+        bits = [port.dtype]
         if self.unit:
             bits.append(self.unit)
         if not self.online:
@@ -4308,6 +4338,8 @@ class MainWindow(QMainWindow):
         if tc.playing:
             ach = min(tc.speed, (tc.speed * 0.05) / max(1e-4, wall))
             tc.rate = 0.7 * tc.rate + 0.3 * ach
+        self.dashboard.trim_live(tc.window[0])       # slide: drop data behind the window
+        #                                              (playback now appends incrementally)
         self.dashboard.set_time_window(*tc.window)   # waterfalls follow the playhead
 
     def _replay_reset(self) -> None:

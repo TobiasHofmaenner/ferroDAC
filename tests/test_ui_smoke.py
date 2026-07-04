@@ -1112,6 +1112,21 @@ def test_processor_runs_inline_when_parked_or_requires_gui(qapp):
         w.close()
 
 
+def test_source_card_origin_badge(qapp):
+    """Every source card carries a local/cloud/stored/derived origin badge, so it's
+    never ambiguous who is streaming (this machine vs a remote client)."""
+    import types
+
+    from ferrodac.ui.app import _origin_badge
+    def port(kind, proc_id=""):
+        return types.SimpleNamespace(kind=kind, proc_id=proc_id)
+    assert _origin_badge(port("device"))[0] == "⬤ Local"
+    assert _origin_badge(port("remote"))[0] == "☁ Cloud"
+    assert _origin_badge(port("historic"))[0] == "🕓 Stored"
+    assert _origin_badge(port("virtual"))[0] == "⌁ Input"
+    assert _origin_badge(port("virtual", proc_id="gas1"))[0] == "ƒ Derived"
+
+
 @pytest.mark.ui
 def test_mainwindow_with_extensions(qapp, tmp_path):
     """The startup seam: MainWindow takes an ExtensionManager and the Extensions menu
