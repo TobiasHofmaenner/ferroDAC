@@ -886,23 +886,38 @@ class MainWindow(QMainWindow):
             return
         p = self._project_mgr.get(pid)
         path = p.path if p is not None else None
-        if path:                                          # commit current content so the
-            try:                                          # provisioned repo has history to hold
-                from ..core.projectgit import ProjectRepo
-                ProjectRepo(path).commit("Shared to hub", author=self._git_identity())
-            except Exception:                             # noqa: BLE001
-                pass
-        rec = self._project_mgr.share_to_hub(pid)
-        if not rec:
-            return
-        self._project_mgr.apply_hub_record(rec)           # now a ☁ project (same id)
-        self._project_mgr.untrack(pid)                    # drop the local entry
-        self.hub.publish_project(rec)
-        if path:                                          # push once the hub provisions a repo
-            self._pending_share[pid] = path
-        self._refresh_explorer()
-        self.statusBar().showMessage(
-            f"Shared “{rec.get('name')}” — provisioning its repo…", 5000)
+
+        def do_share():                                   # GUI thread: fast, in-memory
+            rec = self._project_mgr.share_to_hub(pid)
+            if not rec:
+                return
+            self._project_mgr.apply_hub_record(rec)       # now a ☁ project (same id)
+            self._project_mgr.untrack(pid)                # drop the local entry
+            self.hub.publish_project(rec)                 # async publish (own channel)
+            if path:                                      # push once the hub provisions a repo
+                self._pending_share[pid] = path
+            self._refresh_explorer()
+            self.statusBar().showMessage(
+                f"Shared “{rec.get('name')}” — provisioning its repo…", 5000)
+
+        if path:
+            # Commit current content OFF the GUI thread: a chain of git subprocesses
+            # (init/config/add/status/commit) can block for an unbounded time (a slow
+            # or networked filesystem, an index lock, slow process spawn), and the
+            # watchdog caught it freezing the paint thread. Share the record whether
+            # the commit succeeds, fails, or has nothing to commit — never freeze.
+            from ..core.projectgit import ProjectRepo
+            author = self._git_identity()
+            self.statusBar().showMessage("Preparing project to share…", 4000)
+            self._tasks.run(
+                lambda ctx: ProjectRepo(path).commit("Shared to hub", author=author),
+                title="Sharing project",
+                why="Committing the project's history before sharing it to the hub",
+                exclusive=f"share:{pid}", on_busy="reject",
+                on_done=lambda _r: do_share(),
+                on_error=lambda _m: do_share())
+        else:
+            do_share()
 
     def _push_pending_shares(self) -> None:
         """When the hub provisions a repo for a just-shared project (git_remote arrives

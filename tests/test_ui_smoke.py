@@ -654,6 +654,7 @@ def test_hub_project_share_and_republish(qapp):
         local = mgr.track(tempfile.mkdtemp(), "ToShare")
         local.add_window("w", 1.0, 2.0)
         w._share_project(local.id)
+        _wait_tasks(w, qapp)                                 # commit runs off the GUI thread
         hp = mgr.get(local.id)
         assert hp is not None and hp.is_hub                  # now a ☁ project
         assert local.id not in mgr._by_id                    # local entry untracked
@@ -896,6 +897,7 @@ def test_push_on_share(qapp, tmp_path):
         pushed = []
         w.hub.publish_project = lambda rec: pushed.append(rec)
         w._share_project(local.id)
+        _wait_tasks(w, qapp)                               # commit runs off the GUI thread
         assert local.id in w._pending_share                # queued to push
         assert local.id not in w._project_mgr._by_id       # local untracked (now ☁)
 
@@ -1866,6 +1868,7 @@ def test_backup_project_action(qapp, tmp_path, monkeypatch):
         monkeypatch.setattr(QFileDialog, "getSaveFileName",
                             staticmethod(lambda *a, **k: (dest, "")))
         w._backup_project()
+        _wait_tasks(w, qapp)                                # zip is written off-thread
         assert os.path.exists(dest)
         with zipfile.ZipFile(dest) as z:
             assert any(n.endswith("overview.json") for n in z.namelist())

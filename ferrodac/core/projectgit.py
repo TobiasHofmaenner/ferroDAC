@@ -28,8 +28,10 @@ class ProjectRepo:
         self.path = path
 
     # -- low-level -----------------------------------------------------------
-    def _git(self, *args, check=True, timeout=None):
-        # GIT_TERMINAL_PROMPT=0 → never block on a credential prompt (fail fast instead)
+    def _git(self, *args, check=True, timeout=30):
+        # GIT_TERMINAL_PROMPT=0 → never block on a credential prompt (fail fast instead);
+        # a default 30 s ceiling so a local op (add/status/commit) can't hang the caller
+        # forever (a locked/huge repo). Network ops (push) pass a larger explicit timeout.
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         return subprocess.run(["git", "-C", self.path, *args], check=check,
                               capture_output=True, text=True, env=env, timeout=timeout)
