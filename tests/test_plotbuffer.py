@@ -72,3 +72,31 @@ def test_nan_values_survive():
     b = CurveBuffer(cap=10)
     b.append([1.0, 2.0], [float("nan"), 5.0])
     assert np.isnan(b.y[0]) and b.y[1] == 5.0
+
+
+def test_sigma_lane_optional_and_aligned():
+    # no σ passed → all-NaN lane, has_sigma False
+    b = CurveBuffer(cap=10)
+    b.append([1.0, 2.0], [10.0, 20.0])
+    assert not b.has_sigma and np.isnan(b.sigma).all()
+    # σ passed → buffered, has_sigma True
+    b.append([3.0], [30.0], [0.3])
+    assert b.has_sigma
+    np.testing.assert_allclose(b.sigma[-1], 0.3)
+
+
+def test_sigma_stays_aligned_through_decimation():
+    b = CurveBuffer(cap=4)
+    b.append([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
+    b.append([5.0, 6.0], [5.0, 6.0], [5.0, 6.0])   # overflow → decimate (stride 2)
+    # σ[i] must still correspond to x[i] (here σ == x == y by construction)
+    np.testing.assert_allclose(b.sigma, b.x)
+    np.testing.assert_allclose(b.sigma, b.y)
+
+
+def test_sigma_stays_aligned_through_trim():
+    b = CurveBuffer(cap=10)
+    b.append([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
+    b.trim(3.0)                                    # drop < 3.0
+    np.testing.assert_allclose(b.x, [3.0, 4.0])
+    np.testing.assert_allclose(b.sigma, [3.0, 4.0])

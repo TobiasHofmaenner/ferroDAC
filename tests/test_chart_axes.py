@@ -107,6 +107,19 @@ def test_uncertainty_bands_toggle_convert_and_scale(qapp):
     assert "g/p" not in p._bands
 
 
+def test_band_uses_inline_sigma_from_reading(qapp):
+    """A processor output that CREATES uncertainty carries σ inline on the Reading; the
+    chart draws the band from it — no provider needed (that's the gas-fit path)."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False, "show_sigma": True})   # NO sigma_provider set
+    p.add_source("gas/g1/H2O", _src("H2O", "mbar"))
+    p.feed([types.SimpleNamespace(key="gas/g1/H2O", value=10.0, status=0, t=1.0,
+                                  sigma=0.5)])
+    lo, hi, _f, _v = p._bands["gas/g1/H2O"]
+    np.testing.assert_allclose(lo.getData()[1], [9.5])    # value − inline σ
+    np.testing.assert_allclose(hi.getData()[1], [10.5])   # value + inline σ
+
+
 def test_band_converts_to_the_axis_display_unit(qapp):
     p = _chart(qapp)
     p.apply_config({"logy": False, "show_sigma": True})

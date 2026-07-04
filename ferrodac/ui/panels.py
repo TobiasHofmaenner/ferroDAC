@@ -547,8 +547,19 @@ class ChartPanel(Panel):
         if entry is None or buf is None:
             return
         lo, hi, _fill, _vb = entry
-        sig = self._sigma_provider(key, buf.x, buf.y) if self._sigma_provider else None
-        if sig is None or buf.y.size == 0:
+        if buf.y.size == 0:
+            lo.setData([], [])
+            hi.setData([], [])
+            return
+        # Inline σ (a processor output that CREATES uncertainty — the gas fit) wins;
+        # otherwise the model provider (device channels reconstruct σ from their model).
+        if buf.has_sigma:
+            sig = buf.sigma
+        elif self._sigma_provider is not None:
+            sig = self._sigma_provider(key, buf.x, buf.y)
+        else:
+            sig = None
+        if sig is None:
             lo.setData([], [])
             hi.setData([], [])
             return
@@ -645,11 +656,13 @@ class ChartPanel(Panel):
             # log Y needs strictly-positive values; a linear axis accepts any finite one
             ok = (r.status == 0 and r.value == r.value
                   and (r.value > 0 or not self._logy))
-            tx, ty = touched.setdefault(r.key, ([], []))
+            tx, ty, ts = touched.setdefault(r.key, ([], [], []))
             tx.append(self._x(r.t))
             ty.append(r.value if ok else float("nan"))
-        for key, (tx, ty) in touched.items():
-            self._buf[key].append(tx, ty)
+            s = getattr(r, "sigma", None)         # inline σ from an uncertainty-creating
+            ts.append(float(s) if (ok and s is not None and s == s) else float("nan"))
+        for key, (tx, ty, ts) in touched.items():   # processor (e.g. the gas fit)
+            self._buf[key].append(tx, ty, ts)
             self._set_curve_data(key)
 
     def clear_history(self):

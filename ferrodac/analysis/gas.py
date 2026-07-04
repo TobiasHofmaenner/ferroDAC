@@ -136,6 +136,12 @@ class GasAnalyzer(Processor):
         # residual on the measured axis: leftover peaks = unaccounted species
         resid = np.asarray(value.y, float) - self._stick_model(value.x)
         out[f"residual/{self.id}"] = self._trace(value.x, resid, lo, hi)
+        # The fit CREATES uncertainty: publish the bootstrap 1σ (MC only) inline with
+        # each partial pressure (DESIGN §19.0), so the charts draw it as a band. Travels
+        # IN the result dict (not via self.last_sd) so it can't race the offload worker.
+        if self.last_sd:
+            out["_sigma"] = {f"gas/{self.id}/{n}": s
+                             for n, s in self.last_sd.items() if s == s}
         return out
 
     def state(self) -> dict:

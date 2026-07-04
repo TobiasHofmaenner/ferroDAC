@@ -1092,13 +1092,15 @@ class Dashboard(QObject):
         and re-apply their control routing (manager.write creates QThreads → must
         be the GUI thread, so this is never called off it)."""
         published = False
+        sigmas = out.get("_sigma") or {}             # optional inline σ per output key
         for port in proc.outputs():
             sp = self._sources.get(port.key)
             if sp is not None and not sp.unit and port.unit:
                 sp.unit = port.unit                  # adopt unit once known
             if port.key in out:
                 dev, _, src = port.key.partition("/")
-                self.data_bus.publish(Reading(dev, src, t, out[port.key]))
+                self.data_bus.publish(
+                    Reading(dev, src, t, out[port.key], sigma=sigmas.get(port.key)))
                 self._write_routed(port.key, out[port.key])   # derived → control
                 published = True
         if published:
