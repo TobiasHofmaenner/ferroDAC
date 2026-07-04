@@ -62,11 +62,34 @@ def install_gui_thread_gc(interval_ms: int = 2000):
     """
     global _gc_timer
     import gc
+    import logging
+    import time as _time
 
     from qtpy.QtCore import QTimer
     gc.disable()                                 # no GC on a worker thread, ever
+    try:
+        gc.freeze()                              # startup/import objects → permanent
+    except Exception:                            # generation: collections skip them,
+        pass                                     # so the pause tracks CHURN not heap
+    # Cheap generational collect most ticks; a full gen-2 sweep only occasionally
+    # (DESIGN §21 Tier-1) — the old full gc.collect() every 2 s cost O(live heap)
+    # and grew with the session. Duration is logged when a sweep is slow, so
+    # retained-object growth is visible instead of silently jittering the UI.
+    state = {"i": 0}
+    log = logging.getLogger("ferrodac")
+
+    def _collect():
+        state["i"] += 1
+        gen = 2 if state["i"] % 15 == 0 else 1
+        t0 = _time.monotonic()
+        freed = gc.collect(gen)
+        dt = (_time.monotonic() - t0) * 1000.0
+        if dt > 80.0:
+            log.warning("gc.collect(gen=%d) took %.0f ms (freed %d objects) — "
+                        "retained-object growth", gen, dt, freed)
+
     _gc_timer = QTimer()
-    _gc_timer.timeout.connect(gc.collect)        # …drained here, on the GUI thread
+    _gc_timer.timeout.connect(_collect)          # …drained here, on the GUI thread
     _gc_timer.start(max(250, int(interval_ms)))
     return _gc_timer
 

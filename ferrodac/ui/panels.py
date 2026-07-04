@@ -39,6 +39,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from ..core.markers import RECORDING
+from ..core.plotbuffer import CurveBuffer
 from ..core.trace import Trace
 from ..analysis.library import DEFAULT_GASES, LIBRARY
 from ._common import color_for, fmt
@@ -388,7 +389,7 @@ class ChartPanel(Panel):
             [], [], pen=pg.mkPen(color_for(key), width=2),
             name=getattr(source, 'label', source.name)
         )
-        self._buf[key] = ([], [])
+        self._buf[key] = CurveBuffer()
 
     def remove_source(self, key):
         curve = self._curves.pop(key, None)
@@ -397,21 +398,26 @@ class ChartPanel(Panel):
         self._buf.pop(key, None)
 
     def feed(self, batch):
+        # Accumulate the batch per source, then setData ONCE per source (not per
+        # reading) into a bounded numpy buffer — the Tier-1 fix for the week-long
+        # slowdown (DESIGN §21). Grow-mode "whole session" stays bounded because
+        # the buffer decimates in place at its cap.
+        touched: dict = {}
         for r in batch:
-            buf = self._buf.get(r.key)
-            if buf is None:
+            if r.key not in self._buf or not isinstance(r.value, (int, float)):
                 continue
-            if not isinstance(r.value, (int, float)):
-                continue
-            xs, ys = buf
-            xs.append(self._x(r.t))
             ok = r.status == 0 and r.value == r.value and r.value > 0
-            ys.append(r.value if ok else float("nan"))
-            self._curves[r.key].setData(xs, ys, connect="finite")
+            tx, ty = touched.setdefault(r.key, ([], []))
+            tx.append(self._x(r.t))
+            ty.append(r.value if ok else float("nan"))
+        for key, (tx, ty) in touched.items():
+            buf = self._buf[key]
+            buf.append(tx, ty)
+            self._curves[key].setData(buf.x, buf.y, connect="finite")
 
     def clear_history(self):
-        for key, (xs, ys) in self._buf.items():
-            xs.clear(); ys.clear()
+        for key, buf in self._buf.items():
+            buf.clear()
             self._curves[key].setData([], [])
         self._sync_markers()                  # reposition tags at the new time base
         self.plot.enableAutoRange()           # a freshly-loaded slice auto-fits once;
@@ -422,14 +428,10 @@ class ChartPanel(Panel):
 
     def trim_to(self, x_min):
         """Drop buffered points older than x_min so the live window slides instead
-        of growing. xs is time-ordered (live append) → bisect; auto-range follows."""
-        import bisect
-        for key, (xs, ys) in self._buf.items():
-            if xs and xs[0] < x_min:
-                i = bisect.bisect_left(xs, x_min)
-                if i:
-                    del xs[:i]; del ys[:i]
-                    self._curves[key].setData(xs, ys, connect="finite")
+        of growing (slide mode). In grow mode the buffer's own cap bounds it."""
+        for key, buf in self._buf.items():
+            if buf.trim(x_min):
+                self._curves[key].setData(buf.x, buf.y, connect="finite")
 
 
 class _Readout(QFrame):

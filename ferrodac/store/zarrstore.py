@@ -28,7 +28,11 @@ import zarr
 
 _F = 16              # rollup downsample factor between pyramid levels
 _TOP = 512           # build levels until the top tier has <= this many buckets
-_CHUNK = 1 << 20     # raw array chunk (~1M samples)
+# Raw array chunk (DESIGN §21 Tier-1). 16k samples ≈ 128 KB: a 2-s tail append
+# rewrites ONE small chunk, not an 8 MB one (the old 1<<20 forced a growing
+# read-modify-write every flush — audit mechanism #2). Chunk size is fixed at
+# array creation, so this applies to new epochs; existing stores keep theirs.
+_CHUNK = 1 << 14     # raw array chunk (~16k samples)
 
 
 def _locked(fn):
@@ -256,14 +260,22 @@ class ZarrStore:
         n0 = ta.shape[0]
         ta.resize((n0 + len(t),)); ta[n0:] = t
         va.resize((n0 + len(v),)); va[n0:] = v
-        eg.attrs["t0"] = float(ta[0])
-        eg.attrs["t1"] = float(t[-1])
+        if n0 == 0:                          # first append: t0 from the new data —
+            eg.attrs["t0"] = float(t[0])     # avoids decompressing chunk 0 every
+        eg.attrs["t1"] = float(t[-1])        # flush just to re-read ta[0] (mech #2)
         eg.attrs["n"] = int(n0 + len(t))
         eg.attrs["dirty"] = True
 
     @_locked
     def finalize_rollups(self, uuid, epoch: str = None) -> None:
-        """(Re)build the min/max pyramid for an epoch (call on flush/close)."""
+        """(Re)build the min/max pyramid for an epoch (call on flush/close).
+
+        This is an O(epoch) rebuild from raw. Since DESIGN §21 it runs on the
+        store-writer's WORKER thread, never the GUI — so the audit's recurring
+        multi-second GUI stalls are gone; the residual is background CPU (tens of
+        seconds total over a week-long run), not a freeze. A truly incremental
+        pyramid is a future optimisation, deliberately deferred (the freeze it
+        would remove no longer exists)."""
         g = self._source(uuid)
         keys = [epoch] if epoch else list(g.attrs.get("epochs", []))
         for key in keys:
