@@ -21,12 +21,12 @@ Production notes
 from __future__ import annotations
 
 import math
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 from ..core.base import BaseDevice
+from ..core.serial_arbiter import PORTS_IN_USE, SERIAL_LOCK
 from ..core.device import (
     Interface,
     Modality,
@@ -35,7 +35,6 @@ from ..core.device import (
     Sink,
     SinkKind,
     Source,
-    Status,
 )
 
 try:
@@ -263,8 +262,8 @@ class TPG256ADevice(BaseDevice):
     discoverable = True
 
     _cache: dict = {}                # port -> ProbeResult | None
-    _active_ports: set = set()       # ports we currently hold open
-    _cls_lock = threading.Lock()
+    _active_ports = PORTS_IN_USE     # SHARED across all serial drivers so a port
+    _cls_lock = SERIAL_LOCK          # held by ANY driver is off-limits (arbiter)
 
     def __init__(self, probe: ProbeResult):
         self._probe = probe
@@ -300,7 +299,7 @@ class TPG256ADevice(BaseDevice):
         )
         self._unit = probe.unit
         self._link: Optional[_Link] = None
-        self._io_lock = threading.Lock()
+        # _io_lock is provided by BaseDevice (re-entrant, platform-serialized)
         self._last_reopen = 0.0
 
     # -- discovery -----------------------------------------------------------

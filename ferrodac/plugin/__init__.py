@@ -28,7 +28,10 @@ only.** Consequently:
   analysis can never freeze the app) — it must be Qt-free. A processor that must run
   on the GUI thread sets the class attribute ``requires_gui = True``.
 - A ``BaseDevice`` driver's ``_read``/``_connect``/``_write`` run on the device's own
-  acquisition/config threads (never the GUI thread) — also Qt-free.
+  acquisition/config threads (never the GUI thread) — also Qt-free. The platform
+  **serializes them per device** (``self._io_lock``), so a driver never needs its own
+  lock; ``self._throttle(key, interval)`` rate-limits reconnects. Serial drivers share
+  one process-wide port registry so two can't open the same port.
 
 Never construct or touch a QObject from any of those; marshal to the GUI via a
 signal if you must. Violations are printed (with the offending thread + stack) by the

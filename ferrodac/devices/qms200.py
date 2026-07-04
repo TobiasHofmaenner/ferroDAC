@@ -28,17 +28,17 @@ from __future__ import annotations
 import os
 import re
 import sys
-import threading
 import time
 import warnings
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
 from ..core.base import BaseDevice
+from ..core.serial_arbiter import PORTS_IN_USE, SERIAL_LOCK
 from ..core.reading import Reading
 from ..core.device import (
     Interface,
@@ -50,7 +50,6 @@ from ..core.device import (
     Sink,
     SinkKind,
     Source,
-    Status,
 )
 from ..core.trace import Trace
 
@@ -292,8 +291,8 @@ class QMS200Device(BaseDevice):
     discoverable = True
 
     _cache: dict = {}
-    _active_ports: set = set()
-    _cls_lock = threading.Lock()
+    _active_ports = PORTS_IN_USE     # SHARED across all serial drivers (arbiter)
+    _cls_lock = SERIAL_LOCK
 
     def __init__(self, probe: ProbeResult):
         self._port = probe.port
@@ -353,7 +352,7 @@ class QMS200Device(BaseDevice):
             options=options,
         )
         self._link = None
-        self._io_lock = threading.Lock()
+        # _io_lock is provided by BaseDevice (re-entrant, platform-serialized)
         self._last_reopen = 0.0
         # Control writes / option changes are queued from the GUI thread and
         # applied by the poll thread at a safe serial boundary, so the UI never

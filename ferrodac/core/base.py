@@ -4,6 +4,24 @@ Drivers usually subclass this: it holds the descriptor fields, a status
 state-machine, current sink values, the configured sample rate, and the
 acquisition loop. A driver implements `discover` + `_connect`/`_disconnect`
 (+ `_read` for sources, `_write` for sinks).
+
+Threading contract (DESIGN §21.1) — the platform owns it so drivers don't each
+reinvent it (the audit found the TPG had to invent its own lock, which a
+third-party author wouldn't know to do):
+
+  * ``_connect``/``_disconnect``/``_read``/``_write`` are all serialized per
+    device by ``self._io_lock`` (a re-entrant lock the platform provides and
+    holds around each call). A driver never needs its own I/O lock — one device,
+    one thread of hardware access at a time. Set ``serialize_io = False`` only if
+    a driver deliberately manages its own concurrency.
+  * These run on acquisition / config worker threads, **never the GUI thread** —
+    so they must be Qt-free (never touch a QObject).
+  * ``_throttle(key, interval)`` is the platform's reconnect/back-off helper: it
+    returns True at most once per ``interval`` seconds for a given key, so a
+    driver's link-reopen (or any retry) is rate-limited without a hand-rolled
+    timestamp per driver.
+  * Serial drivers additionally share ONE cross-driver port registry
+    (core.serial_arbiter) so two drivers can't grab the same physical port.
 """
 
 from __future__ import annotations
@@ -30,8 +48,21 @@ from .device import (
 )
 
 
+class _NullGuard:
+    """A no-op context manager for drivers that opt out of platform serialization."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+_NULL_GUARD = _NullGuard()
+
+
 class BaseDevice(Device):
     driver = "base"   # registry skips this; real drivers override
+    serialize_io = True   # platform serializes _read/_write/_connect per device
 
     def __init__(
         self,
@@ -82,6 +113,10 @@ class BaseDevice(Device):
         self._streaming = False
         self._thread: Optional[threading.Thread] = None
         self._emit = None
+        # Platform-owned per-device serialization (threading contract, above).
+        # Re-entrant so a driver's own `with self._io_lock` (legacy) nests safely.
+        self._io_lock = threading.RLock()
+        self._throttle_at: dict = {}      # key -> next monotonic time it may fire
 
     # -- identity / description ----------------------------------------------
     @property
@@ -153,11 +188,28 @@ class BaseDevice(Device):
         self._status = Status.CONNECTING
         self._last_error = None
 
+    def _guard(self):
+        """Context manager serializing hardware access per device (or a no-op when
+        a driver opts out with serialize_io=False). See the threading contract."""
+        return self._io_lock if self.serialize_io else _NULL_GUARD
+
+    def _throttle(self, key: str, interval: float) -> bool:
+        """Rate-limit a retry/reconnect: returns True at most once per `interval`
+        seconds for `key` (the platform's back-off helper — DESIGN §21.1). Thread-
+        safe under the device's io lock."""
+        with self._io_lock:
+            now = time.monotonic()
+            if now < self._throttle_at.get(key, 0.0):
+                return False
+            self._throttle_at[key] = now + interval
+            return True
+
     def connect(self) -> None:
         self._status = Status.CONNECTING
         self._last_error = None
         try:
-            self._connect()
+            with self._guard():
+                self._connect()
             self._status = Status.CONNECTED
         except Exception as exc:
             self._status = Status.ERROR
@@ -178,7 +230,8 @@ class BaseDevice(Device):
             raise KeyError(f"no sink {sink_id!r} on {self._instance_id}")
         if schema.kind != SinkKind.ACTION:
             value = self._coerce(schema, value)
-        self._write(schema, value)
+        with self._guard():                  # serialized with _read/_connect
+            self._write(schema, value)
         if schema.kind != SinkKind.ACTION:
             self._sink_values[sink_id] = value
 
@@ -207,7 +260,8 @@ class BaseDevice(Device):
         working?" probe for the config GUI. Drivers with auth / remote endpoints
         override this for a precise message (which is why it lives on the contract)."""
         try:
-            self._connect()
+            with self._guard():
+                self._connect()
         except Exception as exc:                       # noqa: BLE001
             return CheckResult(False, f"Connection failed: {exc}")
         n = len(self._sources)
@@ -264,7 +318,8 @@ class BaseDevice(Device):
             emit = self._emit
             for src in self._sources:
                 try:
-                    value, status = self._read(src)
+                    with self._guard():         # serialized with writes/reconnect
+                        value, status = self._read(src)
                 except Exception:
                     value, status = float("nan"), 1
                 if emit is not None:
