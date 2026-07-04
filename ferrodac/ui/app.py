@@ -1711,7 +1711,8 @@ class MainWindow(QMainWindow):
         from ..store import export_window
         try:
             export_window(dest, self.dashboard.export_sources(), self.resolver,
-                          m.t, m.t_end, tags=self.dashboard.markers.to_list())
+                          m.t, m.t_end, tags=self.dashboard.markers.to_list(),
+                          store=self.store_writer.store if self.store_writer else None)
             csv = os.path.join(dest, "data.csv")
             if os.path.exists(csv):
                 files.append({"name": "data.csv", "abspath": csv, "kind": "csv"})
@@ -1775,6 +1776,7 @@ class MainWindow(QMainWindow):
         resolver = self.resolver
         tags = self.dashboard.markers.to_list()
         writer = self.store_writer if flush else None
+        store = self.store_writer.store if self.store_writer else None
 
         def work(ctx):
             if writer is not None:
@@ -1782,7 +1784,7 @@ class MainWindow(QMainWindow):
                     writer.flush_all()               # a clean stop loses nothing
                 except Exception:                    # noqa: BLE001
                     pass
-            return export_window(dest, sources, resolver, t0, t1, tags=tags)
+            return export_window(dest, sources, resolver, t0, t1, tags=tags, store=store)
 
         def fail(msg):
             if on_fail is not None:

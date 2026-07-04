@@ -10,7 +10,9 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 
+from ferrodac.core.uncertainty import Rel
 from ferrodac.store import Resolver, RamTier, ZarrStore, export_window
 from ferrodac.core.history import HistoryBuffer
 
@@ -50,6 +52,43 @@ def _sources():
 def _read(path):
     with open(path, newline="") as fh:
         return list(csv.reader(fh))
+
+
+def test_export_adds_gum_uncertainty_columns():
+    """A scalar source with a declared σ model gets a GUM companion column
+    u(name) [unit] after its value column, and the manifest records the model."""
+    d = tempfile.mkdtemp()
+    st = ZarrStore(os.path.join(d, "s.zarr"))
+    gt = BASE + np.arange(5) * 1.0
+    st.add_source("dev:g/p", name="Pirani", unit="mbar")
+    st.append("dev:g/p", gt, 1e-6 + 0 * gt, epoch="e0")
+    model = Rel(0.1)                                   # σ = 10 % of reading
+    st.put_device("dev:g", {"uncertainty:p": model.to_dict()})
+    st.emit_device_meta("dev:g", BASE, "uncertainty:p", model.to_dict())
+
+    sources = {"dev:g/p": {"name": "Pirani", "unit": "mbar", "dtype": "float"}}
+    dest = os.path.join(d, "out")
+    man = export_window(dest, sources, st, BASE, BASE + 10, store=st)
+
+    header = _read(os.path.join(dest, "data.csv"))[0]
+    assert "Pirani [mbar]" in header and "u(Pirani) [mbar]" in header    # GUM companion
+    row = _read(os.path.join(dest, "data.csv"))[1]
+    val = float(row[header.index("Pirani [mbar]")])
+    u = float(row[header.index("u(Pirani) [mbar]")])
+    assert u == pytest.approx(0.1 * val, rel=1e-6)     # σ = 10 % of the reading
+
+    src = next(s for s in man["sources"] if s["key"] == "dev:g/p")
+    assert src["uncertainty"]["column"] == "u(Pirani) [mbar]"
+    assert src["uncertainty"]["k"] == 1
+    assert src["uncertainty"]["model"] == model.to_dict()
+
+
+def test_export_without_store_has_no_uncertainty_columns():
+    d, st = _store_with_data()
+    dest = os.path.join(d, "out")
+    export_window(dest, _sources(), st, BASE, BASE + 100)     # no store= → no σ columns
+    header = _read(os.path.join(dest, "data.csv"))[0]
+    assert not any(h.startswith("u(") for h in header)
 
 
 def test_export_bundle_structure_and_absolute_time():

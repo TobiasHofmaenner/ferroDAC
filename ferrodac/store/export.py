@@ -28,6 +28,9 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from ..core.sourceid import uncertainty_at
+from .uncertainty import reconstruct
+
 EXPORT_VERSION = 1
 
 
@@ -47,11 +50,22 @@ def _column(name: str, unit: str) -> str:
     return f"{name} [{unit}]" if unit else (name or "value")
 
 
+def _u_column(name: str, unit: str) -> str:
+    """GUM standard-uncertainty companion column: ``u(pressure) [mbar]``."""
+    base = f"u({name})" if name else "u"
+    return f"{base} [{unit}]" if unit else base
+
+
 def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = False,
-                  tags: list = None) -> dict:
+                  tags: list = None, store=None) -> dict:
     """Export ``[t0,t1]`` for `sources` ({key: {name, unit, dtype}}) via `reader`.
     Writes the bundle described in the module docstring; returns the manifest.
-    `tags` (marker dicts) overlapping the window are written to `tags.csv`."""
+    `tags` (marker dicts) overlapping the window are written to `tags.csv`.
+
+    When `store` is given, each scalar source that has a declared σ model gets a GUM
+    companion column ``u(name) [unit]`` right after its value column (DESIGN §19.0) —
+    the standard uncertainty reconstructed over the window from the change-log; the
+    manifest records the column, k=1, and the model for reproducibility."""
     os.makedirs(dest_dir, exist_ok=True)
     t0, t1 = float(t0), float(t1)
     manifest = {
@@ -81,11 +95,28 @@ def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = Fal
             t, v = reader.read_raw(key, t0, t1)
             if len(t) == 0:
                 continue
+            t = np.asarray(t, dtype="f8")
+            v = np.asarray(v, dtype="f8")
             header = _column(name, unit)
-            scalars.append((header, np.asarray(t, dtype="f8"), np.asarray(v, dtype="f8")))
-            manifest["sources"].append({
+            scalars.append((header, t, v))
+            src_entry = {
                 "key": key, "name": name, "unit": unit, "dtype": dtype,
-                "file": "data.csv", "column": header, "samples": int(len(t))})
+                "file": "data.csv", "column": header, "samples": int(len(t))}
+            # GUM companion σ column (DESIGN §19.0), reconstructed over the window when
+            # a model applies. Only finite σ is written → a blank cell where no σ.
+            if store is not None:
+                sig = reconstruct(store, key, t, v)
+                finite = np.isfinite(sig)
+                if finite.any():
+                    u_header = _u_column(name, unit)
+                    scalars.append((u_header, t[finite], sig[finite]))
+                    unc = {"column": u_header, "k": 1,
+                           "coverage": "standard uncertainty (k=1, 1σ)"}
+                    model = uncertainty_at(store, key, t1)
+                    if model is not None:
+                        unc["model"] = model.to_dict()
+                    src_entry["uncertainty"] = unc
+            manifest["sources"].append(src_entry)
     if scalars:
         _write_scalars(os.path.join(dest_dir, "data.csv"), scalars, fill)
     n_tags = _write_tags(os.path.join(dest_dir, "tags.csv"), tags or [], t0, t1)
