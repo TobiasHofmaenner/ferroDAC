@@ -12,6 +12,8 @@ all keep this same file-as-truth contract (the live layer materialises to the fi
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
+from typing import Callable
 
 # Chromium flags must be set BEFORE QtWebEngine initialises (first QWebEngineView).
 # Software rendering avoids the most common Linux GPU-process crashes for a
@@ -216,29 +218,36 @@ class DocBridge(QObject):
         self.snapshotRequested.emit(text)
 
 
+@dataclass
+class DocServices:
+    """The app services a DocView calls into, bundled so its constructor takes one
+    `services` object instead of 11 loose callbacks. Every field defaults to a safe
+    no-op, so a bare DocView (e.g. a preview) builds without wiring the app."""
+    edit: Callable = field(default=lambda *a: None)              # (path) open externally
+    configure: Callable = field(default=lambda *a: None)
+    saved: Callable = field(default=lambda *a: None)             # after an in-app save
+    list_recordings: Callable = field(default=lambda: [])        # -> [{id,label,t0,t1}]
+    export_recording: Callable = field(default=lambda *a: [])    # (rec_id) -> [{name,abspath,kind}]
+    list_recording_exports: Callable = field(default=lambda *a: [])  # (rec_id) -> existing
+    list_processors: Callable = field(default=lambda: [])        # -> [{kind,label}]
+    processor_source: Callable = field(default=lambda *a: "")    # (kind) -> source
+    device_table: Callable = field(default=lambda: "")           # -> instruments markdown
+    run_meta: Callable = field(default=lambda: "")               # -> report front-matter
+
+
 class DocView(QWidget):
     """Renders a project markdown file live; an external editor editing the raw file
     is just another writer the watcher catches."""
 
-    def __init__(self, on_edit=None, on_configure=None, parent=None,
-                 on_list_recordings=None, on_export_recording=None,
-                 on_list_recording_exports=None, on_list_processors=None,
-                 on_processor_source=None, on_saved=None, on_device_table=None,
-                 on_run_meta=None):
+    def __init__(self, services=None, parent=None):
         super().__init__(parent)
+        # ONE bundle of app services instead of 11 loose constructor callbacks
+        # (the audit's DocView callback forest). Adding a service is a field on
+        # DocServices, not a new param here + at every call site.
+        self.services = services or DocServices()
         self._path = None                # absolute path of the open doc
         self._dir = None                 # its folder (watched too — atomic-save safe)
         self._mtime_seen = None
-        self._on_saved = on_saved        # called after an in-app save (debounced git commit)
-        self._on_edit = on_edit          # optional override callable(path)
-        self._on_configure = on_configure  # optional override callable()
-        self._on_list_recordings = on_list_recordings   # () -> [{id,label,t0,t1}]
-        self._on_export_recording = on_export_recording  # (rec_id) -> fresh [{name,abspath,kind}]
-        self._on_list_recording_exports = on_list_recording_exports  # (rec_id) -> existing
-        self._on_list_processors = on_list_processors   # () -> [{kind,label}]
-        self._on_processor_source = on_processor_source  # (kind) -> source str
-        self._on_device_table = on_device_table          # () -> instruments markdown
-        self._on_run_meta = on_run_meta                  # () -> report front-matter markdown
         self._collab = None              # a HubController, when a hub+doc is available
         self._doc_id = None              # "<project_id>::<relpath>" for collaboration
         self._collab_on = False          # currently in a live session?
@@ -387,9 +396,9 @@ class DocView(QWidget):
             if (self._dir and os.path.isdir(self._dir)
                     and self._dir not in self._watcher.directories()):
                 self._watcher.addPath(self._dir)
-            if self._on_saved is not None:        # e.g. schedule a debounced git commit
+            if self.services.saved is not None:        # e.g. schedule a debounced git commit
                 try:
-                    self._on_saved()
+                    self.services.saved()
                 except Exception:                # noqa: BLE001
                     pass
         except Exception:                        # noqa: BLE001
@@ -409,16 +418,7 @@ class DocView(QWidget):
         (edit in one → the watcher re-renders the other)."""
         if not self._path:
             return
-        win = DocView(on_edit=self._on_edit, on_configure=self._on_configure,
-                      parent=self.window(),
-                      on_list_recordings=self._on_list_recordings,
-                      on_export_recording=self._on_export_recording,
-                      on_list_recording_exports=self._on_list_recording_exports,
-                      on_list_processors=self._on_list_processors,
-                      on_processor_source=self._on_processor_source,
-                      on_saved=self._on_saved,
-                      on_device_table=self._on_device_table,
-                      on_run_meta=self._on_run_meta)
+        win = DocView(self.services, parent=self.window())
         win.setWindowFlag(Qt.Window, True)              # owned, but its own OS window
         win.setAttribute(Qt.WA_DeleteOnClose, True)
         win.setWindowTitle(f"{os.path.basename(self._path)} — ferroDAC")
@@ -440,14 +440,14 @@ class DocView(QWidget):
     def _edit_external(self) -> None:
         if not self._path:
             return
-        if self._on_edit is not None:                   # host override (status msgs)
-            self._on_edit(self._path)
+        if self.services.edit is not None:                   # host override (status msgs)
+            self.services.edit(self._path)
         else:
             launch_external_editor(self._path)          # built-in default
 
     def _configure_external(self) -> None:
-        if self._on_configure is not None:
-            self._on_configure()
+        if self.services.configure is not None:
+            self.services.configure()
         else:
             configure_editor_command(self)
 
@@ -486,51 +486,51 @@ class DocView(QWidget):
                    on_run_meta=None) -> None:
         """Wire the editor macros to the app's services (used by doc panels created via
         the Add menu or a layout, which can't get the callbacks at construction)."""
-        self._on_list_recordings = on_list_recordings
-        self._on_export_recording = on_export_recording
-        self._on_list_recording_exports = on_list_recording_exports
-        self._on_list_processors = on_list_processors
-        self._on_processor_source = on_processor_source
-        self._on_device_table = on_device_table
-        self._on_run_meta = on_run_meta
+        self.services.list_recordings = on_list_recordings
+        self.services.export_recording = on_export_recording
+        self.services.list_recording_exports = on_list_recording_exports
+        self.services.list_processors = on_list_processors
+        self.services.processor_source = on_processor_source
+        self.services.device_table = on_device_table
+        self.services.run_meta = on_run_meta
         if self._js_ready:                    # warm the caches if the page is already up
             self._push_recordings()
             self._push_processors()
 
     def _push_recordings(self) -> None:
-        if self._on_list_recordings is None:
+        if self.services.list_recordings is None:
             return
         import json
         try:
-            recs = self._on_list_recordings() or []
+            recs = self.services.list_recordings() or []
         except Exception:                     # noqa: BLE001
             recs = []
         self.bridge.recordingsAvailable.emit(json.dumps(recs))
 
     def _push_processors(self) -> None:
-        if self._on_list_processors is None:
+        if self.services.list_processors is None:
             return
         import json
         try:
-            procs = self._on_list_processors() or []
+            procs = self.services.list_processors() or []
         except Exception:                     # noqa: BLE001
             procs = []
         self.bridge.processorsAvailable.emit(json.dumps(procs))
 
     def _send_device_table(self) -> None:
         md = ""
-        if self._on_device_table is not None:
+        if self.services.device_table is not None:
             try:
-                md = self._on_device_table() or ""
+                md = self.services.device_table() or ""
             except Exception:                 # noqa: BLE001
                 md = ""
         self.bridge.deviceTable.emit(md)
 
     def _send_run_meta(self) -> None:
         md = ""
-        if self._on_run_meta is not None:
+        if self.services.run_meta is not None:
             try:
-                md = self._on_run_meta() or ""
+                md = self.services.run_meta() or ""
             except Exception:                 # noqa: BLE001
                 md = ""
         self.bridge.runMeta.emit(md)
@@ -569,9 +569,9 @@ class DocView(QWidget):
 
     def _send_processor_source(self, kind: str) -> None:
         src, paper = "", None
-        if self._on_processor_source is not None:
+        if self.services.processor_source is not None:
             try:
-                res = self._on_processor_source(kind)
+                res = self.services.processor_source(kind)
             except Exception:                 # noqa: BLE001
                 res = None
             if isinstance(res, dict):         # {source, whitepaper-abspath}
@@ -608,9 +608,9 @@ class DocView(QWidget):
     def _list_recording_exports(self, rec_id: str) -> None:
         """The recording's ALREADY-exported files (what the macro lists first)."""
         raw = []
-        if self._on_list_recording_exports is not None:
+        if self.services.list_recording_exports is not None:
             try:
-                raw = self._on_list_recording_exports(rec_id) or []
+                raw = self.services.list_recording_exports(rec_id) or []
             except Exception:                 # noqa: BLE001
                 raw = []
         self._emit_files(self.bridge.recordingExports, rec_id, raw)
@@ -618,9 +618,9 @@ class DocView(QWidget):
     def _export_recording(self, rec_id: str) -> None:
         """Render a FRESH export now (the macro's Export-now option)."""
         raw = []
-        if self._on_export_recording is not None:
+        if self.services.export_recording is not None:
             try:
-                raw = self._on_export_recording(rec_id) or []
+                raw = self.services.export_recording(rec_id) or []
             except Exception:                 # noqa: BLE001
                 raw = []
         self._emit_files(self.bridge.recordingExported, rec_id, raw)

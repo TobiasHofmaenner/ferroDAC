@@ -490,17 +490,17 @@ class MainWindow(QMainWindow):
             ph.setToolTip(str(exc))
             self.docs_dock.setWidget(ph)
             return
-        self._docs_view = DocView(on_edit=self._open_doc_external,
-                                  on_configure=self._configure_editor,
-                                  on_list_recordings=self._list_recordings,
-                                  on_export_recording=self._export_recording_for_doc,
-                                  on_list_recording_exports=self._list_recording_exports,
-                                  on_list_processors=self._list_processors,
-                                  on_processor_source=self._processor_source,
-                                  on_device_table=self._device_journal_markdown,
-                                  on_run_meta=self._run_meta_markdown,
-                                  on_saved=lambda: self._schedule_project_commit(
-                                      "Edited documents"))
+        from .docs import DocServices
+        self._docs_view = DocView(DocServices(
+            edit=self._open_doc_external, configure=self._configure_editor,
+            list_recordings=self._list_recordings,
+            export_recording=self._export_recording_for_doc,
+            list_recording_exports=self._list_recording_exports,
+            list_processors=self._list_processors,
+            processor_source=self._processor_source,
+            device_table=self._device_journal_markdown,
+            run_meta=self._run_meta_markdown,
+            saved=lambda: self._schedule_project_commit("Edited documents")))
         self.docs_dock.setWidget(self._docs_view)
         self._open_active_doc()
 

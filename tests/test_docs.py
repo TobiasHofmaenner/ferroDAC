@@ -213,7 +213,7 @@ def test_macro_bridge_recordings_and_export(qapp):
     """The /rec bridge protocol: requestRecordings → recordingsAvailable; an export
     request → recordingExported with file paths RELATIVE to the open doc."""
     import json
-    from ferrodac.ui.docs import DocView
+    from ferrodac.ui.docs import DocServices, DocView
     d = tempfile.mkdtemp()
     doc = os.path.join(d, "R.md")
     with open(doc, "w", encoding="utf-8") as fh:
@@ -225,9 +225,9 @@ def test_macro_bridge_recordings_and_export(qapp):
         fh.write(b"\x89PNG\r\n")
     recs = [{"id": "rec1", "label": "Bakeout", "t0": 1.0, "t1": 2.0}]
     exp = [{"name": "Pressure", "abspath": png, "kind": "plot"}]
-    dv = DocView(on_list_recordings=lambda: recs,
-                 on_export_recording=lambda rid: exp if rid == "rec1" else [],
-                 on_list_recording_exports=lambda rid: exp if rid == "rec1" else [])
+    dv = DocView(DocServices(list_recordings=lambda: recs,
+                 export_recording=lambda rid: exp if rid == "rec1" else [],
+                 list_recording_exports=lambda rid: exp if rid == "rec1" else []))
     dv.resize(640, 420)
     try:
         dv.open(doc)
@@ -263,7 +263,7 @@ def test_macro_bridge_recordings_and_export(qapp):
 def test_slash_macro_lists_and_inserts(qapp):
     """End-to-end /rec macro: recordings reach the editor; picking one drives the
     on-demand export and inserts relative markdown the preview renders as file://."""
-    from ferrodac.ui.docs import DocView
+    from ferrodac.ui.docs import DocServices, DocView
     d = tempfile.mkdtemp()
     doc = os.path.join(d, "R.md")
     with open(doc, "w", encoding="utf-8") as fh:
@@ -275,8 +275,8 @@ def test_slash_macro_lists_and_inserts(qapp):
         fh.write(b"\x89PNG\r\n")
     recs = [{"id": "rec1", "label": "Bakeout", "t0": 1.0, "t1": 2.0}]
     exp = [{"name": "Pressure", "abspath": png, "kind": "plot"}]
-    dv = DocView(on_list_recordings=lambda: recs,
-                 on_export_recording=lambda rid: exp if rid == "rec1" else [])
+    dv = DocView(DocServices(list_recordings=lambda: recs,
+                 export_recording=lambda rid: exp if rid == "rec1" else []))
     dv.resize(640, 420)
     try:
         dv.open(doc)
@@ -327,15 +327,15 @@ def test_macro_help_popover(qapp):
 def test_slash_proc_inserts_source(qapp):
     """The /proc macro: used processors reach the editor; picking one inserts its
     source as a fenced python code block (open science)."""
-    from ferrodac.ui.docs import DocView
+    from ferrodac.ui.docs import DocServices, DocView
     d = tempfile.mkdtemp()
     doc = os.path.join(d, "R.md")
     with open(doc, "w", encoding="utf-8") as fh:
         fh.write("# d\n")
     procs = [{"kind": "gas", "label": "Gas composition"}]
     src = "class GasAnalyzer(Processor):\n    def process(self, value):\n        return {}\n"
-    dv = DocView(on_list_processors=lambda: procs,
-                 on_processor_source=lambda k: src if k == "gas" else "")
+    dv = DocView(DocServices(list_processors=lambda: procs,
+                 processor_source=lambda k: src if k == "gas" else ""))
     dv.resize(640, 420)
     try:
         dv.open(doc)
@@ -358,7 +358,7 @@ def test_slash_proc_inserts_source(qapp):
 def test_slash_proc_cites_whitepaper(qapp):
     """When a processor's source comes with a white paper, /proc adds a citation link
     (relative to the doc) alongside the code block."""
-    from ferrodac.ui.docs import DocView
+    from ferrodac.ui.docs import DocServices, DocView
     d = tempfile.mkdtemp()
     os.makedirs(os.path.join(d, "papers"))
     wp = os.path.join(d, "papers", "p.md")
@@ -367,8 +367,8 @@ def test_slash_proc_cites_whitepaper(qapp):
     doc = os.path.join(d, "R.md")
     with open(doc, "w", encoding="utf-8") as fh:
         fh.write("# d\n")
-    dv = DocView(on_list_processors=lambda: [{"kind": "x", "label": "X Proc"}],
-                 on_processor_source=lambda k: {"source": "class X: pass\n", "whitepaper": wp})
+    dv = DocView(DocServices(list_processors=lambda: [{"kind": "x", "label": "X Proc"}],
+                 processor_source=lambda k: {"source": "class X: pass\n", "whitepaper": wp}))
     dv.resize(640, 420)
     try:
         dv.open(doc)
@@ -413,14 +413,14 @@ def test_slash_proc_cold_cache_still_lists(qapp):
     """Regression: typing /proc right after a reload (which resets the page caches)
     still populates the menu — the completion now AWAITS the fetch instead of
     silently returning nothing on a cold cache."""
-    from ferrodac.ui.docs import DocView
+    from ferrodac.ui.docs import DocServices, DocView
     d = tempfile.mkdtemp()
     doc = os.path.join(d, "R.md")
     with open(doc, "w", encoding="utf-8") as fh:
         fh.write("# d\n")
     procs = [{"kind": "gas", "label": "Gas composition"},
              {"kind": "cursor", "label": "Cursor"}]
-    dv = DocView(on_list_processors=lambda: procs, on_processor_source=lambda k: "x")
+    dv = DocView(DocServices(list_processors=lambda: procs, processor_source=lambda k: "x"))
     dv.resize(640, 420)
     try:
         dv.open(doc)
@@ -441,7 +441,7 @@ def test_slash_proc_cold_cache_still_lists(qapp):
 def test_slash_dev_inserts_instruments_table(qapp):
     """The /dev macro: the app builds an instruments table (markdown) and the editor
     drops it at the cursor — a lab-journal provenance block."""
-    from ferrodac.ui.docs import DocView
+    from ferrodac.ui.docs import DocServices, DocView
     d = tempfile.mkdtemp()
     doc = os.path.join(d, "R.md")
     with open(doc, "w", encoding="utf-8") as fh:
@@ -450,7 +450,7 @@ def test_slash_dev_inserts_instruments_table(qapp):
              "| Instrument | Manufacturer | Model | Serial | Firmware | Calibration | Asset |\n"
              "|---|---|---|---|---|---|---|\n"
              "| RGA | Acme | Q200 | SN-1 | 1.2 | 2026-01-01 → due 2027-01-01 | — |\n")
-    dv = DocView(on_device_table=lambda: table)
+    dv = DocView(DocServices(device_table=lambda: table))
     dv.resize(640, 420)
     try:
         dv.open(doc)
@@ -470,7 +470,7 @@ def test_slash_dev_inserts_instruments_table(qapp):
 def test_slash_meta_inserts_report_header(qapp):
     """The /meta macro: the app builds a report front-matter block and the editor
     drops it at the cursor."""
-    from ferrodac.ui.docs import DocView
+    from ferrodac.ui.docs import DocServices, DocView
     d = tempfile.mkdtemp()
     doc = os.path.join(d, "R.md")
     with open(doc, "w", encoding="utf-8") as fh:
@@ -479,7 +479,7 @@ def test_slash_meta_inserts_report_header(qapp):
               "| **Experiment** | Bakeout run |\n"
               "| **Date** | 2026-06-23 |\n"
               "| **Experimenter(s)** | Tobias |\n")
-    dv = DocView(on_run_meta=lambda: header)
+    dv = DocView(DocServices(run_meta=lambda: header))
     dv.resize(640, 420)
     try:
         dv.open(doc)
@@ -498,7 +498,7 @@ def test_slash_meta_inserts_report_header(qapp):
 @pytest.mark.ui
 def test_slash_macro_lists_existing_and_export_now(qapp):
     """Picking a recording shows its ALREADY-exported files plus an 'Export now' item."""
-    from ferrodac.ui.docs import DocView
+    from ferrodac.ui.docs import DocServices, DocView
     d = tempfile.mkdtemp()
     doc = os.path.join(d, "R.md")
     with open(doc, "w", encoding="utf-8") as fh:
@@ -510,9 +510,9 @@ def test_slash_macro_lists_existing_and_export_now(qapp):
         fh.write(b"\x89PNG\r\n")
     recs = [{"id": "rec1", "label": "Bakeout", "t0": 1.0, "t1": 2.0}]
     existing = [{"name": "Pressure", "abspath": png, "kind": "plot"}]
-    dv = DocView(on_list_recordings=lambda: recs,
-                 on_export_recording=lambda rid: [],
-                 on_list_recording_exports=lambda rid: existing if rid == "rec1" else [])
+    dv = DocView(DocServices(list_recordings=lambda: recs,
+                 export_recording=lambda rid: [],
+                 list_recording_exports=lambda rid: existing if rid == "rec1" else []))
     dv.resize(640, 420)
     try:
         dv.open(doc)
