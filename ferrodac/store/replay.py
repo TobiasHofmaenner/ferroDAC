@@ -159,6 +159,33 @@ class PlaybackSource:
         self.bus = bus
         self.chunk = chunk
 
+    def read_window(self, sources, t0, t1, on_progress=None, should_stop=None) -> list:
+        """Read full-res raw for `sources` over [t0,t1] and return the Readings in
+        global time order — the READ half of `stream`, with no emit. Also used to
+        backfill a freshly-routed source into one panel (Dashboard route) without
+        touching the shared bus. `on_progress` covers the read as its first half."""
+        srcs = list(sources)
+        rows: list = []
+        for i, sid in enumerate(srcs):
+            if should_stop is not None and should_stop():
+                return []
+            dev, _, src = sid.rpartition("/")        # key 'device/source' → Reading
+            if self._is_trace(sid):                  # 2-D scans → Trace readings
+                for times, Y, x in self.store.read_raw_trace(sid, t0, t1):
+                    rows.extend(
+                        (float(times[j]),
+                         Reading(dev, src, float(times[j]), Trace(x=x, y=Y[j])))
+                        for j in range(len(times)))
+            else:
+                t, v = self.store.read_raw(sid, t0, t1)  # full-res scalars
+                if len(t):
+                    rows.extend((float(t[j]), Reading(dev, src, float(t[j]), float(v[j])))
+                                for j in range(len(t)))
+            if on_progress:
+                on_progress(0.5 * (i + 1) / max(1, len(srcs)))   # read = first half
+        rows.sort(key=lambda r: r[0])                # global time order
+        return [rd for _, rd in rows]
+
     def stream(self, sources, t0, t1, on_progress=None, should_stop=None,
                pump=None) -> int:
         """Read full-res raw for `sources` over [t0,t1], merge by time, and emit
@@ -174,32 +201,14 @@ class PlaybackSource:
         run on a worker thread — DESIGN §21.3 — while panels stay GUI-only). When
         None (headless/tests/server) it falls back to the synchronous in-caller
         drain, so behaviour is byte-identical to before."""
-        srcs = list(sources)
-        rows: list = []
-        for i, sid in enumerate(srcs):
-            if should_stop is not None and should_stop():
-                return 0
-            dev, _, src = sid.rpartition("/")        # key 'device/source' → Reading
-            if self._is_trace(sid):                  # 2-D scans → Trace readings
-                for times, Y, x in self.store.read_raw_trace(sid, t0, t1):
-                    rows.extend(
-                        (float(times[i]),
-                         Reading(dev, src, float(times[i]), Trace(x=x, y=Y[i])))
-                        for i in range(len(times)))
-            else:
-                t, v = self.store.read_raw(sid, t0, t1)  # full-res scalars
-                if len(t):
-                    rows.extend((float(t[i]), Reading(dev, src, float(t[i]), float(v[i])))
-                                for i in range(len(t)))
-            if on_progress:
-                on_progress(0.5 * (i + 1) / max(1, len(srcs)))   # read = first half
+        rows = self.read_window(sources, t0, t1, on_progress=on_progress,
+                                should_stop=should_stop)
         if not rows:
             if on_progress:
                 on_progress(1.0)
             return 0
-        rows.sort(key=lambda r: r[0])                # global time order
         total, n, batch = len(rows), 0, []
-        for _, rd in rows:
+        for rd in rows:
             batch.append(rd)
             if len(batch) >= self.chunk:
                 if should_stop is not None and should_stop():

@@ -35,6 +35,7 @@ from ..core.history import HistoryBuffer
 from ..core.manager import DeviceManager
 from ..core.markers import RECORDING
 from ..core.projects import ProjectManager
+from ..core.reading import Reading
 from ..core.registry import load_builtin_drivers
 from ._common import color_for, fmt
 from .hubclient import ConnectHubDialog, HubController
@@ -80,6 +81,11 @@ def _editor_args(command: str, path: str) -> list:
     if "{file}" in command or "{path}" in command:
         return [a.replace("{file}", path).replace("{path}", path) for a in parts]
     return parts + [path]
+
+
+# display-resolution point budget for the route-in history backfill (#8): more than
+# any screen width, so the chart shows full detail without reading full-res raw
+_BACKFILL_POINTS = 4000
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +178,8 @@ class MainWindow(QMainWindow):
         self.dashboard = Dashboard(
             self.workspace, engine, manager, data_bus=data_bus,
             historic_sources=self._historic_sources,
+            # a source routed onto a chart backfills from its recorded history (#8)
+            on_display=self._backfill_route,
             # heavy processors run off-GUI while live, inline while parked (§21.3)
             is_live=(lambda: self.time_context.following)
             if self.time_context is not None else None)
@@ -2248,6 +2256,41 @@ class MainWindow(QMainWindow):
             bar.setVisible(True)
         bar.setValue(max(0, min(100, int(frac * 100))))
         QApplication.processEvents()
+
+    def _backfill_route(self, source_key: str, panel) -> None:
+        """A source was just routed onto a chart → backfill it from its recorded history
+        over the CURRENT window, so the chart shows the existing data instead of starting
+        live from the click moment (#8). Fed DIRECTLY to that panel (not the shared replay
+        bus) so panels already showing this source aren't double-fed.
+
+        Scalars come from a BOUNDED, DOWNSAMPLED query (the display only needs ~pixels of
+        detail): rollup-backed, so it's ~10 ms even over a whole-session grow window and
+        returns ~display-resolution points — NOT the full-res `read_raw`, which read
+        millions of samples on the GUI thread (measured multi-second freezes on long
+        sessions) only for the chart buffer to decimate them away. Because the query is
+        cheap it stays SYNCHRONOUS on the GUI thread, so no live tick interleaves older
+        history behind newer points. Traces (low volume) keep their full read. No-op with
+        no store / no feed target."""
+        if (self.replay is None or self.resolver is None
+                or self.time_context is None or not hasattr(panel, "feed")):
+            return
+        t0, t1 = self.time_context.window
+        try:
+            if self.replay.playback._is_trace(source_key):
+                readings = self.replay.playback.read_window([source_key], t0, t1)
+            else:
+                from .timeline import _envelope_midline
+                x, y = self.resolver.query(source_key, t0, t1, max_points=_BACKFILL_POINTS)
+                x, y = _envelope_midline(x, y)       # min/max envelope → one clean line
+                dev, _, src = source_key.rpartition("/")
+                readings = [Reading(dev, src, float(x[i]), float(y[i]))
+                            for i in range(len(x)) if x[i] == x[i]]   # drop NaN gap markers
+        except Exception as exc:                    # noqa: BLE001 — never break a route
+            logging.getLogger("ferrodac").debug("route backfill failed for %s: %s",
+                                                 source_key, exc)
+            return
+        if readings:
+            panel.feed(readings)
 
     def _source_label(self, key: str) -> str:
         """A human, device-qualified label for a source key ('temp · Sim Thermometer 2

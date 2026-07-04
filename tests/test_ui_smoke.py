@@ -1008,6 +1008,44 @@ def test_history_dialog_remote_push(qapp, tmp_path):
 
 
 @pytest.mark.ui
+def test_route_to_chart_backfills_recorded_history(qapp):
+    """Routing a source onto a chart replays its recorded history for the current
+    window — the chart shows existing data, not just live from the click moment (#8).
+    Fed directly to that panel, so it happens even with nothing streaming live."""
+    import time as _time
+
+    import numpy as np
+    from ferrodac.ui.workspace import SourcePort
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        # recorded history for a channel with no live device, an hour back
+        base = _time.time() - 3600.0
+        st = w.store_writer.store
+        st.add_source("dev/temp")
+        ts = base + np.arange(200) * 0.1
+        st.append("dev/temp", ts, 20.0 + np.sin(ts), epoch="e0")
+        st.finalize_rollups("dev/temp")
+        # a window that covers the history (grow from before it)
+        w.time_context.anchor = base - 1.0
+        w.time_context.grow = True
+        db._sources["dev/temp"] = SourcePort(
+            "dev/temp", "Temperature", "float", "°C", "dev", "device")
+
+        pid = db.add_panel("chart")
+        panel = db.panel(pid)
+        assert "dev/temp" not in panel._buf              # nothing shown yet
+        db.set_route("dev/temp", pid, True)              # route → backfill fires
+        assert "dev/temp" in panel._buf
+        # backfilled from a bounded downsampled query (display-res, not full-res raw):
+        # 200 samples < budget → all returned, but never more than the point budget
+        n = len(panel._buf["dev/temp"])
+        assert 0 < n <= 200                              # the recorded window, display-bounded
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_processor_node_routing(qapp):
     """A processor is a routable node: added BLANK (no input), bound by routing a
     source into its input port, its outputs are virtual sources, and it's removable.

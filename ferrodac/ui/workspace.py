@@ -217,10 +217,14 @@ class Dashboard(QObject):
     _derived = Signal(str, float, object)   # proc_id, t, out-dict — worker → GUI
 
     def __init__(self, area: WorkspaceArea, engine, manager, parent=None,
-                 data_bus=None, historic_sources=None, is_live=None):
+                 data_bus=None, historic_sources=None, is_live=None, on_display=None):
         super().__init__(parent)
         self.area = area
         self.engine = engine
+        # on_display(source_key, panel): a source was just routed onto a DISPLAY — the
+        # app backfills the panel from that source's recorded history over the current
+        # window, so a routed chart shows existing data (not just live from now, #8).
+        self._on_display = on_display
         # is_live() → are we following the live edge (vs a parked replay)? Heavy
         # processors run off the GUI thread while LIVE (so a slow analysis never
         # freezes acquisition); during a parked re-stream they run inline so the
@@ -950,6 +954,9 @@ class Dashboard(QObject):
                             sink.panel.remove_source(skey)
             targets.add(sink_key)
             self._apply_route(source_key, sink_key)
+            if (self._on_display is not None and sink is not None
+                    and sink.kind == "display" and sink.panel is not None):
+                self._on_display(source_key, sink.panel)   # backfill history (#8)
         else:
             targets.discard(sink_key)
             if sink is not None and sink.kind == "display" and sink.panel is not None:
