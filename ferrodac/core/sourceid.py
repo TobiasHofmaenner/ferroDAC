@@ -77,20 +77,7 @@ def resolve_source(key, *, live_ports=None, store=None, now=None) -> SourceInfo:
                       unit, _DTYPE_MAP.get(dtype, "float"), "historic", False, rec)
 
 
-def uncertainty_at(store, source_key: str, t: float):
-    """The σ MODEL in effect for a source at time ``t`` — from the device provenance
-    change-log (DESIGN §19.0), time-resolved via ``device_record_at`` — or None. How a
-    historic window recovers the model that was live when the data was taken (e.g. the
-    Keithley's range-dependent accuracy). Reconstruction (X3) evaluates it over a window,
-    segmenting on the change-log's epochs. Qt-free."""
-    if store is None:
-        return None
-    device_id, _, channel = source_key.partition("/")
-    try:
-        rec = store.device_record_at(device_id, float(t))
-    except Exception:                        # noqa: BLE001 — missing/old store → no σ
-        return None
-    d = rec.get(f"uncertainty:{channel}")
+def _model_from_dict(d):
     if not d:
         return None
     from .uncertainty import Uncertainty
@@ -98,3 +85,36 @@ def uncertainty_at(store, source_key: str, t: float):
         return Uncertainty.from_dict(d)
     except Exception:                        # noqa: BLE001 — corrupt/unknown model
         return None
+
+
+def uncertainty_at(store, source_key: str, t: float):
+    """The σ MODEL in effect for a source at time ``t`` — from the device provenance
+    change-log (DESIGN §19.0) — or None. How a historic window recovers the model that
+    was live when the data was taken (e.g. the Keithley's range-dependent accuracy).
+
+    Uses the SAME rule as the windowed reconstruction (store.uncertainty): the model
+    whose event-time is the greatest ≤ ``t``; if ``t`` precedes every event, the FIRST
+    model; only when the field was never change-logged does it fall back to the current
+    snapshot. Reading the TIME-SORTED history (not device_record_at's fold) keeps the
+    point-in-time answer consistent with the band a chart draws, even for a change-log
+    emitted out of time order (backfill / sync). Qt-free."""
+    if store is None:
+        return None
+    device_id, _, channel = source_key.partition("/")
+    field = f"uncertainty:{channel}"
+    try:
+        hist = store.device_meta_history(device_id, field)   # sorted by time
+    except Exception:                        # noqa: BLE001 — missing/old store → no σ
+        return None
+    if not hist:                             # no epochs → the current-snapshot fold
+        try:
+            return _model_from_dict(store.device_record_at(device_id, float(t)).get(field))
+        except Exception:                    # noqa: BLE001
+            return None
+    chosen = hist[0][1]                      # t before the first event → the first model
+    for et, v in hist:
+        if et <= t:
+            chosen = v
+        else:
+            break
+    return _model_from_dict(chosen)

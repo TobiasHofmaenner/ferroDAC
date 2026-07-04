@@ -151,10 +151,23 @@ class ZarrStore:
             return {}
         meta = g.attrs.get("meta", [])
         rec: dict = {}
-        for et, k, v in meta:
+        for et, k, v in sorted(meta, key=lambda e: e[0]):   # by TIME, not insertion
             if et <= t:
-                rec[k] = v
+                rec[k] = v                                  # greatest et ≤ t wins
         return rec or dict(g.attrs.get("current", {}))
+
+    @_locked
+    def device_meta_history(self, device_id, field: str) -> list:
+        """Every change-log value for ONE field, sorted by time: [(t, value), ...].
+        The timeline the σ reconstruction segments a window on (a field's model epochs).
+        Empty for an unknown device / field."""
+        try:
+            g = self._device(device_id)
+        except KeyError:
+            return []
+        out = [(float(et), v) for et, k, v in g.attrs.get("meta", []) if k == field]
+        out.sort(key=lambda e: e[0])
+        return out
 
     @_locked
     def device_records(self) -> list:
