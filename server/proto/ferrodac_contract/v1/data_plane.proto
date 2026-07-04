@@ -419,10 +419,28 @@ message ProjectEvent {
   Project project = 2;
 }
 
+// The git push/pull credential for a provisioned repo, fetched on demand and held
+// in memory only — NEVER persisted (Project.git_remote is credential-free). The
+// client injects it at git time via a credential helper. Today the hub returns its
+// shared provisioning token; this is the seam where per-user scoped tokens plug in
+// once the auth token above is validated (DESIGN §13).
+message GitCredentialRequest {
+  string token = 1;              // reserved auth seam
+  string project_id = 2;
+}
+
+message GitCredential {
+  bool ok = 1;                   // false = no transparent-git repo for this project
+  string url = 2;                // the credential-free remote (echoed for convenience)
+  string username = 3;
+  string password = 4;           // ephemeral — do not persist
+}
+
 service Projects {
   rpc PublishProject(PublishProjectRequest) returns (ProjectAck);
   rpc DeleteProject(DeleteProjectRequest) returns (ProjectAck);
   rpc WatchProjects(WatchProjectsRequest) returns (stream ProjectEvent);
+  rpc GetGitCredential(GitCredentialRequest) returns (GitCredential);
 }
 
 // --------------------------------------------------------------------------- //

@@ -977,10 +977,12 @@ class MainWindow(QMainWindow):
                 continue                                  # not provisioned (yet / native dial)
             self._pending_share.pop(pid, None)
 
-            def work(ctx, path=path, url=url):
+            def work(ctx, path=path, url=url, pid=pid):
                 repo = ProjectRepo(path)
-                repo.set_remote(url)
-                return repo.push()                        # (ok, msg)
+                repo.set_remote(url)                      # credential-free origin
+                cred = self.hub.git_credential(pid)       # ephemeral (url, user, pass)
+                creds = (cred[1], cred[2]) if cred else None
+                return repo.push(creds)                   # token injected for this push only
 
             self._tasks.run(
                 work, title="Publishing shared project",
@@ -1025,8 +1027,13 @@ class MainWindow(QMainWindow):
             self._switch_project(local.id)
             self.statusBar().showMessage(f"Cloned “{name}” → {dest}", 6000)
 
+        def clone_work(ctx, pid=pid, url=url, dest=dest):
+            cred = self.hub.git_credential(pid)           # ephemeral (url, user, pass)
+            creds = (cred[1], cred[2]) if cred else None
+            return ProjectRepo.clone(url, dest, creds)    # token injected for this clone only
+
         self._tasks.run(
-            lambda ctx: ProjectRepo.clone(url, dest),
+            clone_work,
             title="Cloning project", why=f"Checking out “{name}” from {url}",
             exclusive=f"clone:{dest}", on_busy="reject",
             on_done=done,
@@ -2062,14 +2069,20 @@ class MainWindow(QMainWindow):
         if repo is None:
             self.statusBar().showMessage("No active project.", 4000)
             return
+        repo.sanitize_origin()                      # self-heal a pre-fix tokened origin
         def on_remote_changed(url):                 # persist the URL + share if on hub
             p = self._project_mgr.active
             if p is not None:
                 p.set_git_remote(url)
                 self._republish_active_if_hub()
+
+        def hub_cred():                             # ephemeral (user, pass) for a hub
+            p = self._project_mgr.active            # repo's manual push/pull, else None
+            c = self.hub.git_credential(p.id) if p is not None else None
+            return (c[1], c[2]) if c else None
         self._history_dialog = HistoryDialog(repo, self._project_mgr.active.name, self,
                                              on_remote_changed=on_remote_changed,
-                                             author=self._git_identity())
+                                             author=self._git_identity(), cred=hub_cred)
         self._history_dialog.finished.connect(
             lambda _=0: setattr(self, "_history_dialog", None))
         self._history_dialog.show()

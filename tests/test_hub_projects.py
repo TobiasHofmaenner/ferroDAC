@@ -101,8 +101,10 @@ def test_no_dir_is_in_memory_only():
     assert len(h.project_snapshot()) == 1        # works in RAM, just not persisted
 
 
-def test_gitea_provision_creates_repo_and_authed_url():
-    """The provisioner ensures the org+repo and returns a token-authed PUBLIC URL."""
+def test_gitea_provision_returns_credential_free_url_and_token_rides_separately():
+    """The provisioner ensures the org+repo and returns a CREDENTIAL-FREE public URL
+    (the record); the token rides only via credentials() (the leak fix — the admin
+    token used to be baked into the URL and fanned out / zipped)."""
     import urllib.error
     from hub.gitea import GiteaProvisioner
     g = GiteaProvisioner("http://gitea:3000", "tok123", org="ferrodac", user="ferrodac",
@@ -120,7 +122,11 @@ def test_gitea_provision_creates_repo_and_authed_url():
     assert ("POST", "/orgs", {"username": "ferrodac"}) in calls
     assert ("POST", "/orgs/ferrodac/repos",
             {"name": "proj-1", "private": True, "auto_init": False}) in calls
-    assert url == "https://ferrodac:tok123@git.example.com/ferrodac/proj-1.git"
+    assert url == "https://git.example.com/ferrodac/proj-1.git"   # NO token in the URL
+    assert "tok123" not in url
+    # the token is reachable only via the separate credential accessor
+    curl, user, token = g.credentials("proj-1")
+    assert curl == url and user == "ferrodac" and token == "tok123"
 
 
 def test_gitea_provision_is_defensive():
@@ -134,20 +140,39 @@ def test_gitea_provision_is_defensive():
     assert g.provision("x") == ""          # any failure → "" (hub leaves git_remote unset)
 
 
+class _FakeGitea:
+    def __init__(self):
+        self.calls = []
+
+    def provision(self, pid):
+        self.calls.append(pid)
+        return f"https://git/{pid}.git"             # credential-free (the record)
+
+    def credentials(self, pid):
+        return f"https://git/{pid}.git", "u", "TOKEN"
+
+
 def test_hub_provisions_git_remote_once(tmp_path):
-    """The transparent dial: a project with no remote gets one provisioned (once)."""
-    class FakeGitea:
-        def __init__(self):
-            self.calls = []
-
-        def provision(self, pid):
-            self.calls.append(pid)
-            return f"https://t@git/{pid}.git"
-
-    hub = Hub(projects_dir=str(tmp_path / "p"), gitea=FakeGitea())
+    """The transparent dial: a project with no remote gets a CREDENTIAL-FREE remote
+    provisioned (once); the token is never in the fanned-out record."""
+    hub = Hub(projects_dir=str(tmp_path / "p"), gitea=_FakeGitea())
     assert hub.publish_project(_rec("P1", "Proj", version=1))
-    assert hub._projects["P1"].git_remote == "https://t@git/P1.git"
+    assert hub._projects["P1"].git_remote == "https://git/P1.git"
+    assert "TOKEN" not in hub._projects["P1"].git_remote
     rec2 = _rec("P1", "Proj", version=2)
-    rec2.git_remote = "https://t@git/P1.git"        # already carries a remote
+    rec2.git_remote = "https://git/P1.git"          # already carries a remote
     assert hub.publish_project(rec2)
     assert hub.gitea.calls == ["P1"]                # provisioned exactly once
+
+
+def test_hub_git_credential_only_for_known_provisioned_projects(tmp_path):
+    """GetGitCredential hands out the ephemeral token only for a project we know and
+    that carries a provisioned remote — never for an unknown/native/deleted one."""
+    hub = Hub(projects_dir=str(tmp_path / "p"), gitea=_FakeGitea())
+    hub.publish_project(_rec("P1", "Proj", version=1))
+    assert hub.git_credential("P1") == ("https://git/P1.git", "u", "TOKEN")
+    assert hub.git_credential("unknown") is None    # not a known project
+    # a native-dial hub (no gitea) never hands out a credential
+    hub2 = Hub(projects_dir=str(tmp_path / "q"), gitea=None)
+    hub2.publish_project(_rec("P2", "Proj", version=1))
+    assert hub2.git_credential("P2") is None

@@ -210,6 +210,33 @@ def test_record_carries_git_remote():
     assert q.git_remote == "https://example/repo.git"
 
 
+def test_git_remote_is_stored_credential_free():
+    """set_git_remote strips any embedded token — a secret must never reach
+    project.json (which is fanned to clients, backed up, and zipped)."""
+    d = tempfile.mkdtemp()
+    p = Project.create(os.path.join(d, "p"), "P")
+    p.set_git_remote("https://ferrodac:SECRET@git/o/repo.git")
+    assert p.git_remote == "https://git/o/repo.git"
+    assert "SECRET" not in json.dumps(p.meta)
+
+
+def test_load_scrubs_a_pre_fix_tokened_project_json():
+    """A project.json written before the leak fix (token embedded in git_remote) is
+    self-healed on load: stripped in memory AND rewritten to disk."""
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "proj")
+    os.makedirs(path)
+    with open(os.path.join(path, "project.json"), "w", encoding="utf-8") as fh:
+        json.dump({"id": "P", "name": "P",
+                   "git_remote": "https://ferrodac:LEAKED@git/o/P.git"}, fh)
+    p = Project(path)                                       # _load scrubs on read
+    assert p.git_remote == "https://git/o/P.git"
+    with open(os.path.join(path, "project.json"), encoding="utf-8") as fh:
+        on_disk = json.load(fh)
+    assert on_disk["git_remote"] == "https://git/o/P.git"  # file rewritten
+    assert "LEAKED" not in json.dumps(on_disk)
+
+
 def test_projects_dedup_local_working_copy_over_hub_cache():
     """A LOCAL checkout (same id) hides the hub CACHE entry — your clone is the copy."""
     d = tempfile.mkdtemp()

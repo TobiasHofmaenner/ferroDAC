@@ -370,6 +370,19 @@ class Hub:
         self._emit_project(pb.ProjectEvent(type=etype, project=project))
         return True
 
+    def git_credential(self, project_id: str) -> tuple:
+        """The ephemeral (url, username, password) for pushing/pulling this project's
+        provisioned repo, or None if there's no transparent-git repo for it. Handed
+        out over GetGitCredential and held in memory client-side — the token is NEVER
+        put in the fanned-out record (that was the leak). Only projects we actually
+        know and that carry a (credential-free) remote qualify."""
+        if self.gitea is None:
+            return None
+        proj = self._projects.get(project_id)
+        if proj is None or proj.deleted or not proj.git_remote:
+            return None
+        return self.gitea.credentials(project_id)
+
     def delete_project(self, project_id: str, version: int, origin_id: str = "") -> bool:
         """Tombstone a project (removes its folder). The tombstone's version must
         beat the live one to win LWW; bump it if the caller's is too low."""

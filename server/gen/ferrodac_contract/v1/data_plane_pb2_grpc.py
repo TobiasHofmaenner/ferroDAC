@@ -482,6 +482,11 @@ class ProjectsStub:
                 request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchProjectsRequest.SerializeToString,
                 response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectEvent.FromString,
                 _registered_method=True)
+        self.GetGitCredential = channel.unary_unary(
+                '/ferrodac_contract.v1.Projects/GetGitCredential',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.GitCredentialRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.GitCredential.FromString,
+                _registered_method=True)
 
 
 class ProjectsServicer:
@@ -505,6 +510,12 @@ class ProjectsServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetGitCredential(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ProjectsServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -522,6 +533,11 @@ def add_ProjectsServicer_to_server(servicer, server):
                     servicer.WatchProjects,
                     request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchProjectsRequest.FromString,
                     response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectEvent.SerializeToString,
+            ),
+            'GetGitCredential': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetGitCredential,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.GitCredentialRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.GitCredential.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -605,6 +621,33 @@ class Projects:
             '/ferrodac_contract.v1.Projects/WatchProjects',
             ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchProjectsRequest.SerializeToString,
             ferrodac__contract_dot_v1_dot_data__plane__pb2.ProjectEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetGitCredential(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Projects/GetGitCredential',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.GitCredentialRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.GitCredential.FromString,
             options,
             channel_credentials,
             insecure,

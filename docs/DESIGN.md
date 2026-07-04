@@ -758,6 +758,20 @@ hub needs is *"a git remote + credentials,"* which makes it host-agnostic by
 construction. This is *mechanism, not policy* (cf. §10.2 / §18.3): expose git as much
 or as little as someone wants.
 
+**Credentials never travel in the record (2026-07-04 security fix).** The transparent
+dial's provisioned `git_remote` is **credential-free** (`https://host/org/id.git`). The
+push/pull token is fetched on demand over the authenticated `Projects.GetGitCredential`
+RPC, held in memory client-side, and injected at git time via an env-backed credential
+helper — never written to `.git/config`, `project.json`, a backup, or a zip. (It used
+to be baked into the clone URL: the hub's *shared admin* token then came to rest in
+every member's `project.json` + `.git/config` and every backup/zip — a hub-wide
+credential leak.) `GetGitCredential` returns the shared provisioning token today; it is
+the seam where a **per-user scoped** token plugs in once the reserved auth token (§13)
+is validated. `ProjectRepo.set_remote`/`clone` strip any embedded credential defensively,
+and `Project` load + `sanitize_origin()` self-heal artifacts written before the fix.
+**A leaked shared token must be rotated in Gitea** — a code fix can't un-leak what is
+already in circulated zips/backups.
+
 **Clients are git clients.** Each clones to **local disk** (single-writer `.git` —
 safe), commits its *own* user's work (→ real authorship/`blame`), pushes/pulls; the
 git server mediates merge. The corruption rule: **never put `.git` in a multi-writer

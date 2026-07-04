@@ -182,6 +182,17 @@ class ProjectsServicer(rpc.ProjectsServicer):
         finally:
             self.hub.remove_project_watcher(q)
 
+    async def GetGitCredential(self, request, context):  # noqa: N802
+        """Hand out the ephemeral push/pull credential for a provisioned repo. The
+        client holds it in memory and injects it at git time — it is NEVER in the
+        fanned-out record. Empty (ok=False) when the project has no transparent-git
+        repo (native dial, unknown project, or Gitea not configured)."""
+        cred = self.hub.git_credential(request.project_id)
+        if cred is None:
+            return pb.GitCredential(ok=False)
+        url, user, password = cred
+        return pb.GitCredential(ok=True, url=url, username=user, password=password)
+
 
 class DocsServicer(rpc.DocsServicer):
     """Live collaborative editing (DESIGN §10.x). One bidirectional Session per

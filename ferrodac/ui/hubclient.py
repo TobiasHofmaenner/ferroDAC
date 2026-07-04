@@ -48,6 +48,7 @@ class HubController(QObject):
         self._resolver = resolver        # local read resolver (gets a hub READ tier)
         self._read_chan = None           # sync channel for the hub read tier
         self._backup_client = None       # hub Backup service client (§20)
+        self._gitcred_client = None      # hub git-credential client (transparent dial)
         self._hub_sources: list = []     # cached [(key,name,unit,dtype)] from the hub
         self._agent = None
         self._viewer = None
@@ -100,6 +101,13 @@ class HubController(QObject):
     def backup(self):
         """The hub Backup-service client (DESIGN §20), or None when not connected."""
         return self._backup_client
+
+    def git_credential(self, project_id: str):
+        """The ephemeral `(url, username, password)` for pushing/pulling a hub-
+        provisioned project repo, or None. Held in memory + injected at git time —
+        never persisted (the token used to leak via the record; DESIGN §8.2)."""
+        c = self._gitcred_client
+        return c.get(project_id) if c is not None else None
 
     @property
     def roles(self) -> tuple:
@@ -161,9 +169,11 @@ class HubController(QObject):
         if net.GRPC_AVAILABLE:
             import grpc
             from ..net.backup import HubBackupClient
+            from ..net.gitcred import HubGitCredentialClient
             self._read_chan = grpc.insecure_channel(
                 addr, options=net.GRPC_CHANNEL_OPTIONS)
             self._backup_client = HubBackupClient(self._read_chan)
+            self._gitcred_client = HubGitCredentialClient(self._read_chan)
             if self._resolver is not None:
                 from ..net.readtier import HubReadTier
                 tier = HubReadTier(self._read_chan)
@@ -214,6 +224,7 @@ class HubController(QObject):
         if self._resolver is not None:
             self._resolver.clear_remote()
         self._backup_client = None
+        self._gitcred_client = None
         if self._read_chan is not None:
             self._read_chan.close()
             self._read_chan = None

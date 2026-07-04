@@ -103,7 +103,8 @@ class Project:
         return self.meta.get("git_remote", "")
 
     def set_git_remote(self, url: str) -> None:
-        self.meta["git_remote"] = url or ""
+        from .projectgit import strip_credentials
+        self.meta["git_remote"] = strip_credentials(url or "")   # never persist a secret
         self.save()
 
     def _load(self) -> None:
@@ -112,6 +113,23 @@ class Project:
                 self.meta = json.load(fh)
         except Exception:
             self.meta = {}
+        self._scrub_credentials()
+
+    def _scrub_credentials(self) -> None:
+        """Self-heal a project.json written before the leak fix: an old record's
+        git_remote may embed a `user:token@` credential (a hub-wide token that got
+        fanned out + zipped). Strip it in memory and rewrite the file — without
+        bumping `modified` (a scrub isn't a user edit)."""
+        from .projectgit import strip_credentials
+        raw = self.meta.get("git_remote", "")
+        clean = strip_credentials(raw)
+        if raw and clean != raw:
+            self.meta["git_remote"] = clean
+            try:
+                with open(os.path.join(self.path, _META), "w", encoding="utf-8") as fh:
+                    json.dump(self.meta, fh, indent=2)
+            except Exception:                    # noqa: BLE001 — best-effort scrub
+                pass
 
     def save(self) -> None:
         os.makedirs(self.path, exist_ok=True)

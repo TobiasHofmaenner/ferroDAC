@@ -76,6 +76,73 @@ def test_projectrepo_is_defensive(tmp_path):
     assert sha is None or len(sha) == 40
 
 
+def test_strip_credentials():
+    from ferrodac.core.projectgit import strip_credentials
+    assert strip_credentials("https://user:tok@git.example.com/o/r.git") \
+        == "https://git.example.com/o/r.git"
+    assert strip_credentials("https://git.example.com/o/r.git") \
+        == "https://git.example.com/o/r.git"          # already clean → unchanged
+    assert strip_credentials("git@github.com:o/r.git") == "git@github.com:o/r.git"  # SSH
+    assert strip_credentials("") == ""
+
+
+def test_set_remote_never_stores_a_token(tmp_path):
+    """A `user:token@` credential in a remote URL is stripped before it touches
+    .git/config — the leak fix (the token used to sit in config → backups → zips)."""
+    from ferrodac.core.projectgit import ProjectRepo
+    r = ProjectRepo(str(tmp_path / "p"))
+    r.set_remote("https://ferrodac:SECRET@git.example.com/o/proj.git")
+    assert r.remote_url() == "https://git.example.com/o/proj.git"
+    cfg = (tmp_path / "p" / ".git" / "config").read_text()
+    assert "SECRET" not in cfg
+
+
+def test_sanitize_origin_scrubs_a_pre_fix_token(tmp_path):
+    """Self-heal: an origin written with an embedded token before the fix gets
+    scrubbed in place (idempotently)."""
+    import subprocess
+    from ferrodac.core.projectgit import ProjectRepo
+    p = tmp_path / "p"
+    p.mkdir()
+    r = ProjectRepo(str(p))
+    r.init()
+    subprocess.run(["git", "-C", str(p), "remote", "add", "origin",
+                    "https://u:TOKEN@git/o/proj.git"], check=True)
+    assert "TOKEN" in (p / ".git" / "config").read_text()
+    assert r.sanitize_origin() is True
+    assert r.remote_url() == "https://git/o/proj.git"
+    assert "TOKEN" not in (p / ".git" / "config").read_text()
+    assert r.sanitize_origin() is False               # already clean → no-op
+
+
+def test_credential_helper_keeps_the_secret_out_of_argv():
+    """The ephemeral credential is injected via a helper that reads the token from
+    the ENV — so it never appears in argv (visible to `ps`) or on disk."""
+    from ferrodac.core.projectgit import _credential_helper
+    args, env = _credential_helper(("user", "SECRET"))
+    assert "SECRET" not in " ".join(args)             # secret not in the command line
+    assert env == {"FD_GIT_USER": "user", "FD_GIT_PASS": "SECRET"}
+    assert _credential_helper(None) == ([], {})       # no cred → no injection
+    assert _credential_helper(("u", "")) == ([], {})  # no password → no injection
+
+
+def test_push_with_cred_does_not_persist_the_token(tmp_path):
+    """Passing an ephemeral credential to push() must not write it to .git/config."""
+    import subprocess
+    from ferrodac.core.projectgit import ProjectRepo
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    a = tmp_path / "a"
+    a.mkdir()
+    ra = ProjectRepo(str(a))
+    (a / "f.txt").write_text("one\n")
+    ra.commit("first")
+    ra.set_remote(str(bare))
+    ok, msg = ra.push(cred=("user", "SECRET"))        # local remote ignores it — harmless
+    assert ok, msg
+    assert "SECRET" not in (a / ".git" / "config").read_text()
+
+
 def test_commit_with_author(tmp_path):
     """A commit can be attributed to the real user (name + email)."""
     import subprocess

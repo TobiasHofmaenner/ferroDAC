@@ -14,11 +14,38 @@ from __future__ import annotations
 import getpass
 import logging
 import os
+import re
 import subprocess
 
 log = logging.getLogger(__name__)
 
 _FMT = "%H%x1f%an%x1f%at%x1f%s"          # sha, author, unix-time, subject (US-separated)
+
+# userinfo (user[:pass]@) in an http(s) URL — a credential baked into a remote URL
+_USERINFO = re.compile(r"^(https?://)[^/@]*@", re.IGNORECASE)
+
+
+def strip_credentials(url: str) -> str:
+    """Drop any `user:token@` userinfo from an http(s) remote URL, leaving the bare
+    `https://host/path` — so a credential never lands in .git/config, project.json,
+    a backup, or a zip. The token is injected ephemerally at git time instead."""
+    return _USERINFO.sub(r"\1", url or "")
+
+
+def _credential_helper(cred) -> tuple:
+    """Build the `-c` args + extra env that feed git an HTTPS credential for ONE
+    command via a helper that reads the secret from the ENVIRONMENT — so the token
+    never appears in argv (visible to `ps`), in .git/config, or on disk. `cred` is
+    `(username, password)` or None → ([], {})."""
+    if not cred or not cred[1]:
+        return [], {}
+    user, password = cred
+    helper = ('!f() { test "$1" = get && '
+              'printf "username=%s\\npassword=%s\\n" "$FD_GIT_USER" "$FD_GIT_PASS"; }; f')
+    args = ["-c", "credential.helper=",              # clear any inherited helper
+            "-c", f"credential.helper={helper}",
+            "-c", "credential.useHttpPath=false"]
+    return args, {"FD_GIT_USER": user or "", "FD_GIT_PASS": password or ""}
 
 
 class ProjectRepo:
@@ -28,11 +55,11 @@ class ProjectRepo:
         self.path = path
 
     # -- low-level -----------------------------------------------------------
-    def _git(self, *args, check=True, timeout=30):
+    def _git(self, *args, check=True, timeout=30, extra_env=None):
         # GIT_TERMINAL_PROMPT=0 → never block on a credential prompt (fail fast instead);
         # a default 30 s ceiling so a local op (add/status/commit) can't hang the caller
         # forever (a locked/huge repo). Network ops (push) pass a larger explicit timeout.
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", **(extra_env or {})}
         return subprocess.run(["git", "-C", self.path, *args], check=check,
                               capture_output=True, text=True, env=env, timeout=timeout)
 
@@ -110,35 +137,53 @@ class ProjectRepo:
         return out.stdout.strip() if out.returncode == 0 else ""
 
     def set_remote(self, url: str) -> None:
-        """Point 'origin' at a git URL (HTTPS with a token, or SSH). Credentials are
-        the user's git setup (token-in-URL / credential helper / SSH key) — we don't
-        store secrets."""
+        """Point 'origin' at a git URL. Any embedded `user:token@` credential is
+        STRIPPED before it touches .git/config — we never store secrets on disk; the
+        hub credential is injected ephemerally at push/pull time instead. (SSH URLs
+        and bare HTTPS pass through unchanged.)"""
+        url = strip_credentials(url)
         self.init()
         if self.remote_url():
             self._git("remote", "set-url", "origin", url)
         else:
             self._git("remote", "add", "origin", url)
 
+    def sanitize_origin(self) -> bool:
+        """Self-heal: if origin still carries an embedded credential (provisioned
+        before this fix, and sitting in .git/config → backups/zips), rewrite it
+        credential-free. Returns True if it changed anything. Cheap + idempotent."""
+        cur = self.remote_url()
+        clean = strip_credentials(cur)
+        if cur and clean != cur:
+            self._git("remote", "set-url", "origin", clean, check=False)
+            log.info("scrubbed an embedded credential from %s origin URL", self.path)
+            return True
+        return False
+
     def current_branch(self) -> str:
         out = self._git("rev-parse", "--abbrev-ref", "HEAD", check=False)
         br = out.stdout.strip() if out.returncode == 0 else ""
         return br if br and br != "HEAD" else "main"
 
-    def push(self):
-        """Push the current branch to origin (sets upstream). Returns (ok, message)."""
+    def push(self, cred=None):
+        """Push the current branch to origin (sets upstream). `cred` is an optional,
+        ephemeral `(username, password)` injected for this one command (never stored).
+        Returns (ok, message)."""
         return self._remote_op("push", "-u", "origin", self.current_branch(),
-                               ok_msg="Pushed.")
+                               ok_msg="Pushed.", cred=cred)
 
-    def pull(self):
-        """Pull origin/<branch> (merge, no editor). Returns (ok, message)."""
+    def pull(self, cred=None):
+        """Pull origin/<branch> (merge, no editor). `cred` as in `push`. Returns
+        (ok, message)."""
         return self._remote_op("pull", "--no-edit", "origin", self.current_branch(),
-                               ok_msg="Up to date.")
+                               ok_msg="Up to date.", cred=cred)
 
-    def _remote_op(self, *args, ok_msg=""):
+    def _remote_op(self, *args, ok_msg="", cred=None):
         if not self.remote_url():
             return False, "No remote set — add one first."
+        cargs, cenv = _credential_helper(cred)
         try:
-            r = self._git(*args, check=False, timeout=120)
+            r = self._git(*cargs, *args, check=False, timeout=120, extra_env=cenv)
         except FileNotFoundError:
             return False, "git is not installed"
         except subprocess.TimeoutExpired:
@@ -147,11 +192,16 @@ class ProjectRepo:
         return (r.returncode == 0, out or ok_msg)
 
     @staticmethod
-    def clone(url: str, dest: str) -> str:
-        """Clone a git URL to dest (raises on failure). For 'check out a shared project'."""
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        r = subprocess.run(["git", "clone", url, dest], capture_output=True, text=True,
-                           env=env, timeout=300)
+    def clone(url: str, dest: str, cred=None) -> str:
+        """Clone a git URL to dest (raises on failure). For 'check out a shared
+        project'. `url` is stored credential-free in the new clone's config; `cred`
+        (username, password), if given, authenticates this one clone ephemerally —
+        the token never lands in the clone's .git/config."""
+        url = strip_credentials(url)
+        cargs, cenv = _credential_helper(cred)
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", **cenv}
+        r = subprocess.run(["git", *cargs, "clone", url, dest],
+                           capture_output=True, text=True, env=env, timeout=300)
         if r.returncode != 0:
             raise RuntimeError((r.stderr or r.stdout or "clone failed").strip())
         return dest

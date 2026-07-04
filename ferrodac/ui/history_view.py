@@ -18,11 +18,13 @@ def _ago(ts: int) -> str:
 
 class HistoryDialog(QDialog):
     def __init__(self, repo, project_name, parent=None, on_remote_changed=None,
-                 author=None):
+                 author=None, cred=None):
         super().__init__(parent)
         self.repo = repo
         self._on_remote_changed = on_remote_changed   # app: persist URL + share if on hub
         self._author = author                         # (name, email) for commits, or None
+        self._cred = cred                             # () -> (user, pass)|None: ephemeral
+        #                                               hub git credential for push/pull
         self.setWindowTitle(f"History · {project_name}")
         self.resize(620, 480)
         root = QVBoxLayout(self)
@@ -105,10 +107,16 @@ class HistoryDialog(QDialog):
             self.refresh()
 
     def _push(self):
-        self._sync(self.repo.push, "Pushing…")
+        self._sync(lambda: self.repo.push(self._git_cred()), "Pushing…")
 
     def _pull(self):
-        self._sync(self.repo.pull, "Pulling…")
+        self._sync(lambda: self.repo.pull(self._git_cred()), "Pulling…")
+
+    def _git_cred(self):
+        """The ephemeral hub credential for this project (a provisioned repo has no
+        stored token), or None for a native remote (user's own git auth). Fetched
+        fresh on the worker via _sync, so it never sits in the dialog."""
+        return self._cred() if self._cred is not None else None
 
     def _sync(self, op, busy):
         # push/pull hit the network → off the GUI thread (no processEvents freeze).

@@ -2,8 +2,12 @@
 (DESIGN §8.2).
 
 The hub creates an empty repo per project in Gitea (via its REST API) and returns a
-token-authed clone URL that project members push/pull with — so a non-power-user never
-sets up git or types a URL; the hub fills the project record's `git_remote` for them.
+**credential-free** clone URL that becomes the project record's `git_remote` — so a
+non-power-user never sets up git or types a URL. The push/pull TOKEN is deliberately
+NOT in that URL (it used to be, and leaked into project.json / backups / zips — a
+hub-wide admin credential in every member's clone). Instead the token is handed out
+on demand via `credentials()` over the authenticated Projects.GetGitCredential RPC,
+held in memory client-side and injected at git time (never persisted).
 
 This is the only piece that needs a git server: Gitea runs as its own compose service,
 and the hub merely TALKS to its API (it never reimplements git). Fully defensive — any
@@ -64,10 +68,16 @@ class GiteaProvisioner:
                       {"name": name, "private": True, "auto_init": False})
 
     def clone_url(self, name: str) -> str:
-        """A token-authed, externally-reachable clone URL members push/pull with."""
-        scheme, _, host = self.public.partition("://")
-        cred = f"{urllib.parse.quote(self.user)}:{urllib.parse.quote(self.token)}"
-        return f"{scheme}://{cred}@{host}/{self.org}/{name}.git"
+        """The externally-reachable, **credential-free** clone URL that goes into the
+        shared record. The token rides separately (see `credentials`)."""
+        return f"{self.public}/{self.org}/{name}.git"
+
+    def credentials(self, name: str) -> tuple:
+        """The (url, username, password) a member needs to push/pull `name` — the
+        ephemeral git credential handed out over GetGitCredential, NEVER stored in the
+        record. `password` is the shared provisioning token today; the per-user scoped
+        token plugs in here once the hub validates identity (DESIGN §13)."""
+        return self.clone_url(name), self.user, self.token
 
     # -- the one call the hub makes ------------------------------------------
     def provision(self, project_id: str) -> str:
