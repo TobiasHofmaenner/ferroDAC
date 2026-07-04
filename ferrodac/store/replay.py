@@ -235,7 +235,7 @@ class ReplayController:
     (parked). "Live is just the head at now." Driven by a shared `TimeContext`;
     calls `on_reset` when the view jumps (so consumers clear stale data).
 
-    Source selection is a callable (the routed sources, from the dataflow graph).
+    Source selection is a callable (the routed sources, from the Dashboard).
     Qt-free; the engine it subscribes to may be the Qt Engine — only `subscribe`
     is used. Replay runs synchronously on park for now (off-thread is a later
     optimisation, signalled by the realtime-rate readout)."""

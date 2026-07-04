@@ -146,6 +146,16 @@ Key interfaces:
   (devices/sources/processors/sinks) + edges (routes); queryable: `nodes()`,
   `edges()`, `inputs_of()`, `downstream_of()`. The single substrate for the
   patch-bay, **dataflow introspection** (draw the graph), replay, and distribution.
+  > **Update (2026-07-04, Coda R): `DataflowGraph` was REMOVED as dead.** The
+  > intended migration (Dashboard becomes a view/editor *over* the graph) never
+  > happened — the Dashboard kept the authoritative routing (`self._routes` +
+  > `routed()`), and the graph became a *write-only shadow*: rebuilt and
+  > republished on every `ports_changed` (~18 sites) but read by nobody, and
+  > replay/persistence went through `_routes` directly. Maintaining an unread
+  > mirror is pure cost + drift risk, so `core/graph.py` + its self-test are gone.
+  > If introspection/distribution is built later, derive a **read model** from
+  > `_routes`/`_processors` on demand (or genuinely migrate the Dashboard onto the
+  > graph as its store) — do not resurrect a maintained-but-unread parallel copy.
 - **`Processor`** — formalised into a **relocatable compute node** (see below).
 - **`TimeContext`** (NEW) — the head (following-now | parked) that drives L3.
 
@@ -1259,7 +1269,7 @@ keep the membership model general and these stay cheap to add later.
 | **X3** | `store/uncertainty.py` windowed reconstruction engine (adversarially hardened) | **DONE** |
 | **X3b** | processor-CREATED σ rides INLINE (`Reading.sigma`, `_sigma`, CurveBuffer σ lane) → gas-fit bands | **DONE** (plumbing) |
 | **X4** | surfaces — chart bands/toggle + GUM `u(x)` CSV columns + manifest | **DONE** (a/b) |
-| **R** | resume the paused refactor (remove dead `DataflowGraph`; remaining glue-layer) | todo |
+| **R** | resume the paused refactor (remove dead `DataflowGraph`; remaining glue-layer) | **DONE** (graph removed — see §4.1 note) |
 
 Pressure-test cases for the engine: **gauge** (static model), **Keithley** (epoch model +
 random/systematic split), **ratio of two channels** (the correlation case where scalar-σ

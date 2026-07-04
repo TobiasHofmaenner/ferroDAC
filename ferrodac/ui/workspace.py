@@ -30,7 +30,6 @@ from qtpy.QtWidgets import QDockWidget, QMainWindow, QToolButton, QWidget
 
 from ..core import units
 from ..core.device import SinkKind
-from ..core.graph import DataflowGraph, Node, PROCESSOR, SINK, SOURCE
 from ..core.markers import MarkerModel, SessionClock
 from ..core.reading import Reading
 from ..analysis import PROCESSOR_TYPES
@@ -244,7 +243,6 @@ class Dashboard(QObject):
         self._sources: dict[str, SourcePort] = {}
         self._sinks: dict[str, SinkPort] = {}
         self._routes: dict[str, set] = {}        # source_key -> set(sink_key)
-        self.graph = DataflowGraph()             # live core model (DESIGN §4.1)
         self._counter = 0
         self.default_sink_id = None              # default chart panel id
         self.export_default = None               # project-wide plot-export spec; None=built-in
@@ -273,7 +271,6 @@ class Dashboard(QObject):
         self.area.on_configure = self._configure_panel
         self.data_bus.subscribe(self._on_data_batch)   # analysis: replayable
         engine.subscribe(self._on_control_batch)       # control: always live
-        self.ports_changed.connect(self._sync_graph)   # keep the core graph current
         manager.active_changed.connect(self._rebuild_device_ports)
         self._rebuild_device_ports()
 
@@ -524,37 +521,6 @@ class Dashboard(QObject):
             if sp.dtype in ("float", "bool", "trace"):
                 out[key] = {"name": sp.name, "unit": sp.unit, "dtype": sp.dtype}
         return out
-
-    def build_graph(self) -> DataflowGraph:
-        """The **live** core dataflow model (DESIGN §4.1) — kept current on every
-        ports_changed. Consumers (introspection, replay, distribution) read this
-        and may `subscribe` to its change observer. The Dashboard stays the
-        *editor*; this is the decoupled *model*."""
-        return self.graph
-
-    def _sync_graph(self) -> None:
-        fresh = DataflowGraph()
-        self._populate_graph(fresh)
-        self.graph.replace(fresh)                    # atomic publish + one notify
-
-    def _populate_graph(self, g: DataflowGraph) -> None:
-        for key, sp in self._sources.items():
-            g.add_node(Node(key, SOURCE, sp.name, dtype=sp.dtype, unit=sp.unit,
-                            origin=sp.origin,
-                            meta={"port_kind": sp.kind, "online": sp.online}))
-        for pid, sk in self._sinks.items():
-            g.add_node(Node(pid, SINK, sk.name, dtype=sk.dtype, unit=sk.unit,
-                            origin=sk.origin, accepts=frozenset(sk.accepts),
-                            single_bind=sk.single_bind,
-                            meta={"port_kind": sk.kind, "online": sk.online}))
-        for pid, proc in self._processors.items():
-            ik = getattr(proc, "input_key", "")
-            g.add_node(Node(pid, PROCESSOR, getattr(proc, "name", pid),
-                            ptype=getattr(proc, "kind", ""), input_key=ik))
-            g.connect(ik, pid)                       # source → processor (input bind)
-        for src, targets in self._routes.items():    # source → sink routes
-            for dst in targets:
-                g.connect(src, dst)
 
     def detectors_for(self, sink_key: str) -> list:
         with self._det_lock:
