@@ -5,8 +5,12 @@ The vectorised version must stay byte-identical to the reference per-scan loop
 Python loop that re-copied an m-wide row per scan). Qt-free numeric core.
 """
 import numpy as np
+import pytest
 
-from ferrodac.ui.panels import _time_binned
+pytest.importorskip("qtpy")     # _time_binned lives in ui.panels (a Qt module)
+pytestmark = pytest.mark.ui     # runs in the UI job, where qtpy/pyqtgraph exist
+
+from ferrodac.ui.panels import _time_binned    # noqa: E402
 
 
 def _reference(scans, t0, t1, rows, hold=True):

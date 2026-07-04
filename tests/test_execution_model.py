@@ -160,11 +160,15 @@ def test_lossless_close_flushes_backlog():
 
 def test_bus_imports_qt_free():
     """The Bus must stay headless (server + selftests import it without Qt)."""
+    import os
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {**os.environ,
+           "PYTHONPATH": repo + os.pathsep + os.environ.get("PYTHONPATH", "")}
     code = ("import sys; import ferrodac.core.bus; "
             "sys.exit(1 if any('qtpy' in m or 'PySide' in m "
             "for m in sys.modules) else 0)")
     assert subprocess.run([sys.executable, "-c", code],
-                          cwd="/home/kali/ferroDAC").returncode == 0
+                          cwd=repo, env=env).returncode == 0
 
 
 def test_zarrstore_concurrent_append_and_read(tmp_path):
