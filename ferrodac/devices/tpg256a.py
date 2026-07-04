@@ -27,6 +27,7 @@ from typing import Optional, Sequence
 
 from ..core.base import BaseDevice
 from ..core.serial_arbiter import PORTS_IN_USE, SERIAL_LOCK
+from .uncertainty_specs import gauge_uncertainty
 from ..core.device import (
     Interface,
     Modality,
@@ -274,7 +275,8 @@ class TPG256ADevice(BaseDevice):
 
         sources = [
             Source(id=f"ch{g.channel}", name=f"CH{g.channel} {g.label}",
-                   unit=probe.unit, modality=Modality.SCALAR, prefer_log=True)
+                   unit=probe.unit, modality=Modality.SCALAR, prefer_log=True,
+                   uncertainty=gauge_uncertainty(g.label))     # gauge-type % of reading
             for g in present
         ]
         sinks = [

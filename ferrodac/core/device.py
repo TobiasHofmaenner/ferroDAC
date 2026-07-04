@@ -18,6 +18,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .uncertainty import Uncertainty
+
 
 # --------------------------------------------------------------------------- #
 #  Enumerations
@@ -90,6 +92,12 @@ class Source:
     modality: Modality = Modality.SCALAR
     dtype: str = "float"
     prefer_log: bool = False
+    # First-class uncertainty (DESIGN §19.0): the declared σ MODEL for this channel, or
+    # None for "no σ info" (e.g. the RGA). A function of the value — the engine
+    # reconstructs σ from it over a window on demand; nothing rides the hot path. For a
+    # setting-dependent spec (a Keithley's range) the driver re-declares it via
+    # set_uncertainty(), which versions it into the provenance change-log (X2b).
+    uncertainty: Optional[Uncertainty] = None
 
 
 @dataclass(frozen=True)

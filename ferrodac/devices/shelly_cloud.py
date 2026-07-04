@@ -34,6 +34,7 @@ import urllib.request
 
 from ..core.base import BaseDevice
 from ..core.device import CheckResult, Interface, Option, RateControl, RateMode, Source
+from .uncertainty_specs import SHELLY_HUMIDITY, SHELLY_TEMP
 
 log = logging.getLogger("ferrodac.shelly")
 
@@ -163,7 +164,12 @@ class ShellyCloud(BaseDevice):
             status = (dev.get("ss") or {}).get("status") or {}
             for skey, field, unit, label in _components(status):
                 src_id = f"{sid}_{skey.replace(':', '_')}"
-                sources.append(Source(id=src_id, name=f"{name} · {label}{tail}", unit=unit))
+                lab = label.casefold()
+                unc = (SHELLY_TEMP if "temp" in lab
+                       else SHELLY_HUMIDITY if ("humid" in lab or "rh" in lab)
+                       else None)
+                sources.append(Source(id=src_id, name=f"{name} · {label}{tail}",
+                                      unit=unit, uncertainty=unc))
                 chan[src_id] = (sid, skey, field)
         return sources, chan, None
 

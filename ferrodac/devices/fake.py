@@ -25,6 +25,8 @@ from ..core.device import (
     Source,
 )
 from ..core.trace import Trace
+from ..core.uncertainty import Abs, FloorRel, Rel, Spec
+from .uncertainty_specs import gauge_uncertainty
 
 # These dev/test devices exist on every bench, so their names collide in a shared
 # hub. Suffix the host so several agents' sim devices stay tellable apart. (Data
@@ -47,7 +49,8 @@ class FakeGaugeController(BaseDevice):
         for tag in cls._UNITS:
             sources = [
                 Source(id=f"ch{i}", name=name, unit="mbar",
-                       modality=Modality.SCALAR, prefer_log=True)
+                       modality=Modality.SCALAR, prefer_log=True,
+                       uncertainty=gauge_uncertainty(name))
                 for i, name in enumerate(["Pirani", "FullRange", "Bayard-Alpert"], 1)
             ]
             sinks = [
@@ -107,7 +110,9 @@ class FakeThermometer(BaseDevice):
                 instance_id=f"sim:temp:{tag}",
                 name=f"Sim Thermometer {tag} ({_HOST})",
                 interface=Interface(kind="sim", params={"slave": tag}),
-                sources=[Source(id="temp", name="Temperature", unit="°C")],
+                sources=[Source(id="temp", name="Temperature", unit="°C",
+                                uncertainty=Spec(random=Abs(0.06),
+                                                 systematic=Abs(0.2)))],
                 rate=RateControl(mode=RateMode.FIXED, native_hz=1.0),
                 hardware_id=f"SIM-TEMP-{tag}",
                 model="SimTherm",
@@ -140,9 +145,12 @@ class FakePowerSupply(BaseDevice):
     @classmethod
     def discover(cls):
         sources = [
-            Source(id="voltage", name="Voltage", unit="V"),
-            Source(id="current", name="Current", unit="A"),
-            Source(id="power", name="Power", unit="W"),
+            Source(id="voltage", name="Voltage", unit="V",
+                   uncertainty=FloorRel(0.01, 0.001)),      # 10 mV floor + 0.1 %
+            Source(id="current", name="Current", unit="A",
+                   uncertainty=FloorRel(1e-4, 0.002)),      # 0.1 mA floor + 0.2 %
+            Source(id="power", name="Power", unit="W",
+                   uncertainty=Rel(0.02)),                  # 2 % (derived V·I)
         ]
         sinks = [
             Sink(id="enable", name="Enable", kind=SinkKind.TOGGLE, value=False),
