@@ -110,8 +110,9 @@ class MainWindow(QMainWindow):
         # user-triggered waits run as background Tasks (park/scrub, exports, …)
         # so the GUI never freezes (DESIGN §21.3); the GuiBridge marshals worker
         # chunks back to the GUI thread for painting.
-        from .tasks import GuiBridge, TaskRunner
+        from .tasks import GuiBridge, TaskRunner, set_default_runner
         self._tasks = TaskRunner(self)
+        set_default_runner(self._tasks)    # reachable by dialogs deep in the tree
         self._gui_bridge = GuiBridge(self)
         self._rec_start_mid = None         # the open REC marker while recording
 
@@ -2270,7 +2271,9 @@ class MainWindow(QMainWindow):
             self.replay.stop()              # unsubscribe the playback bus (+ cancel
             #                                 any in-flight re-stream via generation)
         if getattr(self, "_tasks", None) is not None:
+            from .tasks import set_default_runner
             self._tasks.shutdown()          # cancel background exports/loads
+            set_default_runner(None)        # don't leave a shut-down runner as default
         if getattr(self, "reads", None) is not None:
             self.reads.shutdown()           # cancel in-flight timeline reads
         if self.store_writer is not None:

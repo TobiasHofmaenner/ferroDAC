@@ -1726,20 +1726,33 @@ class GasConfigDialog(QDialog):
         self._refresh_list()
 
     def _download(self):
+        # The MoNA fetch+parse takes MINUTES — run it off the GUI thread so nothing
+        # freezes (a status chip shows progress). Guard the callbacks: the dialog may
+        # be closed by the time it finishes.
         from ..analysis import library as lib
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            n = lib.download_library()
-        except Exception as exc:                 # noqa: BLE001
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(
-                self, "Download failed",
-                f"{exc}\n\nThe MoNA link may have changed — download the GC-MS "
-                "MSP from mona.fiehnlab.ucdavis.edu/downloads and use Import MSP….")
-            return
-        QApplication.restoreOverrideCursor()
-        QMessageBox.information(self, "Download", f"Imported {n} compounds.")
-        self._refresh_list()
+        from .tasks import run_task
+
+        def done(n):
+            try:
+                QMessageBox.information(self, "Download", f"Imported {n} compounds.")
+                self._refresh_list()
+            except RuntimeError:                 # dialog already closed
+                pass
+
+        def fail(msg):
+            try:
+                QMessageBox.warning(
+                    self, "Download failed",
+                    f"{msg}\n\nThe MoNA link may have changed — download the GC-MS "
+                    "MSP from mona.fiehnlab.ucdavis.edu/downloads and use Import MSP….")
+            except RuntimeError:
+                pass
+
+        run_task(lambda ctx: lib.download_library(),
+                 title="Downloading gas library",
+                 why="Fetching + parsing the GC-MS EI library from MoNA",
+                 exclusive="mona-download", on_busy="reject",
+                 on_done=done, on_error=fail)
 
     def values(self) -> dict:
         return {"mc": self._mc.currentData(),

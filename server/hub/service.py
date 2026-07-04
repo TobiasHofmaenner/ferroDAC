@@ -145,7 +145,22 @@ class ProjectsServicer(rpc.ProjectsServicer):
         self.hub = hub
 
     async def PublishProject(self, request, context):  # noqa: N802
-        changed = self.hub.publish_project(request.project)
+        project = request.project
+        # Provision the git repo (blocking Gitea HTTP, up to ~45 s) OFF the event loop
+        # — otherwise one first-time share stalls every live stream on the hub. Only
+        # the FIRST publish of a project with no remote provisions; then git_remote is
+        # set and publish_project's own provision block is a no-op.
+        if (not project.deleted and self.hub.gitea is not None
+                and not project.git_remote):
+            loop = asyncio.get_running_loop()
+            try:
+                url = await loop.run_in_executor(
+                    None, self.hub.gitea.provision, project.id)
+            except Exception:                        # noqa: BLE001 — never drop the record
+                url = None
+            if url:
+                project.git_remote = url
+        changed = self.hub.publish_project(project)
         return pb.ProjectAck(ok=True, detail="" if changed else "stale/duplicate")
 
     async def DeleteProject(self, request, context):  # noqa: N802

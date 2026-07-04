@@ -27,6 +27,31 @@ def _process(qapp, cond, timeout=5.0):
     return cond()
 
 
+def test_run_task_uses_default_runner_then_falls_back(qapp):
+    """run_task() routes to the installed TaskRunner (for dialogs deep in the tree),
+    and runs synchronously when none is set (headless / dialog without a runner)."""
+    from ferrodac.ui.tasks import (TaskRunner, run_task, set_default_runner)
+    # no runner → synchronous fallback (on_done called inline)
+    set_default_runner(None)
+    out = {}
+    assert run_task(lambda ctx: 7, title="t", on_done=lambda r: out.__setitem__("r", r)) is None
+    assert out["r"] == 7
+    # error path in the fallback
+    err = {}
+    run_task(lambda ctx: (_ for _ in ()).throw(ValueError("x")),
+             title="t", on_error=lambda m: err.__setitem__("m", m))
+    assert "x" in err["m"]
+    # with a runner → routed to it (async)
+    runner = TaskRunner()
+    set_default_runner(runner)
+    got = {}
+    run_task(lambda ctx: 9, title="t", on_done=lambda r: got.__setitem__("r", r))
+    assert _process(qapp, lambda: "r" in got)
+    assert got["r"] == 9
+    runner.shutdown()
+    set_default_runner(None)
+
+
 def test_worker_runs_off_gui_delivers_on_gui(qapp):
     from ferrodac.ui.tasks import TaskRunner
     main = threading.get_ident()

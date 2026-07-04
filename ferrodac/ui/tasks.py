@@ -42,6 +42,49 @@ class TaskCancelled(Exception):
     """Raised by ``TaskContext.check()`` when the user cancelled the task."""
 
 
+# The app installs its TaskRunner as the process-wide default so UI code deep in the
+# widget tree (dialogs) can run background work without threading a runner through
+# every constructor. run_task() falls back to running synchronously when none is set
+# (headless / a dialog built without a runner) — there is no GUI to freeze there.
+_default_runner = None
+
+
+def set_default_runner(runner) -> None:
+    global _default_runner
+    _default_runner = runner
+
+
+class _SyncContext:
+    """A do-nothing TaskContext for the synchronous fallback path."""
+    def progress(self, frac=None, detail: str = "") -> None: ...
+    @property
+    def cancelled(self) -> bool:
+        return False
+    def check(self) -> None: ...
+
+
+def run_task(fn, *, on_done=None, on_error=None, **kw):
+    """Run ``fn(ctx)`` on the app's default TaskRunner if one is installed, else
+    synchronously (same signature as TaskRunner.run: title/why/exclusive/… are
+    accepted and ignored in the fallback). Returns the Task, or None."""
+    if _default_runner is not None:
+        try:
+            return _default_runner.run(fn, on_done=on_done, on_error=on_error, **kw)
+        except RuntimeError:                         # runner shut down (window closed) —
+            pass                                     # fall through to run synchronously
+    try:
+        result = fn(_SyncContext())
+    except TaskCancelled:
+        return None
+    except Exception as exc:                     # noqa: BLE001
+        if on_error is not None:
+            on_error(str(exc) or exc.__class__.__name__)
+        return None
+    if on_done is not None:
+        on_done(result)
+    return None
+
+
 class GuiBridge(QObject):
     """Run a callable on the GUI thread from any worker thread. One instance,
     created on the GUI thread — the single blessed worker→GUI marshal (§21.1)."""

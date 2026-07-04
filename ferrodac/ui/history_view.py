@@ -1,8 +1,7 @@
 """Project history + sync — the project's git commits and push/pull (DESIGN §8.2)."""
 import time
 
-from qtpy.QtCore import Qt
-from qtpy.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayout,
+from qtpy.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout,
                             QInputDialog, QLabel, QListWidget, QPushButton,
                             QVBoxLayout)
 
@@ -112,19 +111,43 @@ class HistoryDialog(QDialog):
         self._sync(self.repo.pull, "Pulling…")
 
     def _sync(self, op, busy):
+        # push/pull hit the network → off the GUI thread (no processEvents freeze).
+        from .tasks import run_task
         self._result.setText(busy)
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        QApplication.processEvents()
+
+        def show(res):
+            ok, msg = res
+            try:
+                self._result.setText(("✔ " if ok else "✕ ") + (msg or ""))
+                self.refresh()
+            except RuntimeError:                     # dialog closed
+                pass
+
+        run_task(lambda ctx: op(), title="Syncing project",
+                 why=busy.rstrip("… "), exclusive="project-git-sync", on_busy="reject",
+                 on_done=show,
+                 on_error=lambda m: self._safe_result(f"✕ {m}"))
+
+    def _safe_result(self, text):
         try:
-            ok, msg = op()
-        finally:
-            QApplication.restoreOverrideCursor()
-        self._result.setText(("✔ " if ok else "✕ ") + (msg or ""))
-        self.refresh()
+            self._result.setText(text)
+        except RuntimeError:
+            pass
 
     def _checkpoint(self):
         msg, ok = QInputDialog.getText(self, "Checkpoint", "Describe this checkpoint:",
                                        text="Checkpoint")
         if ok:
-            self.repo.commit(msg.strip() or "Checkpoint", author=self._author)
+            from .tasks import run_task
+            run_task(
+                lambda ctx: self.repo.commit(msg.strip() or "Checkpoint",
+                                             author=self._author),
+                title="Saving checkpoint", why="Committing the project's history",
+                exclusive="project-git-sync", on_busy="reject",
+                on_done=lambda _r: self._safe_refresh())
+
+    def _safe_refresh(self):
+        try:
             self.refresh()
+        except RuntimeError:
+            pass

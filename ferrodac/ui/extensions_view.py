@@ -179,27 +179,45 @@ class ExtensionsDialog(QDialog):
         ref, ok2 = QInputDialog.getText(
             self, "Pin (recommended)", "Commit / tag / branch (blank = default branch):")
         ref = (ref.strip() or None) if ok2 else None
-        try:
-            _dest, sha, manifests = self.mgr.prepare(url, ref)
-        except Exception as exc:                       # noqa: BLE001
-            QMessageBox.warning(self, "Clone failed", str(exc))
-            return
-        if not manifests:
-            QMessageBox.warning(self, "Nothing to install",
-                                "No ferrodac-extension.toml found in that repo.")
-            return
-        if not self._trust_gate(url, sha, manifests):
-            return
-        try:
-            self.mgr.install_url(url, ref, names=[m.name for m in manifests], enabled=True)
-        except Exception as exc:                       # noqa: BLE001
-            QMessageBox.warning(self, "Install failed", str(exc))
-            return
-        self._refresh()
-        QMessageBox.information(
-            self, "Installed",
-            "Extension added. Processors are available now; restart to use any new "
-            "widgets or drivers it provides.")
+        from .tasks import run_task
+
+        def warn(title, msg):
+            try:
+                QMessageBox.warning(self, title, str(msg))
+            except RuntimeError:                       # dialog closed
+                pass
+
+        def installed(_r):
+            try:
+                self._refresh()
+                QMessageBox.information(
+                    self, "Installed",
+                    "Extension added. Processors are available now; restart to use any "
+                    "new widgets or drivers it provides.")
+            except RuntimeError:
+                pass
+
+        def prepared(result):
+            _dest, sha, manifests = result
+            if not manifests:
+                warn("Nothing to install",
+                     "No ferrodac-extension.toml found in that repo.")
+                return
+            if not self._trust_gate(url, sha, manifests):   # modal, user decision
+                return
+            run_task(                                       # the checkout + register
+                lambda ctx: self.mgr.install_url(
+                    url, ref, names=[m.name for m in manifests], enabled=True),
+                title="Installing extension", why=f"Cloning + registering {url}",
+                exclusive=f"ext-install:{url}", on_busy="reject",
+                on_done=installed, on_error=lambda m: warn("Install failed", m))
+
+        # both the manifest fetch (clone) and the install (clone/checkout + import) do
+        # git + disk work off the GUI thread — no freeze while cloning a repo.
+        run_task(lambda ctx: self.mgr.prepare(url, ref),
+                 title="Fetching extension", why=f"Cloning {url} to inspect its manifest",
+                 exclusive=f"ext-prepare:{url}", on_busy="reject",
+                 on_done=prepared, on_error=lambda m: warn("Clone failed", m))
 
     def _trust_gate(self, url, sha, manifests) -> bool:
         lines = [url, f"commit {sha[:12]}", ""]
