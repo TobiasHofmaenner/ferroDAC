@@ -135,6 +135,27 @@ def test_uncertainty_bands_toggle_convert_and_scale(qapp):
     assert "g/p" not in p._bands
 
 
+def test_band_edges_clip_and_downsample_like_the_curve(qapp):
+    """The σ band's edges must clip-to-view + peak-downsample exactly like the main
+    curve, else the fill spans the whole buffer and its edges cut diagonally across a
+    zoomed-in chart (the σ band not tracking the data + a stray cross-chart line, #10).
+    They live in the ViewBox (so clipToView has a view) and are removed with the band."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False, "show_sigma": True})
+    p.set_sigma_provider(lambda key, t, v: 0.1 * np.abs(np.asarray(v, float)))
+    p.add_source("g/p", _src("P", "mbar"))
+    p.feed([types.SimpleNamespace(key="g/p", value=10.0, status=0, t=1.0)])
+    lo, hi, fill, vb = p._bands["g/p"]
+    for edge in (lo, hi):
+        assert edge.opts["clipToView"] is True
+        assert edge.opts["autoDownsample"] is True
+        assert edge.opts["downsampleMethod"] == "peak"
+        assert edge in vb.addedItems              # in the view so clipping has a range
+    assert fill in vb.addedItems
+    p.remove_source("g/p")
+    assert lo not in vb.addedItems and hi not in vb.addedItems and fill not in vb.addedItems
+
+
 def test_clear_history_clears_stale_bands(qapp):
     """clear_history (a window change / re-stream) must empty the σ bands, not just the
     curves — else a source with no data in the new window keeps its old band drawn as a

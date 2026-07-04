@@ -269,9 +269,12 @@ class ChartPanel(Panel):
         self._legend = self.plot.addLegend(offset=(-10, 10))
         item = self.plot.getPlotItem()
         # Full-res data is kept; pyqtgraph only downsamples for DISPLAY (zoom in →
-        # full detail returns). 'mean' draws a clean averaged line zoomed out
-        # (vs 'peak' min/max which looks rough on noisy/oscillating signals).
-        item.setDownsampling(auto=True, mode="mean")
+        # full detail returns). 'peak' (min/max per pixel column) — NOT 'mean' — because
+        # mean re-bins by sample index, so each appended sample slides the bins and the
+        # averaged line JUMPS frame-to-frame on high-frequency signals (#10). peak is
+        # stable and honestly shows the signal's range in each column; for a clean signal
+        # min≈max so it renders as the same line.
+        item.setDownsampling(auto=True, mode="peak")
         item.setClipToView(True)
         lay.addWidget(self.plot)
         self._pi = item                       # the PlotItem (for multi-axis wiring)
@@ -552,9 +555,18 @@ class ChartPanel(Panel):
         slot = self._axes.get(self._meta[key][0])
         if slot is None:
             return
-        lo, hi = pg.PlotDataItem([], []), pg.PlotDataItem([], [])
-        lo.setLogMode(False, self._logy)
-        hi.setLogMode(False, self._logy)
+        # The band edges MUST clip + downsample exactly like the main curve, else the
+        # fill spans the whole buffer while the curve is clipped to the view — its edges
+        # then cut diagonally across a zoomed-in chart (a σ band that doesn't track the
+        # data, and a stray line from the last point across the plot; #10). They carry no
+        # pen (only the fill is visible) but must live in the ViewBox for clipToView to
+        # have a view to clip against.
+        lo, hi = pg.PlotDataItem([], [], pen=None), pg.PlotDataItem([], [], pen=None)
+        for edge in (lo, hi):
+            edge.setLogMode(False, self._logy)
+            edge.setDownsampling(auto=True, method="peak")
+            edge.setClipToView(True)
+            slot.vb.addItem(edge)
         c = pg.mkColor(color_for(key))
         c.setAlpha(45)
         fill = pg.FillBetweenItem(lo, hi, brush=pg.mkBrush(c))
@@ -623,10 +635,12 @@ class ChartPanel(Panel):
     def _remove_band(self, key):
         entry = self._bands.pop(key, None)
         if entry is not None:
-            try:
-                entry[3].removeItem(entry[2])
-            except Exception:
-                pass
+            lo, hi, fill, vb = entry
+            for item in (fill, lo, hi):       # remove the fill AND its two edge curves
+                try:
+                    vb.removeItem(item)
+                except Exception:
+                    pass
 
     def _clear_bands(self):
         for key in list(self._bands):
@@ -656,8 +670,8 @@ class ChartPanel(Panel):
         else:
             curve = pg.PlotDataItem([], [], pen=pen, name=name)
             curve.setLogMode(False, self._logy)
-            curve.setDownsampling(auto=True, method="mean")
-            curve.setClipToView(True)
+            curve.setDownsampling(auto=True, method="peak")   # stable, honest — see the
+            curve.setClipToView(True)                         # primary axis note (#10)
             slot.vb.addItem(curve)
             if self._legend is not None:
                 self._legend.addItem(curve, name)
