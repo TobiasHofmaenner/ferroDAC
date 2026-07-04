@@ -2016,12 +2016,23 @@ class MainWindow(QMainWindow):
 
     def _init_session_persistence(self):
         if os.path.exists(self._working_path()):
-            QTimer.singleShot(300, self._restore_and_enable_autosave)
+            # Freeze painting from now (before the entry point's show()) until the saved
+            # layout is restored, so the window's FIRST paint is the assembled layout — not
+            # the default dock arrangement flashing then re-docking into place (the
+            # "windows spawn then assemble" flicker, worst on Windows). singleShot(0) runs
+            # the restore on the first event-loop turn, right after show().
+            self.setUpdatesEnabled(False)
+            QTimer.singleShot(0, self._restore_and_enable_autosave)
         else:
             self._autosave_on = True
 
     def _restore_and_enable_autosave(self):
-        self.open_session(self._working_path())
+        try:
+            self.open_session(self._working_path())
+        except Exception as exc:                # a bad layout must never freeze the window
+            logging.getLogger("ferrodac").warning("session restore failed: %s", exc)
+        finally:
+            self.setUpdatesEnabled(True)        # paint once, already assembled
         self._autosave_on = True
         self._recover_open_recordings()         # finalise any crash-interrupted REC
 

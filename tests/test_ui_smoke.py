@@ -1008,6 +1008,35 @@ def test_history_dialog_remote_push(qapp, tmp_path):
 
 
 @pytest.mark.ui
+def test_restore_reenables_painting_even_on_error(qapp):
+    """The startup restore freezes painting (no default-layout-then-reassemble flash, #9)
+    and MUST re-enable it — even if open_session throws — or the window stays blank."""
+    w = _mainwindow(qapp)
+    try:
+        w.setUpdatesEnabled(False)                       # as _init_session_persistence does
+        def boom(*_a):
+            raise RuntimeError("bad layout")
+        w.open_session = boom
+        w._restore_and_enable_autosave()                 # must not leave painting frozen
+        assert w.updatesEnabled() is True
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
+def test_sources_rebuild_leaves_painting_enabled(qapp):
+    """A ports_changed rebuild freezes painting during the clear→refill (#9) but always
+    restores it."""
+    w = _mainwindow(qapp)
+    try:
+        sp = w.sources_panel
+        sp._rebuild()
+        assert sp.updatesEnabled() is True
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_route_to_chart_backfills_recorded_history(qapp):
     """Routing a source onto a chart replays its recorded history for the current
     window — the chart shows existing data, not just live from the click moment (#8).

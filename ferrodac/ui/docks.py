@@ -832,6 +832,15 @@ class SourcesPanel(QWidget):
         self._rebuild()
 
     def _rebuild(self):
+        # a ports_changed rebuild tears down + recreates every card; freeze painting so
+        # the clear→refill doesn't flash a blank/half-built panel (#9, cfg-event flicker)
+        self.setUpdatesEnabled(False)
+        try:
+            self._rebuild_inner()
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _rebuild_inner(self):
         clear_layout(self._layout)
         self._cards = {}
         ports = self.dashboard.visible_source_ports()     # the project's channel lens
