@@ -176,6 +176,18 @@ class MainWindow(QMainWindow):
             is_live=(lambda: self.time_context.following)
             if self.time_context is not None else None)
         self.dashboard.add_panel("chart")
+        # Uncertainty bands (DESIGN §19.0): charts get a σ provider — reconstruct over the
+        # window, with the per-source model timeline CACHED so a live redraw is pure numpy
+        # and never reads the store lock on the hot path. The cache is invalidated when a
+        # device re-declares its model (provenance_changed) and on a slow tick (so a model
+        # first logged at the opening flush shows up without a manual refresh).
+        self._sigma_timelines: dict = {}
+        manager.provenance_changed.connect(self._sigma_timelines.clear)
+        self._sigma_refresh = QTimer(self)
+        self._sigma_refresh.setInterval(2000)
+        self._sigma_refresh.timeout.connect(self._sigma_timelines.clear)
+        self._sigma_refresh.start()
+        self.dashboard.set_sigma_provider(self._chart_sigma)
 
         # recording lifecycle (start/stop span → auto-export, crash recovery) lives
         # in a Qt-free, testable controller; the shell supplies the collaborators.
@@ -1413,6 +1425,22 @@ class MainWindow(QMainWindow):
                     rec[f"uncertainty:{s.id}"] = u.to_dict()
             recs[did] = rec
         self.store_writer.set_device_records(recs)
+
+    def _chart_sigma(self, key, times, values):
+        """σ(key, times, values) for a chart's uncertainty band: reconstruct over the
+        window from the change-log. The per-source model timeline is cached (invalidated
+        on provenance_changed + a slow tick), so a live redraw stays pure numpy and never
+        blocks on the store lock. A source with no declared model → None (no band)."""
+        store = self.store_writer.store if getattr(self, "store_writer", None) else None
+        if store is None:
+            return None
+        from ..store.uncertainty import model_timeline, reconstruct
+        if key not in self._sigma_timelines:
+            self._sigma_timelines[key] = model_timeline(store, key)
+        tl = self._sigma_timelines[key]
+        if not tl:
+            return None                        # no model logged (yet) → no band, no read
+        return reconstruct(store, key, times, values, timeline=tl)
 
     # -- device journal / notes editor ---------------------------------------
     def _open_device_meta(self, instance_id: str, focus_notes: bool = False):

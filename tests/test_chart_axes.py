@@ -3,6 +3,7 @@ DIMENSION: same-dimension sources share an axis (converted to a common display u
 a new dimension allocates a new right-side axis. UI-marked (needs a QApplication)."""
 import types
 
+import numpy as np
 import pytest
 
 pytest.importorskip("qtpy")
@@ -80,6 +81,43 @@ def test_removing_the_last_source_hides_its_extra_axis(qapp):
     assert not extra.keys                      # slot emptied
     assert not extra.ax.isVisible()            # axis hidden (slot kept for reuse)
     assert _primary(p).keys == {"g/p"}         # primary untouched
+
+
+def test_uncertainty_bands_toggle_convert_and_scale(qapp):
+    p = _chart(qapp)
+    p.apply_config({"logy": False})           # linear axis → assert raw values directly
+    p.set_sigma_provider(lambda key, t, v: 0.1 * np.abs(np.asarray(v, float)))  # σ = 10 %
+    p.add_source("g/p", _src("P", "mbar"))
+    p.feed([types.SimpleNamespace(key="g/p", value=10.0, status=0, t=1000.0),
+            types.SimpleNamespace(key="g/p", value=20.0, status=0, t=1001.0)])
+
+    assert "g/p" not in p._bands              # off by default
+    p.apply_config({"show_sigma": True})
+    assert "g/p" in p._bands                  # band created on toggle
+    lo, hi, _fill, _vb = p._bands["g/p"]
+    np.testing.assert_allclose(lo.getData()[1], [9.0, 18.0])    # value − 1σ
+    np.testing.assert_allclose(hi.getData()[1], [11.0, 22.0])   # value + 1σ
+
+    p.apply_config({"sigma_2": True})         # k = 2 → band doubles
+    lo2, hi2, _f, _v = p._bands["g/p"]
+    np.testing.assert_allclose(lo2.getData()[1], [8.0, 16.0])
+    np.testing.assert_allclose(hi2.getData()[1], [12.0, 24.0])
+
+    p.apply_config({"show_sigma": False})     # toggle off → removed
+    assert "g/p" not in p._bands
+
+
+def test_band_converts_to_the_axis_display_unit(qapp):
+    p = _chart(qapp)
+    p.apply_config({"logy": False, "show_sigma": True})
+    p.set_sigma_provider(lambda key, t, v: 0.0 * np.asarray(v, float) + 1.0)  # σ = 1 Torr
+    p.add_source("g/mbar", _src("A", "mbar"))
+    p.add_source("g/torr", _src("B", "Torr"))     # shares the pressure axis, converted
+    p.feed([types.SimpleNamespace(key="g/torr", value=10.0, status=0, t=1.0)])
+    lo, hi, _f, _v = p._bands["g/torr"]
+    # σ=1 Torr around 10 Torr → [9,11] Torr, displayed in mbar (×1.33322)
+    np.testing.assert_allclose(hi.getData()[1], [11.0 * 1.33322], rtol=1e-4)
+    np.testing.assert_allclose(lo.getData()[1], [9.0 * 1.33322], rtol=1e-4)
 
 
 def test_feed_converts_and_never_raises(qapp):

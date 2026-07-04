@@ -287,11 +287,19 @@ class ChartPanel(Panel):
         self._marker_lines: dict = {}
         # Keep every extra ViewBox glued to the main plot rect as it resizes/zooms.
         self._pi.vb.sigResized.connect(self._sync_axis_geometry)
+        # Uncertainty bands (DESIGN §19.0): a shaded value ∓ k·σ per curve, σ from an
+        # injected provider (the app wires reconstruct() with a cached model timeline).
+        self._sigma_provider = None           # (key, times, values) -> σ array | None
+        self._bands: dict = {}                # key -> (lo, hi, fill, vb)
+        self._bands_on = False
+        self._k = 1.0
 
     def config_fields(self):
         return super().config_fields() + [
             ("ylabel", "Y-axis label", "text", self._ylabel, {}),
             ("logy", "Logarithmic Y", "bool", self._logy, {}),
+            ("show_sigma", "Show uncertainty band", "bool", self._bands_on, {}),
+            ("sigma_2", "Uncertainty at 2σ (95%)", "bool", self._k >= 2.0, {}),
         ]
 
     def apply_config(self, values):
@@ -311,17 +319,26 @@ class ChartPanel(Panel):
             for key, (dimkey, _u, _c) in self._meta.items():
                 if not self._axes[dimkey].primary:
                     self._curves[key].setLogMode(False, self._logy)
+        if "show_sigma" in values:
+            self._bands_on = bool(values["show_sigma"])
+        if "sigma_2" in values:
+            self._k = 2.0 if values["sigma_2"] else 1.0
+        if any(f in values for f in ("logy", "show_sigma", "sigma_2")):
+            self._refresh_bands()             # rebuild bands for the new log mode / k / toggle
 
     def set_display_name(self, name):
         super().set_display_name(name)
         self.plot.setTitle(name or None)
 
     def state(self):
-        return {"ylabel": self._ylabel, "logy": self._logy}
+        return {"ylabel": self._ylabel, "logy": self._logy,
+                "show_sigma": self._bands_on, "sigma_k": self._k}
 
     def set_state(self, st):
         self.apply_config({"ylabel": st.get("ylabel", ""),
-                           "logy": st.get("logy", True)})
+                           "logy": st.get("logy", True),
+                           "show_sigma": st.get("show_sigma", False),
+                           "sigma_2": float(st.get("sigma_k", 1.0)) >= 2.0})
         self.set_display_name(self.title)    # apply the restored name as plot title
 
     # -- shared session time base + markers ----------------------------------
@@ -498,6 +515,72 @@ class ChartPanel(Panel):
         conv = self._meta[key][2]
         y = conv(buf.y) if conv is not None else buf.y
         self._curves[key].setData(buf.x, y, connect="finite")
+        if self._bands_on:
+            self._update_band(key)
+
+    # -- uncertainty bands (DESIGN §19.0) ------------------------------------
+    def set_sigma_provider(self, fn) -> None:
+        """Inject σ(key, times, values) → ndarray|None (the app wires reconstruct with a
+        cached timeline). Charts stay decoupled from the store."""
+        self._sigma_provider = fn
+        self._refresh_bands()
+
+    def _ensure_band(self, key):
+        if key in self._bands or key not in self._curves:
+            return
+        slot = self._axes.get(self._meta[key][0])
+        if slot is None:
+            return
+        lo, hi = pg.PlotDataItem([], []), pg.PlotDataItem([], [])
+        lo.setLogMode(False, self._logy)
+        hi.setLogMode(False, self._logy)
+        c = pg.mkColor(color_for(key))
+        c.setAlpha(45)
+        fill = pg.FillBetweenItem(lo, hi, brush=pg.mkBrush(c))
+        fill.setZValue(-20)                   # behind the curve + grid
+        slot.vb.addItem(fill)
+        self._bands[key] = (lo, hi, fill, slot.vb)
+
+    def _update_band(self, key):
+        entry = self._bands.get(key)
+        buf = self._buf.get(key)
+        if entry is None or buf is None:
+            return
+        lo, hi, _fill, _vb = entry
+        sig = self._sigma_provider(key, buf.x, buf.y) if self._sigma_provider else None
+        if sig is None or buf.y.size == 0:
+            lo.setData([], [])
+            hi.setData([], [])
+            return
+        sig = np.asarray(sig, dtype=float)
+        lo_y = buf.y - self._k * sig
+        hi_y = buf.y + self._k * sig
+        if self._logy:                        # a log axis can't show a ≤0 lower bound
+            lo_y = np.where(lo_y > 0, lo_y, np.nan)
+        conv = self._meta[key][2]
+        if conv is not None:
+            lo_y, hi_y = conv(lo_y), conv(hi_y)
+        lo.setData(buf.x, lo_y, connect="finite")
+        hi.setData(buf.x, hi_y, connect="finite")
+
+    def _remove_band(self, key):
+        entry = self._bands.pop(key, None)
+        if entry is not None:
+            try:
+                entry[3].removeItem(entry[2])
+            except Exception:
+                pass
+
+    def _clear_bands(self):
+        for key in list(self._bands):
+            self._remove_band(key)
+
+    def _refresh_bands(self):
+        self._clear_bands()                   # rebuild (picks up log mode + k changes)
+        if self._bands_on:
+            for key in list(self._curves):
+                self._ensure_band(key)
+                self._update_band(key)
 
     def add_source(self, key, source):
         if key in self._curves:
@@ -525,8 +608,11 @@ class ChartPanel(Panel):
         self._buf[key] = CurveBuffer()
         self._meta[key] = (dimkey, unit, self._conv(unit, slot.display_unit))
         slot.keys.add(key)
+        if self._bands_on:
+            self._ensure_band(key)
 
     def remove_source(self, key):
+        self._remove_band(key)
         curve = self._curves.pop(key, None)
         meta = self._meta.pop(key, None)
         self._buf.pop(key, None)

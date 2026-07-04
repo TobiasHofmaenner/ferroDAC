@@ -355,6 +355,7 @@ class Dashboard(QObject):
         panel.on_cursor_move = lambda cid, mz: self.update_cursor(cid, mz=mz)
         panel.set_processor_host(self.add_processor, self.remove_processor,
                                  self.processor, self.processors_for)
+        panel.set_sigma_provider(getattr(self, "_sigma_provider", None))
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -921,6 +922,13 @@ class Dashboard(QObject):
         if self._source_lens is None:
             return ports
         return [p for p in ports if p.key in self._source_lens]
+
+    def set_sigma_provider(self, fn) -> None:
+        """Wire the uncertainty-band σ provider (DESIGN §19.0) into every chart panel,
+        existing and future (new panels pick it up at creation)."""
+        self._sigma_provider = fn
+        for panel in self._panels.values():
+            panel.set_sigma_provider(fn)
 
     def sink_ports(self) -> list:
         return sorted(self._sinks.values(), key=lambda p: (p.kind != "device", p.name))

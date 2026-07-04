@@ -58,10 +58,14 @@ def _apply(model, values):
         return np.full(np.shape(values), np.nan, dtype=float)
 
 
-def reconstruct(store, source_key: str, times, values, *, now=None):
+def reconstruct(store, source_key: str, times, values, *, now=None, timeline=None):
     """Standard uncertainty σ (1σ) for a source over a window, shaped like ``values``.
     NaN where no model applies (no declared model, or a Measured σ). Segments the window
-    by the change-log's model epochs and applies the model in effect at each sample."""
+    by the change-log's model epochs and applies the model in effect at each sample.
+
+    ``timeline`` (from :func:`model_timeline`) may be passed in to skip the change-log
+    read — a live chart caches it per source and refreshes only when a model changes,
+    so drawing a band never touches the store lock on the hot path."""
     t = np.asarray(times, dtype=float)
     v = np.asarray(values, dtype=float)
     sigma = np.full(v.shape, np.nan, dtype=float)
@@ -69,7 +73,8 @@ def reconstruct(store, source_key: str, times, values, *, now=None):
     if v.size == 0 or t.shape != v.shape:
         return sigma
 
-    timeline = model_timeline(store, source_key)
+    if timeline is None:
+        timeline = model_timeline(store, source_key)
     if not timeline:                         # no change-log → the single current model
         anchor = now if now is not None else float(t.flat[-1])
         model = uncertainty_at(store, source_key, anchor)

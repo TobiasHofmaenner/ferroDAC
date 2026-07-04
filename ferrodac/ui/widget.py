@@ -86,6 +86,10 @@ class Widget(QWidget):
         """Wire a widget that hosts data-plane processors (e.g. the RGA gas
         analysis panel) to the Dashboard's processor API. Default: ignore."""
 
+    def set_sigma_provider(self, fn) -> None:
+        """Give a chart a σ(key, times, values) → ndarray|None provider for uncertainty
+        bands (DESIGN §19.0). Only the chart widget uses it. Default: ignore."""
+
     # -- data lifecycle (the Dashboard + replay drive these) -----------------
     def add_source(self, key: str, source) -> None: ...
 
