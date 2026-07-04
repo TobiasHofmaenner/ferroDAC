@@ -51,6 +51,15 @@ class Processor:
         """Map one input value to ``{output_key: value}`` to publish."""
         raise NotImplementedError
 
+    def units_out(self, input_unit: str) -> str:
+        """The unit this processor's output carries, given its input's unit. Default:
+        the SAME unit — a smoothing / pass-through / cursor processor doesn't change
+        dimension. Dimension-changing processors OVERRIDE: a ratio returns "" (
+        dimensionless), an integral multiplies by the x-unit, a derivative divides by
+        it. The framework threads the result onto the output port so charts and routing
+        see the right dimension without the author wiring it (DESIGN §19.0)."""
+        return input_unit
+
     def update(self, **fields) -> None:
         """Apply config changes (from the UI)."""
         for k, v in fields.items():

@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from qtpy.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from qtpy.QtWidgets import QDockWidget, QMainWindow, QToolButton, QWidget
 
+from ..core import units
 from ..core.device import SinkKind
 from ..core.graph import DataflowGraph, Node, PROCESSOR, SINK, SOURCE
 from ..core.markers import MarkerModel, SessionClock
@@ -928,7 +929,19 @@ class Dashboard(QObject):
         src = self._sources.get(source_key)
         if src is None:
             return []
-        return [(sp.key, sp.name) for sp in self.sink_ports() if src.dtype in sp.accepts]
+        out = []
+        for sp in self.sink_ports():
+            if src.dtype not in sp.accepts:
+                continue
+            # A sink that DECLARES a unit constrains the dimension it accepts (a
+            # pressure-only processor input won't take a voltage). A unitless sink
+            # (charts, generic numeric) accepts any dimension — it just grows an axis
+            # (DESIGN §19.0). Fail open when either unit is unknown, so an unparseable
+            # label never blocks a route.
+            if sp.unit and src.unit and not units.compatible(src.unit, sp.unit):
+                continue
+            out.append((sp.key, sp.name))
+        return out
 
     def routed(self, source_key: str) -> set:
         return set(self._routes.get(source_key, set()))

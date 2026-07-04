@@ -1037,6 +1037,29 @@ def test_processor_node_routing(qapp):
         w.close()
 
 
+@pytest.mark.ui
+def test_routing_dimensional_gate(qapp):
+    """A sink that DECLARES a unit only offers itself to dimensionally-compatible
+    sources (DESIGN §19.0); a unitless sink accepts any dimension."""
+    from ferrodac.ui.workspace import SinkPort, SourcePort
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        db._sources["g/p"] = SourcePort("g/p", "P", "float", "mbar", "dev", "device")
+        db._sources["e/v"] = SourcePort("e/v", "V", "float", "V", "dev", "device")
+        db._sinks["k/press"] = SinkPort("k/press", "Pressure in", "float", "mbar",
+                                        "dev", "device", accepts=frozenset({"float"}))
+        db._sinks["k/any"] = SinkPort("k/any", "Any in", "float", "",
+                                      "dev", "device", accepts=frozenset({"float"}))
+        press = {k for k, _ in db.compatible_sinks("g/p")}
+        volt = {k for k, _ in db.compatible_sinks("e/v")}
+        assert {"k/press", "k/any"} <= press          # mbar fits the pressure + generic sinks
+        assert "k/press" not in volt                  # volts ✗ a pressure-only input
+        assert "k/any" in volt                        # but still fits the unitless sink
+    finally:
+        w.close()
+
+
 def _bind_fake_processor(db, requires_gui=False):
     """Inject a processor bound to 'dev/src' that records its run thread and maps
     v → v+1 on the derived source 'fp/fp1/out'. Returns (proc, seen-dict)."""
