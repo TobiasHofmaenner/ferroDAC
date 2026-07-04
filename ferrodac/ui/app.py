@@ -63,6 +63,7 @@ from .docks import (   # noqa: F401,E501
     _ROIEditor,
     ImageConfigDialog,
     CursorDialog,
+    ProjectActions,
     ProjectNavigator,
 )
 
@@ -287,17 +288,17 @@ class MainWindow(QMainWindow):
         # ONE OneNote-style tree for the whole left side: projects (notebooks) →
         # the active one's Layouts/Channels/Recordings/Docs/Bookmarks (sections) →
         # items (pages). A view over the unchanged ProjectManager/Project model.
-        self.navigator = ProjectNavigator(
-            self._project_mgr, active_layout=lambda: self._active_layout_path,
-            on_activate=self._switch_project, on_create_local=self._add_project,
-            on_create_hub=self._add_project_hub, on_reveal=self._reveal_project,
-            on_share=self._share_project, on_clone=self._clone_hub_project,
-            hub_enabled=lambda: self.hub.connected, on_open_layout=self._open_layout,
-            on_reveal_path=self._reveal_path, on_curate=self._curate_sources,
-            on_add_layout=self._on_add_layout, on_add_doc=self._add_doc,
-            on_add_bookmark=self._add_bookmark, on_jump_window=self._jump_to_window,
-            on_remove_bookmark=self._remove_bookmark, on_open_doc=self._open_doc,
-            on_edit=self._navigator_edit)
+        self.navigator = ProjectNavigator(self._project_mgr, ProjectActions(
+            active_layout=lambda: self._active_layout_path,
+            hub_enabled=lambda: self.hub.connected,
+            activate=self._switch_project, create_local=self._add_project,
+            create_hub=self._add_project_hub, reveal=self._reveal_project,
+            share=self._share_project, clone=self._clone_hub_project,
+            open_layout=self._open_layout, reveal_path=self._reveal_path,
+            curate=self._curate_sources, add_layout=self._on_add_layout,
+            add_doc=self._add_doc, add_bookmark=self._add_bookmark,
+            jump_window=self._jump_to_window, remove_bookmark=self._remove_bookmark,
+            open_doc=self._open_doc, edit=self._navigator_edit))
         self.navigator_dock = QDockWidget("Workspace", self)
         self.navigator_dock.setObjectName("NavigatorDock")
         self.navigator_dock.setWidget(self.navigator)

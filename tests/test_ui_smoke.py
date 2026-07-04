@@ -1449,6 +1449,27 @@ def test_navigator_preserves_expand_state(qapp):
 
 
 @pytest.mark.ui
+def test_navigator_builds_with_bundled_actions(qapp, tmp_path):
+    """The navigator takes ONE ProjectActions bundle (not 18 loose callbacks) and
+    builds/refreshes with safe no-op defaults — independently of the whole app."""
+    from ferrodac.core.projects import ProjectManager
+    from ferrodac.ui.docks import ProjectActions, ProjectNavigator
+    mgr = ProjectManager(str(tmp_path / "reg.json"))
+    mgr.track(str(tmp_path / "P"), "P")
+    nav = ProjectNavigator(mgr, ProjectActions())        # all defaults
+    try:
+        nav.refresh()                                    # no crash with no-op verbs
+        nav.actions.share("x")                           # default no-op, no crash
+        assert callable(nav.actions.activate)
+        got = []
+        nav2 = ProjectNavigator(mgr, ProjectActions(activate=got.append))
+        nav2.actions.activate("pid42")                   # a wired verb fires
+        assert got == ["pid42"]
+        nav2.deleteLater()
+    finally:
+        nav.deleteLater()
+
+
 def test_navigator_click_switches_project(qapp):
     """Clicking an (inactive) project row routes to _switch_project."""
     import tempfile

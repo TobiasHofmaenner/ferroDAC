@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import dataclass, field
+from typing import Callable
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
@@ -1811,6 +1813,32 @@ class CursorDialog(QDialog):
                 self._list.addItem(item)
 
 
+@dataclass
+class ProjectActions:
+    """The app verbs the ProjectNavigator invokes, bundled into one object so its
+    constructor takes a single `actions` instead of 18 loose callbacks. Every field
+    defaults to a safe no-op / falsy query, so a navigator builds (and tests) without
+    wiring the whole app."""
+    active_layout: Callable = field(default=lambda: None)      # () -> current layout name
+    hub_enabled: Callable = field(default=lambda: False)       # () -> is a hub connected
+    activate: Callable = field(default=lambda *a: None)        # (pid) switch project
+    create_local: Callable = field(default=lambda *a: None)
+    create_hub: Callable = field(default=lambda *a: None)
+    reveal: Callable = field(default=lambda *a: None)          # reveal the project folder
+    reveal_path: Callable = field(default=lambda *a: None)     # (path) reveal a folder
+    share: Callable = field(default=lambda *a: None)           # (pid)
+    clone: Callable = field(default=lambda *a: None)           # (pid)
+    open_layout: Callable = field(default=lambda *a: None)     # (name)
+    curate: Callable = field(default=lambda *a: None)
+    add_layout: Callable = field(default=lambda *a: None)
+    add_doc: Callable = field(default=lambda *a: None)
+    add_bookmark: Callable = field(default=lambda *a: None)
+    jump_window: Callable = field(default=lambda *a: None)     # (window)
+    remove_bookmark: Callable = field(default=lambda *a: None)
+    open_doc: Callable = field(default=lambda *a: None)        # (doc)
+    edit: Callable = field(default=lambda *a: None)            # (verb, payload) dispatcher
+
+
 class ProjectNavigator(QWidget):
     """One OneNote-style tree for the whole left side: PROJECTS (notebooks) at the top
     level; the ACTIVE project expands into SECTIONS (Layouts, Channels, Recordings,
@@ -1821,32 +1849,14 @@ class ProjectNavigator(QWidget):
 
     SECTIONS = ("Layouts", "Channels", "Recordings", "Docs", "Bookmarks")
 
-    def __init__(self, manager, active_layout=None, on_activate=None,
-                 on_create_local=None, on_create_hub=None, on_reveal=None,
-                 on_share=None, on_clone=None, hub_enabled=None, on_open_layout=None,
-                 on_reveal_path=None, on_curate=None, on_add_layout=None,
-                 on_add_doc=None, on_add_bookmark=None, on_jump_window=None,
-                 on_remove_bookmark=None, on_open_doc=None, on_edit=None, parent=None):
+    def __init__(self, manager, actions=None, parent=None):
         super().__init__(parent)
         self.manager = manager
-        self._active_layout = active_layout or (lambda: None)
-        self._on_edit = on_edit                         # (verb, payload) edit dispatcher
-        self._on_activate = on_activate
-        self._on_create_local = on_create_local
-        self._on_create_hub = on_create_hub
-        self._on_reveal = on_reveal                     # reveal the active project folder
-        self._on_share = on_share
-        self._on_clone = on_clone
-        self._hub_enabled = hub_enabled or (lambda: False)
-        self._on_open_layout = on_open_layout
-        self._on_reveal_path = on_reveal_path           # reveal a recording's folder
-        self._on_curate = on_curate
-        self._on_add_layout = on_add_layout
-        self._on_add_doc = on_add_doc
-        self._on_add_bookmark = on_add_bookmark
-        self._on_jump_window = on_jump_window
-        self._on_remove_bookmark = on_remove_bookmark
-        self._on_open_doc = on_open_doc                 # open a doc in the in-app view
+        # ONE bundle of app verbs instead of 18 loose constructor callbacks — adding
+        # a verb is a field on ProjectActions, not a new param threaded through here
+        # and the call site (the audit's 'ProjectNavigator takes 18 constructor
+        # callables'). Fields default to safe no-ops so a bare navigator still builds.
+        self.actions = actions or ProjectActions()
         self._expanded = None        # set of stable keys; None = first build → expand all
         self._last_active = None      # active project id at last refresh (switch → re-expand)
 
@@ -1876,8 +1886,8 @@ class ProjectNavigator(QWidget):
         new.setToolButtonStyle(Qt.ToolButtonTextOnly)
         new.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(new)
-        menu.addAction("Local folder…", lambda: self._on_create_local())
-        self._hub_action = menu.addAction("On the hub…", lambda: self._on_create_hub())
+        menu.addAction("Local folder…", lambda: self.actions.create_local())
+        self._hub_action = menu.addAction("On the hub…", lambda: self.actions.create_hub())
         self._hub_action.setToolTip("Create a shared project on the hub (needs a connection)")
         new.setMenu(menu)
         bottom.addWidget(new)
@@ -1904,7 +1914,7 @@ class ProjectNavigator(QWidget):
         self._tree.clear()
         projs = self.manager.projects()
         self._label.setText(f"Workspace  ({len(projs)})")
-        self._hub_action.setEnabled(self._hub_enabled())
+        self._hub_action.setEnabled(self.actions.hub_enabled())
         if self._expanded is None or switched:   # first build / switch → active project + sections open
             self._expanded = {("project", aid)} | {("section", s) for s in self.SECTIONS}
         self._last_active = aid
@@ -1952,7 +1962,7 @@ class ProjectNavigator(QWidget):
 
     # -- per-section rows: (text, payload, tooltip) — reuse the Project model --
     def _layout_rows(self, p):
-        active = self._active_layout()
+        active = self.actions.active_layout()
         rows = []
         for name in p.layouts():
             path = p.layout_path(name)
@@ -2011,8 +2021,8 @@ class ProjectNavigator(QWidget):
         # Only the expand ARROW toggles fold/unfold (the tree handles that natively).
         # A click on the row BODY just SELECTS, so the bottom action bar shows the
         # node's actions without collapsing the section/project under the cursor.
-        if t == "project" and pay["id"] != self._active_id() and self._on_activate is not None:
-            QTimer.singleShot(0, lambda pid=pay["id"]: self._on_activate(pid))  # switch (rebuilds)
+        if t == "project" and pay["id"] != self._active_id() and self.actions.activate is not None:
+            QTimer.singleShot(0, lambda pid=pay["id"]: self.actions.activate(pid))  # switch (rebuilds)
         # section / active-project / item rows: selection only → _update_action_bar;
         # double-click opens an item row (the primary action), never a select-click.
 
@@ -2023,23 +2033,23 @@ class ProjectNavigator(QWidget):
 
     def _open_item(self, pay):
         t = pay.get("t")
-        if t == "layout" and not pay.get("active") and self._on_open_layout:
-            self._on_open_layout(pay["path"])
-        elif t == "recording" and self._on_reveal_path:
-            self._on_reveal_path(pay["path"])
+        if t == "layout" and not pay.get("active") and self.actions.open_layout:
+            self.actions.open_layout(pay["path"])
+        elif t == "recording" and self.actions.reveal_path:
+            self.actions.reveal_path(pay["path"])
         elif t == "doc":
-            cb = self._on_open_doc or self._on_reveal_path
+            cb = self.actions.open_doc or self.actions.reveal_path
             if cb:
                 cb(pay["path"])
-        elif t == "bookmark" and self._on_jump_window and pay.get("t0") and pay.get("t1"):
-            self._on_jump_window(pay["t0"], pay["t1"])
+        elif t == "bookmark" and self.actions.jump_window and pay.get("t0") and pay.get("t1"):
+            self.actions.jump_window(pay["t0"], pay["t1"])
 
     def _actions_for(self, pay) -> list:
         """[(label, callback|None)] — the action/edit set for a node, used by BOTH the
         right-click menu and the context-sensitive bottom bar. None = disabled. The new
         edit verbs (rename/delete/duplicate/…) route through the single `on_edit`."""
         t = pay.get("t")
-        e = self._on_edit or (lambda _v, _p: None)
+        e = self.actions.edit or (lambda _v, _p: None)
         out = []
         if t == "project":
             p = self.manager.get(pay.get("id"))
@@ -2047,47 +2057,47 @@ class ProjectNavigator(QWidget):
                 return out
             out.append(("✎ Rename", lambda d=dict(pay): e("rename_project", d)))
             if not getattr(p, "is_hub", False):
-                if self._on_share is not None:
-                    out.append(("☁ Share", (lambda pid=p.id: self._on_share(pid))
-                                if self._hub_enabled() else None))
-                if self._on_reveal is not None:
-                    out.append(("📂 Reveal", lambda: self._on_reveal()))
-            elif self._on_clone is not None and getattr(p, "git_remote", ""):
-                out.append(("⬇ Clone…", lambda pid=p.id: self._on_clone(pid)))
+                if self.actions.share is not None:
+                    out.append(("☁ Share", (lambda pid=p.id: self.actions.share(pid))
+                                if self.actions.hub_enabled() else None))
+                if self.actions.reveal is not None:
+                    out.append(("📂 Reveal", lambda: self.actions.reveal()))
+            elif self.actions.clone is not None and getattr(p, "git_remote", ""):
+                out.append(("⬇ Clone…", lambda pid=p.id: self.actions.clone(pid)))
             out.append(("⌫ Remove", lambda d=dict(pay): e("remove_project", d)))
         elif t == "section":
-            adders = {"Layouts": (self._on_add_layout, "＋ Add layout"),
-                      "Channels": (self._on_curate, "✔ Curate…"),
-                      "Docs": (self._on_add_doc, "＋ Add doc…"),
-                      "Bookmarks": (self._on_add_bookmark, "＋ Add bookmark")}
+            adders = {"Layouts": (self.actions.add_layout, "＋ Add layout"),
+                      "Channels": (self.actions.curate, "✔ Curate…"),
+                      "Docs": (self.actions.add_doc, "＋ Add doc…"),
+                      "Bookmarks": (self.actions.add_bookmark, "＋ Add bookmark")}
             cb, label = adders.get(pay.get("name"), (None, ""))
             if cb is not None:
                 out.append((label, lambda cb=cb: cb()))
         elif t == "layout":
-            if not pay.get("active") and self._on_open_layout:
-                out.append(("↗ Open", lambda path=pay["path"]: self._on_open_layout(path)))
+            if not pay.get("active") and self.actions.open_layout:
+                out.append(("↗ Open", lambda path=pay["path"]: self.actions.open_layout(path)))
             out.append(("✎ Rename", lambda d=dict(pay): e("rename_layout", d)))
             out.append(("⧉ Duplicate", lambda d=dict(pay): e("duplicate_layout", d)))
             out.append(("✕ Delete", lambda d=dict(pay): e("delete_layout", d)))
         elif t == "channel":
             out.append(("✕ Uncurate", lambda d=dict(pay): e("uncurate", d)))
         elif t == "recording":
-            if self._on_reveal_path:
-                out.append(("📂 Reveal", lambda path=pay["path"]: self._on_reveal_path(path)))
+            if self.actions.reveal_path:
+                out.append(("📂 Reveal", lambda path=pay["path"]: self.actions.reveal_path(path)))
             out.append(("✕ Delete", lambda d=dict(pay): e("delete_recording", d)))
         elif t == "doc":
-            cb = self._on_open_doc or self._on_reveal_path
+            cb = self.actions.open_doc or self.actions.reveal_path
             if cb:
                 out.append(("↗ Open", lambda path=pay["path"], cb=cb: cb(path)))
             out.append(("✎ Rename", lambda d=dict(pay): e("rename_doc", d)))
             out.append(("✕ Delete", lambda d=dict(pay): e("delete_doc", d)))
         elif t == "bookmark":
-            if self._on_jump_window and pay.get("t0") and pay.get("t1"):
+            if self.actions.jump_window and pay.get("t0") and pay.get("t1"):
                 out.append(("⌖ Jump",
-                            lambda t0=pay["t0"], t1=pay["t1"]: self._on_jump_window(t0, t1)))
+                            lambda t0=pay["t0"], t1=pay["t1"]: self.actions.jump_window(t0, t1)))
             out.append(("✎ Rename", lambda d=dict(pay): e("rename_bookmark", d)))
-            if self._on_remove_bookmark:
-                out.append(("✕ Delete", lambda name=pay.get("name"): self._on_remove_bookmark(name)))
+            if self.actions.remove_bookmark:
+                out.append(("✕ Delete", lambda name=pay.get("name"): self.actions.remove_bookmark(name)))
         return out
 
     def _context_menu(self, pos):
