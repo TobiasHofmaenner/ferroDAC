@@ -380,8 +380,12 @@ class TimelineWindow(QtWidgets.QMainWindow):
     Live is just the head at now. Its own charts are a preview of the resolver."""
 
     def __init__(self, resolver, store, time_context, parent=None, names=None,
-                 sources_fn=None, lens_fn=None):
+                 sources_fn=None, lens_fn=None, reads=None):
         super().__init__(parent)
+        self._reads = reads                  # async resolver facade (§21.3); the
+        #                                      coverage tick + preview queries go
+        #                                      through it so they never block paint.
+        #                                      None → synchronous (headless/tests).
         self._names = dict(names or {})      # key -> human display name (accumulated)
         self._sources_fn = sources_fn        # callable → {key: name} of LIVE sources
         #                                      (so sources that join the hub appear)
@@ -688,10 +692,25 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._sync_sources()                          # fold in sources that joined live
         self._cov_ticks += 1
         if self._cov_ticks % 4 == 0:                  # coverage changes slowly (~2s)
-            cov = {k: self.resolver.coverage(k) for k in self._sources}
+            self._refresh_coverage()
+
+    def _refresh_coverage(self) -> None:
+        """Repull coverage for the ribbon bars. Off the GUI thread via the async
+        facade when present (a big store's per-tick coverage scan is O(epochs));
+        synchronous fallback keeps headless/tests unchanged."""
+        srcs = list(self._sources)
+
+        def apply(cov):
+            cov = {k: cov[k] for k in srcs if k in cov}
             if cov != self._cover:                    # redraw bars only when changed
                 self._cover = cov
                 self.ribbon.set_coverage(cov)
+
+        if self._reads is not None:
+            self._reads.coverage_many(srcs, ttl=2.0, key="tl-coverage",
+                                      on_result=apply)
+        else:
+            apply({k: self.resolver.coverage(k) for k in srcs})
 
     def _recenter(self, t):
         # double-click → centre a window of the current width on t. Use park_window
@@ -862,21 +881,47 @@ class TimelineWindow(QtWidgets.QMainWindow):
         if hasattr(p, "_img"):                       # trace source → waterfall track
             self._refresh_waterfall(key, p)
             return
-        x, y = self.resolver.query(key, self.t0, self.t1,
-                                   max_points=max(400, p.width() * 2))
-        x, y = _envelope_midline(x, y)            # clean line, not a zigzag band
-        p._curve.setData(x, y)
-        p.setXRange(self.t0, self.t1, padding=0)
+        mp = max(400, p.width() * 2)
+        t0, t1 = self.t0, self.t1
+
+        def draw(res):
+            p2 = self._charts.get(key)
+            if p2 is None or (t0, t1) != (self.t0, self.t1):
+                return                               # window moved on → stale result
+            x, y = _envelope_midline(*res)           # clean line, not a zigzag band
+            p2._curve.setData(x, y)
+            p2.setXRange(t0, t1, padding=0)
+
+        if self._reads is not None:
+            # per-series key: a newer scrub supersedes the in-flight query
+            self._reads.query(key, t0, t1, mp, key=("tl-query", key),
+                              on_result=draw)
+        else:
+            draw(self.resolver.query(key, t0, t1, max_points=mp))
 
     def _refresh_waterfall(self, key, p):
-        """Render a trace source as a spectrogram over the window: X = TIME (so it
-        lines up with the ribbon), Y = swept axis (m/z), colour = log intensity.
-        Scans are binned by their real time, so sparse scans (slow RGA) show their
-        true gaps — across ALL epochs in view, not just the most recent block."""
+        """Render a trace source as a spectrogram over the window (X = TIME, Y =
+        swept axis, colour = log intensity). The block read goes off the GUI
+        thread via the async facade; the binning + paint run in the callback."""
+        t0, t1 = self.t0, self.t1
+
+        def render(blocks):
+            p2 = self._charts.get(key)
+            if p2 is None or (t0, t1) != (self.t0, self.t1):
+                return                               # window moved on → stale
+            self._draw_waterfall(p2, t0, t1, [b for b in blocks if len(b[0])])
+
+        if self._reads is not None:
+            self._reads.query_trace(key, t0, t1, 320, key=("tl-wf", key),
+                                    on_result=render)
+        else:
+            render(self.resolver.query_trace(key, t0, t1, max_scans=320))
+
+    def _draw_waterfall(self, p, t0, t1, blocks):
+        """Bin the trace blocks by real time and paint the spectrogram — sparse
+        scans (slow RGA) keep their true gaps, across ALL epochs in view.
+        (t0/t1 == self.t0/self.t1 here: the caller guarded against a moved window.)"""
         from .panels import _time_binned
-        blocks = [b for b in self.resolver.query_trace(key, self.t0, self.t1,
-                                                        max_scans=320)
-                  if len(b[0])]
         x_ref = max(blocks, key=lambda b: b[0][-1])[2] if blocks else None
         scans = []
         for times, Y, x in blocks:

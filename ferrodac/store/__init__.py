@@ -15,9 +15,10 @@ from .zarrstore import ZarrStore
 from .resolver import RamTier, Resolver
 from .writer import StoreWriter
 from .replay import PlaybackSource, ReplayController, TimeContext
+from .asyncread import ReadService
 from .sync import LocalTransport, SyncEngine
 from .export import export_window
 
 __all__ = ["ZarrStore", "Resolver", "RamTier", "StoreWriter",
-           "PlaybackSource", "ReplayController", "TimeContext",
+           "PlaybackSource", "ReplayController", "TimeContext", "ReadService",
            "SyncEngine", "LocalTransport", "export_window"]

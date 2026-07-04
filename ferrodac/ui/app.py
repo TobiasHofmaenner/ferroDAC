@@ -2222,11 +2222,12 @@ class MainWindow(QMainWindow):
         # ring if zarr/disk is unavailable.
         self.store_writer = None
         self.resolver = None
+        self.reads = None                  # async resolver facade (§21.3)
         self.time_context = None
         self.replay = None
         try:
-            from ..store import (RamTier, ReplayController, Resolver,
-                                 StoreWriter, TimeContext, ZarrStore)
+            from ..store import (RamTier, ReadService, ReplayController,
+                                 Resolver, StoreWriter, TimeContext, ZarrStore)
             os.makedirs(self._app_dir(), exist_ok=True)
             store = ZarrStore(os.path.join(self._app_dir(), "store.zarr"))
             self.store_writer = StoreWriter(store)
@@ -2237,6 +2238,11 @@ class MainWindow(QMainWindow):
             self._push_device_records()
             # the read path: one query() over the live RAM ring + the durable store
             self.resolver = Resolver([RamTier(self.history), store])
+            # every UI-initiated read (Timeline coverage tick + preview queries)
+            # goes through here → a worker pool, off the paint thread, with a
+            # coverage TTL cache + supersession (§21.3). Results marshal back via
+            # the GuiBridge (queued → GUI thread).
+            self.reads = ReadService(self.resolver, deliver=self._gui_bridge.post)
             # replay spine (DESIGN §7.4): one head + a playback Bus the whole
             # dashboard renders through. Following-now → the live engine passes
             # straight through (≡ today); parked → re-stream history (W2). W1
@@ -2531,7 +2537,8 @@ class MainWindow(QMainWindow):
                                  self.time_context, self,
                                  names=self._timeline_sources(),
                                  sources_fn=self._timeline_sources,
-                                 lens_fn=self._curated_source_keys)
+                                 lens_fn=self._curated_source_keys,
+                                 reads=self.reads)
             win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
             self._timeline_win = win
         self._timeline_win.show()
@@ -2709,6 +2716,8 @@ class MainWindow(QMainWindow):
         read-out and refresh hub-dependent views. The button COLOUR is driven
         separately by the REAL link state (`_on_hub_link`), not by this assumption."""
         self.sync_status.set_state("connecting" if connected else "offline")
+        if self.reads is not None:
+            self.reads.invalidate()             # hub tier joined/left → coverage moved
         # surface (or retire) the hub's historic catalog as routable ports
         self.dashboard.refresh_ports()
         self._refresh_explorer()                # enable/disable the “On the hub…” item
@@ -4317,6 +4326,8 @@ class MainWindow(QMainWindow):
             #                                 any in-flight re-stream via generation)
         if getattr(self, "_tasks", None) is not None:
             self._tasks.shutdown()          # cancel background exports/loads
+        if getattr(self, "reads", None) is not None:
+            self.reads.shutdown()           # cancel in-flight timeline reads
         if self.store_writer is not None:
             self.store_writer.stop()        # flush the buffer + build final rollups
         self.dashboard.shutdown()
