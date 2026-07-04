@@ -38,6 +38,7 @@ from qtpy.QtWidgets import (
 import numpy as np
 import pyqtgraph as pg
 
+from ..core import units
 from ..core.markers import RECORDING
 from ..core.plotbuffer import CurveBuffer
 from ..core.trace import Trace
@@ -226,6 +227,32 @@ class ExportConfigDialog(QDialog):
         return self._current()
 
 
+_ARBITRARY = {"", "a.u.", "a_u", "au", "arb", "arbitrary_unit", "dimensionless"}
+
+
+def _unit_label(unit: str):
+    """Axis label for a unit — ``[mbar]`` — or None for an unlabelled/arbitrary unit
+    (so a unitless channel doesn't render a meaningless ``[a_u]`` on its axis)."""
+    u = (unit or "").strip()
+    return f"[{u}]" if u.casefold() not in _ARBITRARY else None
+
+
+class _AxisSlot:
+    """One Y axis on a chart = one physical DIMENSION (DESIGN §19.0). The primary slot
+    reuses the plot's built-in left axis + main ViewBox; each further dimension gets its
+    own right-side AxisItem + a ViewBox X-linked to the main one. All curves on a slot
+    are converted to the slot's ``display_unit`` so e.g. mbar and Torr share one axis."""
+    __slots__ = ("dimkey", "vb", "ax", "display_unit", "primary", "keys")
+
+    def __init__(self, dimkey, vb, ax, display_unit, primary):
+        self.dimkey = dimkey
+        self.vb = vb
+        self.ax = ax
+        self.display_unit = display_unit
+        self.primary = primary
+        self.keys = set()
+
+
 class ChartPanel(Panel):
     kind = "chart"
     accepts = frozenset({"float", "bool"})
@@ -239,7 +266,7 @@ class ChartPanel(Panel):
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot.setLogMode(x=False, y=True)
-        self.plot.addLegend(offset=(-10, 10))
+        self._legend = self.plot.addLegend(offset=(-10, 10))
         item = self.plot.getPlotItem()
         # Full-res data is kept; pyqtgraph only downsamples for DISPLAY (zoom in →
         # full detail returns). 'mean' draws a clean averaged line zoomed out
@@ -247,14 +274,19 @@ class ChartPanel(Panel):
         item.setDownsampling(auto=True, mode="mean")
         item.setClipToView(True)
         lay.addWidget(self.plot)
+        self._pi = item                       # the PlotItem (for multi-axis wiring)
         self._curves: dict = {}
         self._buf: dict = {}
+        self._meta: dict = {}                 # key -> (dimkey, src_unit, conv-callable|None)
+        self._axes: dict = {}                 # dimkey -> _AxisSlot (one Y axis per dimension)
         self._t0 = None
         self._ylabel = ""
         self._logy = True
         self.clock = None
         self.markers = None
         self._marker_lines: dict = {}
+        # Keep every extra ViewBox glued to the main plot rect as it resizes/zooms.
+        self._pi.vb.sigResized.connect(self._sync_axis_geometry)
 
     def config_fields(self):
         return super().config_fields() + [
@@ -266,10 +298,19 @@ class ChartPanel(Panel):
         super().apply_config(values)
         if "ylabel" in values:
             self._ylabel = values["ylabel"]
-            self.plot.setLabel("left", self._ylabel or None)
+            self._apply_primary_label()       # manual label overrides the auto [unit]
         if "logy" in values:
             self._logy = bool(values["logy"])
-            self.plot.setLogMode(x=False, y=self._logy)
+            self.plot.setLogMode(x=False, y=self._logy)          # primary axis + its curves
+            for slot in self._axes.values():                     # extra axes + their curves
+                if not slot.primary:
+                    try:
+                        slot.ax.setLogMode(self._logy)
+                    except Exception:
+                        pass
+            for key, (dimkey, _u, _c) in self._meta.items():
+                if not self._axes[dimkey].primary:
+                    self._curves[key].setLogMode(False, self._logy)
 
     def set_display_name(self, name):
         super().set_display_name(name)
@@ -382,20 +423,129 @@ class ChartPanel(Panel):
         x0, x1 = entry[0].getRegion()                  # absolute timestamps
         self.markers.update(mid, t=min(x0, x1), t_end=max(x0, x1))
 
+    # -- unit-aware axes (DESIGN §19.0): one Y axis per physical dimension ----
+    @staticmethod
+    def _dimkey(unit):
+        """A hashable key for a unit's physical DIMENSION. Parseable units group by
+        dimensionality (mbar & Torr → one axis); unparseable ones group by their raw
+        label, so identical labels still share but unknown labels don't collide."""
+        dim = units.dimensionality(unit)
+        if dim is not None:
+            return ("dim", str(dim))
+        return ("raw", (unit or "").strip().casefold())
+
+    @staticmethod
+    def _conv(src, dst):
+        """A callable converting magnitudes ``src`` → ``dst`` for display, or None for
+        identity. A scalar factor when offset-free (the common case), else pint's full
+        convert (handles affine °C↔K)."""
+        if not dst or (src or "").strip() == (dst or "").strip():
+            return None
+        f = units.convert_factor(src, dst)
+        if f is not None:
+            return lambda y: y * f
+        if units.convert(1.0, src, dst) is None:      # not actually convertible
+            return None
+        return lambda y: units.convert(y, src, dst)
+
+    def _alloc_slot(self, dimkey, unit):
+        display_unit = units.canonical(unit) or unit
+        if not self._axes:                    # first dimension → the built-in left axis
+            slot = _AxisSlot(dimkey, self._pi.vb, self._pi.getAxis("left"),
+                             display_unit, primary=True)
+            self._axes[dimkey] = slot
+            self._apply_primary_label()
+            return slot
+        index = len(self._axes)               # 1 = built-in right axis, 2+ = new axes
+        vb = pg.ViewBox()
+        vb.setXLink(self._pi.vb)
+        vb.enableAutoRange(axis=vb.YAxis, enable=True)
+        vb.setAutoVisible(y=True)
+        if index == 1:
+            self._pi.showAxis("right")
+            ax = self._pi.getAxis("right")
+        else:
+            ax = pg.AxisItem("right")
+            self._pi.layout.addItem(ax, 2, index + 1)   # stack further axes rightward
+        self._pi.scene().addItem(vb)
+        ax.linkToView(vb)
+        ax.setLabel(_unit_label(display_unit))
+        try:
+            ax.setLogMode(self._logy)
+        except Exception:
+            pass
+        slot = _AxisSlot(dimkey, vb, ax, display_unit, primary=False)
+        self._axes[dimkey] = slot
+        self._sync_axis_geometry()
+        return slot
+
+    def _sync_axis_geometry(self):
+        rect = self._pi.vb.sceneBoundingRect()
+        for slot in self._axes.values():
+            if not slot.primary:
+                slot.vb.setGeometry(rect)
+                slot.vb.linkedViewChanged(self._pi.vb, slot.vb.XAxis)
+
+    def _apply_primary_label(self):
+        if self._ylabel:
+            self.plot.setLabel("left", self._ylabel)      # manual label wins
+            return
+        prim = next((s for s in self._axes.values() if s.primary), None)
+        self.plot.setLabel("left", _unit_label(prim.display_unit) if prim else None)
+
+    def _set_curve_data(self, key):
+        buf = self._buf[key]
+        conv = self._meta[key][2]
+        y = conv(buf.y) if conv is not None else buf.y
+        self._curves[key].setData(buf.x, y, connect="finite")
+
     def add_source(self, key, source):
         if key in self._curves:
             return
-        self._curves[key] = self.plot.plot(
-            [], [], pen=pg.mkPen(color_for(key), width=2),
-            name=getattr(source, 'label', source.name)
-        )
+        unit = getattr(source, "unit", "") or ""
+        dimkey = self._dimkey(unit)
+        slot = self._axes.get(dimkey)
+        if slot is None:
+            slot = self._alloc_slot(dimkey, unit)
+        elif not slot.primary and not slot.keys:
+            slot.ax.show()                    # re-show an axis emptied earlier
+        name = getattr(source, "label", source.name)
+        pen = pg.mkPen(color_for(key), width=2)
+        if slot.primary:
+            curve = self.plot.plot([], [], pen=pen, name=name)
+        else:
+            curve = pg.PlotDataItem([], [], pen=pen, name=name)
+            curve.setLogMode(False, self._logy)
+            curve.setDownsampling(auto=True, method="mean")
+            curve.setClipToView(True)
+            slot.vb.addItem(curve)
+            if self._legend is not None:
+                self._legend.addItem(curve, name)
+        self._curves[key] = curve
         self._buf[key] = CurveBuffer()
+        self._meta[key] = (dimkey, unit, self._conv(unit, slot.display_unit))
+        slot.keys.add(key)
 
     def remove_source(self, key):
         curve = self._curves.pop(key, None)
-        if curve is not None:
-            self.plot.removeItem(curve)
+        meta = self._meta.pop(key, None)
         self._buf.pop(key, None)
+        if curve is None:
+            return
+        slot = self._axes.get(meta[0]) if meta else None
+        if slot is not None and not slot.primary:
+            slot.vb.removeItem(curve)
+        else:
+            self.plot.removeItem(curve)
+        if self._legend is not None:
+            try:
+                self._legend.removeItem(curve)
+            except Exception:
+                pass
+        if slot is not None:
+            slot.keys.discard(key)
+            if not slot.keys and not slot.primary:
+                slot.ax.hide()                # keep the slot for reuse, just hide it
 
     def feed(self, batch):
         # Accumulate the batch per source, then setData ONCE per source (not per
@@ -406,14 +556,15 @@ class ChartPanel(Panel):
         for r in batch:
             if r.key not in self._buf or not isinstance(r.value, (int, float)):
                 continue
-            ok = r.status == 0 and r.value == r.value and r.value > 0
+            # log Y needs strictly-positive values; a linear axis accepts any finite one
+            ok = (r.status == 0 and r.value == r.value
+                  and (r.value > 0 or not self._logy))
             tx, ty = touched.setdefault(r.key, ([], []))
             tx.append(self._x(r.t))
             ty.append(r.value if ok else float("nan"))
         for key, (tx, ty) in touched.items():
-            buf = self._buf[key]
-            buf.append(tx, ty)
-            self._curves[key].setData(buf.x, buf.y, connect="finite")
+            self._buf[key].append(tx, ty)
+            self._set_curve_data(key)
 
     def clear_history(self):
         for key, buf in self._buf.items():
@@ -422,6 +573,9 @@ class ChartPanel(Panel):
         self._sync_markers()                  # reposition tags at the new time base
         self.plot.enableAutoRange()           # a freshly-loaded slice auto-fits once;
         #                                       then the user's zoom/pan is respected
+        for slot in self._axes.values():      # extra axes auto-fit their own Y too
+            if not slot.primary:
+                slot.vb.enableAutoRange(axis=slot.vb.YAxis, enable=True)
 
     def zoom_time(self, t0, t1):
         self.plot.setXRange(t0, t1, padding=0.05)     # time is the X axis here
@@ -431,7 +585,7 @@ class ChartPanel(Panel):
         of growing (slide mode). In grow mode the buffer's own cap bounds it."""
         for key, buf in self._buf.items():
             if buf.trim(x_min):
-                self._curves[key].setData(buf.x, buf.y, connect="finite")
+                self._set_curve_data(key)
 
 
 class _Readout(QFrame):
