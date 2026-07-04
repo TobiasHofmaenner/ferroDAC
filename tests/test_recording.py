@@ -6,8 +6,8 @@ with an end time computed from the store's coverage.
 """
 from types import SimpleNamespace
 
-from ferrodac.core.markers import RECORDING
 from ferrodac.core.recording import RecordingController
+from ferrodac.core.tag import RECORDING
 
 
 class FakeMarkers:

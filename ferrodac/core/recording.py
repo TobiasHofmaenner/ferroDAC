@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import time
 
-from .markers import RECORDING
+from .tag import RECORDING       # the Qt-free source (markers.py re-exports it but is Qt)
 
 
 class RecordingController:
