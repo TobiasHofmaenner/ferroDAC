@@ -521,7 +521,9 @@ class DevicesPanel(QWidget):
 
     def _fill(self, layout, descs, active):
         clear_layout(layout)
-        on_action = self.manager.remove if active else self.manager.add
+        # user-initiated add (user=True → auto-curates its channels); remove as-is
+        on_action = (self.manager.remove if active
+                     else lambda iid: self.manager.add(iid, user=True))
         for desc in sorted(descs, key=lambda d: d.name):
             layout.addWidget(
                 DeviceCard(desc, active, on_action,
@@ -1837,6 +1839,8 @@ class ProjectActions:
     remove_bookmark: Callable = field(default=lambda *a: None)
     open_doc: Callable = field(default=lambda *a: None)        # (doc)
     edit: Callable = field(default=lambda *a: None)            # (verb, payload) dispatcher
+    label_for: Callable = field(default=lambda key: key)       # (key) -> device-qualified
+    #                                                            channel label (live+historic)
 
 
 class ProjectNavigator(QWidget):
@@ -1977,7 +1981,9 @@ class ProjectNavigator(QWidget):
         rows = []
         for s in p.sources():
             key = s.get("key") if isinstance(s, dict) else s
-            label = (isinstance(s, dict) and s.get("label")) or key
+            # human, device-qualified label ("temp · Sim Thermometer") — a curated
+            # entry stores only the key, so resolve it live/historic; key as tooltip.
+            label = (isinstance(s, dict) and s.get("label")) or self.actions.label_for(key)
             rows.append((label, {"t": "channel", "key": key}, key))
         return rows
 

@@ -226,6 +226,9 @@ class MainWindow(QMainWindow):
         self._autosave_timer.setInterval(1500)
         self._autosave_timer.timeout.connect(self._do_autosave)
         self.dashboard.ports_changed.connect(self._schedule_autosave)
+        # a device the USER adds → its channels join the active project's curated lens
+        # (so a curated project doesn't silently hide a device you just plugged in)
+        self.manager.device_added.connect(self._curate_new_device)
         # project git history (DESIGN §8.2): boundary commits are immediate; doc edits
         # debounce through this timer so a burst of edits → one "settled" commit.
         self._commit_timer = QTimer(self)
@@ -311,7 +314,8 @@ class MainWindow(QMainWindow):
             curate=self._curate_sources, add_layout=self._on_add_layout,
             add_doc=self._add_doc, add_bookmark=self._add_bookmark,
             jump_window=self._jump_to_window, remove_bookmark=self._remove_bookmark,
-            open_doc=self._open_doc, edit=self._navigator_edit))
+            open_doc=self._open_doc, edit=self._navigator_edit,
+            label_for=self._source_label))
         self.navigator_dock = QDockWidget("Workspace", self)
         self.navigator_dock.setObjectName("NavigatorDock")
         self.navigator_dock.setWidget(self.navigator)
@@ -792,6 +796,42 @@ class MainWindow(QMainWindow):
     def _set_source_lens_all(self, show_all: bool) -> None:
         self._sources_show_all = bool(show_all)
         self._apply_source_lens()
+
+    def _curate_new_device(self, instance_id: str) -> None:
+        """A just-added device's channels join the active project's curated list, so a
+        CURATED project doesn't silently hide a device you just plugged in (#6). Only
+        fires on an explicit user add (not restore/reconnect), and only for a project
+        that already has a lens — a show-all project already shows the new channels.
+        Never re-adds a channel that's still in the list (curated-out ones stay out;
+        this only appends the device's channels not already present)."""
+        p = self._project_mgr.active
+        if p is None or not p.source_keys():          # no project / show-all → nothing to do
+            return
+
+        def apply(iid=instance_id):
+            proj = self._project_mgr.active
+            if proj is None:
+                return
+            existing = proj.source_keys()
+            if not existing:
+                return
+            desc = next((d for d in self.manager.active_descriptors()
+                         if d.instance_id == iid), None)
+            if desc is None:
+                return
+            dev_id = getattr(desc, "uuid", "") or iid
+            keys = [sp.key for sp in self.dashboard.source_ports()
+                    if sp.key.split("/", 1)[0] == dev_id
+                    and getattr(sp, "kind", "") in ("device", "remote")]
+            to_add = [k for k in keys if k not in existing]
+            if not to_add:
+                return
+            proj.set_sources(list(proj.sources()) + [{"key": k} for k in to_add])
+            self._apply_source_lens()
+            self._refresh_explorer()
+            self._republish_active_if_hub()
+        # defer one tick so the dashboard has rebuilt its ports for the new device
+        QTimer.singleShot(0, apply)
 
     def _curate_sources(self) -> None:
         """Pick which channels this project shows (a lens over the catalog)."""
@@ -2208,6 +2248,18 @@ class MainWindow(QMainWindow):
             bar.setVisible(True)
         bar.setValue(max(0, min(100, int(frac * 100))))
         QApplication.processEvents()
+
+    def _source_label(self, key: str) -> str:
+        """A human, device-qualified label for a source key ('temp · Sim Thermometer 2
+        (durga)') — live first, then the store's historic provenance; the bare key if
+        nothing resolves. Used by the Workspace channel list so curated channels read as
+        names, not UUIDs."""
+        live = self.dashboard.source_names()          # {key: qualified label}, live
+        if key in live:
+            return live[key]
+        from ..core.sourceid import resolve_source
+        st = self.store_writer.store if self.store_writer is not None else None
+        return resolve_source(key, store=st).label or key
 
     def _historic_sources(self):
         """Recorded channels (key, channel_name, device_name, unit, dtype) routable

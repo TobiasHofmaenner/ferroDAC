@@ -1493,6 +1493,57 @@ def test_navigator_builds_with_bundled_actions(qapp, tmp_path):
         nav.deleteLater()
 
 
+def test_device_added_signal_only_on_user_add(qapp):
+    """`device_added` fires only for an explicit user add (the Devices panel), so the
+    UI auto-curates a new device's channels then — never on a discovery/session re-add
+    (which would re-add channels a user curated out on every restart). #6."""
+    from ferrodac.core.manager import DeviceManager
+
+    class _Dev:
+        instance_id = "sim:x"
+        def connect(self):
+            pass
+
+    mgr = DeviceManager([])
+    got = []
+    mgr.device_added.connect(got.append)
+
+    mgr._available["sim:x"] = _Dev()
+    mgr.add("sim:x")                       # discovery/restore path → no signal
+    assert got == []
+
+    mgr._available["sim:x"] = _Dev()       # (re-inject; add popped it)
+    mgr.add("sim:x", user=True)            # explicit user add → signal
+    assert got == ["sim:x"]
+
+
+def test_navigator_channel_rows_show_human_labels(qapp):
+    """Curated channels store only the source key (a device UUID); the Workspace list
+    must render a device-qualified NAME via label_for, with the key kept as tooltip."""
+    from ferrodac.ui.docks import ProjectActions, ProjectNavigator
+
+    class _Mgr:
+        active = None
+        def projects(self):
+            return []
+
+    class _Proj:
+        def sources(self):
+            return ["91319bc8-e7f6-44c2-805f-435b15c90b43/temp",           # bare key
+                    {"key": "a3b34a85-1929-4ac2-8df0-fb6f46849722/iout"}]  # dict, no label
+
+    names = {"91319bc8-e7f6-44c2-805f-435b15c90b43/temp": "temp · Sim Thermometer 2",
+             "a3b34a85-1929-4ac2-8df0-fb6f46849722/iout": "iout · Keithley 6221"}
+    nav = ProjectNavigator(_Mgr(), ProjectActions(label_for=lambda k: names.get(k, k)))
+    try:
+        rows = nav._channel_rows(_Proj())
+        assert [text for text, _p, _tip in rows] == \
+            ["temp · Sim Thermometer 2", "iout · Keithley 6221"]
+        assert [tip for _t, _p, tip in rows] == list(names)   # raw key stays as tooltip
+    finally:
+        nav.deleteLater()
+
+
 def test_navigator_click_switches_project(qapp):
     """Clicking an (inactive) project row routes to _switch_project."""
     import tempfile

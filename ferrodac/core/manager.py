@@ -63,6 +63,9 @@ class DeviceManager(QObject):
     available_changed = Signal()
     active_changed = Signal()
     provenance_changed = Signal()   # a device's σ model (or other provenance) changed
+    device_added = Signal(str)      # a device the USER just added (instance_id) — NOT a
+    #                                 discovery/session re-add; the UI auto-curates its
+    #                                 channels into the active project (never on restore)
 
     def __init__(
         self,
@@ -135,7 +138,11 @@ class DeviceManager(QObject):
             self.available_changed.emit()
 
     # -- user actions --------------------------------------------------------
-    def add(self, instance_id: str) -> None:
+    def add(self, instance_id: str, *, user: bool = False) -> None:
+        """Activate a device. ``user=True`` marks an explicit user add (the Devices
+        panel) vs. an automatic discovery/session re-add (``_try_resolve``) — only the
+        former emits ``device_added`` so the UI auto-curates channels without doing it
+        on every restart/reconnect."""
         device = self._available.pop(instance_id, None)
         if device is None:
             return
@@ -149,6 +156,8 @@ class DeviceManager(QObject):
             device.mark_connecting()
         self.available_changed.emit()
         self.active_changed.emit()
+        if user:
+            self.device_added.emit(instance_id)
 
         def _connect_and_stream():
             device.connect()
