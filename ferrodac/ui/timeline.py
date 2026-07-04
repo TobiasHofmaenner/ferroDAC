@@ -419,13 +419,16 @@ class TimelineWindow(QtWidgets.QMainWindow):
         lo = min((c[0][0] for c in self._cover.values() if c), default=now - 600)
         self.now = now
         if self.tc.following:
-            # opened LIVE → a session overview: follow now, a sane live tail (capped
-            # to the session if it's short), and zoom the ribbon out to span the
-            # whole session (earliest data → now) for a history glance.
+            # opened LIVE → follow now with a sane live tail (capped to the session
+            # if it's short), and frame the ribbon at ~3× the window so you land
+            # zoomed in on recent history (not spanning the whole multi-day session,
+            # which made the window a tiny unusable sliver). Scroll/Fit reaches back.
             self.tc.set_width(max(60.0, min(600.0, now - lo)))
             self.tc.follow_now()
             self.t0, self.t1 = self.tc.window
-            self._view0, self._view1 = lo - 0.04 * max(60.0, now - lo), now
+            w = max(60.0, self.t1 - self.t0)
+            self._view0 = max(lo - 0.04 * w, now - 3.0 * w)   # 3× window, clamped to data
+            self._view1 = now + 0.02 * w
         else:
             # opened while PARKED (e.g. after Zoom-to-recording) → keep that exact
             # window and frame the ribbon around it, so the Timeline lands where you

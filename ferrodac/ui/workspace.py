@@ -16,20 +16,22 @@ routed source values to device sinks.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import QEvent, QObject, Qt, Signal
+from concurrent.futures import ThreadPoolExecutor
+
+from qtpy.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from qtpy.QtWidgets import QDockWidget, QMainWindow, QToolButton, QWidget
 
 from ..core.device import SinkKind
 from ..core.graph import DataflowGraph, Node, PROCESSOR, SINK, SOURCE
 from ..core.markers import MarkerModel, SessionClock
 from ..core.reading import Reading
-from ..core.trace import Trace
 from ..analysis import PROCESSOR_TYPES
 from ..vision import CVRunner, Detector
 from ..vision.detector import CONFIG_FIELDS
@@ -41,6 +43,8 @@ _SINK_DTYPE = {
     SinkKind.ENUM: "enum",
     SinkKind.ACTION: "action",
 }
+
+log = logging.getLogger("ferrodac.workspace")
 
 
 # --------------------------------------------------------------------------- #
@@ -210,12 +214,18 @@ EXPORT_DEFAULT = {"width": 1600, "height": 0, "dpi": 96}
 
 class Dashboard(QObject):
     ports_changed = Signal()     # ports or routes changed (docks refresh)
+    _derived = Signal(str, float, object)   # proc_id, t, out-dict — worker → GUI
 
     def __init__(self, area: WorkspaceArea, engine, manager, parent=None,
-                 data_bus=None, historic_sources=None):
+                 data_bus=None, historic_sources=None, is_live=None):
         super().__init__(parent)
         self.area = area
         self.engine = engine
+        # is_live() → are we following the live edge (vs a parked replay)? Heavy
+        # processors run off the GUI thread while LIVE (so a slow analysis never
+        # freezes acquisition); during a parked re-stream they run inline so the
+        # replayed slice's derived outputs are complete/ordered (DESIGN §21.3).
+        self._is_live = is_live or (lambda: True)
         # callable → [(key, name, unit, dtype)] of RECORDED channels, so historic
         # data has routable ports for replay even with no live device.
         self._historic_sources = historic_sources
@@ -249,6 +259,15 @@ class Dashboard(QObject):
         self._processors: dict = {}
         self._proc_counters: dict = {}
         self._remote_names: dict = {}            # uuid -> name (hub-viewer devices)
+        # off-GUI processor execution (§21.3): a worker pool runs process(), with
+        # at-most-one-in-flight PER processor (conflate — the latest input wins so a
+        # slow analysis can't back up), and results marshal to the GUI via _derived.
+        self._proc_pool = ThreadPoolExecutor(max_workers=2,
+                                             thread_name_prefix="fd-proc")
+        self._proc_lock = threading.Lock()
+        self._proc_latest: dict = {}             # proc_id -> (t, value)
+        self._proc_busy: set = set()             # proc_ids with a worker running
+        self._derived.connect(self._on_derived, Qt.QueuedConnection)
 
         self.area.on_configure = self._configure_panel
         self.data_bus.subscribe(self._on_data_batch)   # analysis: replayable
@@ -644,6 +663,7 @@ class Dashboard(QObject):
             self._cv.stop()
             self._cv.wait(2000)
             self._cv = None
+        self._proc_pool.shutdown(wait=False)     # stop off-GUI processor workers
 
     # -- session (layout) serialization --------------------------------------
     def export_layout(self) -> dict:
@@ -976,11 +996,13 @@ class Dashboard(QObject):
 
     # -- data flow -----------------------------------------------------------
     def _on_data_batch(self, batch):
-        """Data-bus sink (replayable): run trace processors on complete scans.
-        Sees live readings (pass-through) or, when parked, the re-streamed
-        historic slice — so the analysis pipeline re-experiences old data."""
+        """Data-bus sink (replayable): feed each complete reading to any processor
+        bound to it. Sees live readings (pass-through) or, when parked, the
+        re-streamed historic slice — so the analysis pipeline re-experiences old
+        data. Scalars/bools dispatch too (a float/bool processor is a first-class
+        plugin), not only traces — routing already gates input datatypes."""
         for r in batch:
-            if isinstance(r.value, Trace) and not r.partial:
+            if not getattr(r, "partial", False):     # skip trace preview frames
                 self._run_processors(r)
 
     def _write_routed(self, key, value):
@@ -998,22 +1020,84 @@ class Dashboard(QObject):
             self._write_routed(r.key, r.value)
 
     def _run_processors(self, r):
-        """Feed a reading to every processor bound to its source. Derived outputs
-        go onto the PIPELINE bus (transient — never the engine, so they're never
-        persisted; the recorder/store stay raw-only, headless of analysis). Their
-        control routing is applied here so processor-driven control still works."""
-        for proc in self._processors.values():
+        """Feed a reading to every processor bound to its source. process() runs
+        on a worker thread while LIVE (so a slow analysis never freezes the GUI);
+        inline during a parked re-stream (complete/ordered replay) or when the
+        processor declares requires_gui. Derived outputs go onto the PIPELINE bus
+        (transient — never persisted) and their control routing is re-applied."""
+        live = self._is_live()
+        for proc in list(self._processors.values()):
             if proc.input_key != r.key:
                 continue
-            out = proc.process(r.value)
-            for port in proc.outputs():
-                sp = self._sources.get(port.key)
-                if sp is not None and not sp.unit and port.unit:
-                    sp.unit = port.unit          # adopt unit once known
-                if port.key in out:
-                    dev, _, src = port.key.partition("/")
-                    self.data_bus.publish(Reading(dev, src, r.t, out[port.key]))
-                    self._write_routed(port.key, out[port.key])   # derived → control
+            if live and not getattr(proc, "requires_gui", False):
+                self._offload_processor(proc, r.t, r.value)
+            else:
+                self._apply_derived(proc, r.t, self._compute(proc, r.value))
+
+    def _compute(self, proc, value) -> dict:
+        try:
+            return proc.process(value) or {}
+        except Exception:                            # noqa: BLE001 — a bad processor
+            log.exception("processor %s failed", getattr(proc, "id", "?"))
+            return {}
+
+    def _offload_processor(self, proc, t, value) -> None:
+        """Submit process() to the pool, conflating: if a run is already in flight
+        for this processor, just record the latest input — the running worker picks
+        it up when it finishes, so a slow processor never queues up work."""
+        pid = proc.id
+        with self._proc_lock:
+            self._proc_latest[pid] = (t, value, proc)
+            if pid in self._proc_busy:
+                return
+            self._proc_busy.add(pid)
+        self._proc_pool.submit(self._proc_worker, pid)
+
+    def _proc_worker(self, pid) -> None:
+        while True:
+            with self._proc_lock:
+                item = self._proc_latest.pop(pid, None)
+                if item is None:
+                    self._proc_busy.discard(pid)
+                    return
+            t, value, proc = item
+            out = self._compute(proc, value)
+            self._derived.emit(pid, float(t), out)   # → GUI (QueuedConnection)
+
+    def _on_derived(self, pid, t, out) -> None:
+        proc = self._processors.get(pid)
+        if proc is not None:
+            self._apply_derived(proc, t, out)
+
+    def _apply_derived(self, proc, t, out) -> None:
+        """GUI thread: publish a processor's derived outputs onto the pipeline bus
+        and re-apply their control routing (manager.write creates QThreads → must
+        be the GUI thread, so this is never called off it)."""
+        published = False
+        for port in proc.outputs():
+            sp = self._sources.get(port.key)
+            if sp is not None and not sp.unit and port.unit:
+                sp.unit = port.unit                  # adopt unit once known
+            if port.key in out:
+                dev, _, src = port.key.partition("/")
+                self.data_bus.publish(Reading(dev, src, t, out[port.key]))
+                self._write_routed(port.key, out[port.key])   # derived → control
+                published = True
+        if published:
+            self._schedule_bus_flush()               # deliver to panels (see below)
+
+    def _schedule_bus_flush(self) -> None:
+        """A derived reading published off the live-drain path needs draining so the
+        panels (inline data-bus sinks) render it. The replay bus is drained by the
+        controller on live ticks / re-stream chunks, but an async derived output can
+        land between those — a deferred GUI-thread drain covers that. No-op when the
+        data bus IS the engine (the engine drains itself; we must not steal from it)."""
+        if self.data_bus is not self.engine:
+            QTimer.singleShot(0, self._flush_data_bus)
+
+    def _flush_data_bus(self) -> None:
+        while self.data_bus.drain():
+            pass
 
     def _on_virtual_emit(self, source_key: str, value):
         src = self._sources.get(source_key)

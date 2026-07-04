@@ -52,8 +52,10 @@ class Manifest:
     def widgets(self) -> list: return self.of_role("widget")
 
     def is_compatible(self, api: int = API_VERSION) -> bool:
-        """Exact-match the plugin-API version for now (a strict, honest gate)."""
-        return self.api == api
+        """The SDK surface is additive, so an extension is compatible when it
+        targets THIS api or an older one (its subset still exists). A newer-than-us
+        extension is rejected — it may use exports we don't have yet."""
+        return 1 <= self.api <= api
 
     def whitepaper_path(self, provider: Provider) -> str | None:
         """Absolute path to a provider's white paper, if it exists on disk."""

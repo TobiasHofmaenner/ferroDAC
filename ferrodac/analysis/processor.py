@@ -29,6 +29,10 @@ class Processor:
     label: str = "Processor"     # human label
     accepts: str = "trace"       # input source datatype
     id_prefix: str = "proc"      # id/key prefix (keeps ids stable per kind)
+    # Threading (DESIGN §21.1): process() runs on a platform WORKER thread by
+    # default (a slow analysis can't freeze the app) and MUST be Qt-free. A
+    # processor that must run on the GUI thread sets requires_gui = True.
+    requires_gui: bool = False
 
     def __init__(self, pid: str, input_key: str = None):
         self.id = pid

@@ -16,11 +16,38 @@ EX = os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 def test_plugin_facade_exports():
     import ferrodac.plugin as P
-    assert P.API_VERSION == 1
+    assert P.API_VERSION == 2
     assert (P.FLOAT, P.BOOL, P.TRACE) == ("float", "bool", "trace")
     assert P.DTYPES == frozenset({"float", "bool", "trace"})
     for name in ("Processor", "Port", "Device", "Trace"):    # Qt-free contract bases
         assert getattr(P, name).__name__ == name
+
+
+def test_plugin_facade_exports_driver_vocabulary():
+    """A third-party driver must be writable against ferrodac.plugin ALONE (v2) —
+    without reaching into ferrodac.core internals, which would defeat the api gate."""
+    import ferrodac.plugin as P
+    for name in ("BaseDevice", "Source", "Sink", "SinkKind", "Param", "Option",
+                 "Interface", "Modality", "RateControl", "RateMode", "Status",
+                 "DeviceDescriptor", "CheckResult"):
+        assert hasattr(P, name), f"{name} missing from the SDK"
+    # they resolve to the same objects the in-tree drivers subclass/construct
+    from ferrodac.core.base import BaseDevice
+    from ferrodac.core.device import Source
+    assert P.BaseDevice is BaseDevice and P.Source is Source
+
+
+def test_manifest_api_backward_compatible():
+    """The SDK is additive, so a v1 extension still loads under a v2 host; a
+    newer-than-host api is still rejected."""
+    from ferrodac.extensions import load_manifest
+    from ferrodac.plugin import API_VERSION
+    import tempfile
+    for api, ok in ((1, True), (API_VERSION, True), (API_VERSION + 1, False)):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "ferrodac-extension.toml"), "w") as fh:
+            fh.write(f'[extension]\nname="x"\napi={api}\n')
+        assert load_manifest(d).is_compatible() is ok
 
 
 def test_manifest_parse_example():
@@ -70,7 +97,7 @@ def test_example_processor_against_facade():
 
 
 def test_trace_xarray_roundtrip():
-    xr = pytest.importorskip("xarray")
+    pytest.importorskip("xarray")
     from ferrodac.core.trace import Trace
     t = Trace(x=np.linspace(1, 10, 10), y=np.arange(10.0), x_label="mz", x_unit="amu",
               y_label="Intensity", y_unit="A")

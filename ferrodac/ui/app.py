@@ -2269,8 +2269,12 @@ class MainWindow(QMainWindow):
         # the dashboard renders through the replay playback bus when available,
         # else straight off the engine (data plane disabled) — identical live.
         data_bus = self.replay.bus if self.replay is not None else engine
-        self.dashboard = Dashboard(self.workspace, engine, manager, data_bus=data_bus,
-                                   historic_sources=self._historic_sources)
+        self.dashboard = Dashboard(
+            self.workspace, engine, manager, data_bus=data_bus,
+            historic_sources=self._historic_sources,
+            # heavy processors run off-GUI while live, inline while parked (§21.3)
+            is_live=(lambda: self.time_context.following)
+            if self.time_context is not None else None)
         self.dashboard.add_panel("chart")
 
         # networking: publish to / consume from a hub (optional, needs grpcio)

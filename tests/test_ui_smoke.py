@@ -1022,6 +1022,83 @@ def test_processor_node_routing(qapp):
         w.close()
 
 
+def _bind_fake_processor(db, requires_gui=False):
+    """Inject a processor bound to 'dev/src' that records its run thread and maps
+    v → v+1 on the derived source 'fp/fp1/out'. Returns (proc, seen-dict)."""
+    import threading
+
+    from ferrodac.analysis.processor import Port
+    from ferrodac.ui.workspace import SourcePort
+    seen = {}
+
+    class FakeProc:
+        id = "fp1"
+        input_key = "dev/src"
+
+        def __init__(self):
+            self.requires_gui = requires_gui
+
+        def process(self, value):
+            seen["thread"] = threading.get_ident()
+            return {"fp/fp1/out": value + 1.0}
+
+        def outputs(self):
+            return [Port("fp/fp1/out", "out", "float", "")]
+
+    proc = FakeProc()
+    db._processors["fp1"] = proc
+    db._sources["fp/fp1/out"] = SourcePort(
+        "fp/fp1/out", "out", "float", "", "", "virtual")
+    return proc, seen
+
+
+def test_processor_runs_off_gui_when_live(qapp):
+    """A scalar reading dispatches to a bound processor (float/bool processors are
+    first-class now — was trace-only), and while live process() runs OFF the GUI
+    thread, its derived output landing back on the pipeline bus (DESIGN §21.3)."""
+    import threading
+    import time
+
+    from ferrodac.core.reading import Reading
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        db._is_live = lambda: True
+        _proc, seen = _bind_fake_processor(db)
+        got = []
+        db.data_bus.subscribe(lambda b: got.extend(b))
+        db.data_bus.publish(Reading("dev", "src", time.time(), 5.0))  # a SCALAR
+        db.data_bus.drain()                          # inline dispatch → offload
+
+        deadline = time.time() + 5
+        while time.time() < deadline and not any(r.key == "fp/fp1/out" for r in got):
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert seen.get("thread") and seen["thread"] != threading.get_ident()
+        assert any(r.key == "fp/fp1/out" and r.value == 6.0 for r in got)
+    finally:
+        w.close()
+
+
+def test_processor_runs_inline_when_parked_or_requires_gui(qapp):
+    """Parked (replay) → process() runs INLINE on the GUI thread so the re-streamed
+    slice's derived outputs stay complete/ordered; same for requires_gui."""
+    import threading
+    import time
+
+    from ferrodac.core.reading import Reading
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        db._is_live = lambda: False                  # parked
+        _proc, seen = _bind_fake_processor(db)
+        db.data_bus.publish(Reading("dev", "src", time.time(), 5.0))
+        db.data_bus.drain()                          # inline dispatch → inline compute
+        assert seen.get("thread") == threading.get_ident()   # ran on the GUI thread
+    finally:
+        w.close()
+
+
 @pytest.mark.ui
 def test_mainwindow_with_extensions(qapp, tmp_path):
     """The startup seam: MainWindow takes an ExtensionManager and the Extensions menu

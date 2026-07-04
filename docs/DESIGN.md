@@ -1512,8 +1512,20 @@ returns a callable `Subscription` (back-compat: calling it unsubscribes).
   `processEvents` anywhere. First consumers: park/scrub re-stream (with a GUI-paced
   chunk pump + a generation counter so a superseded re-stream can never smear stale
   readings into a newer view) and stop-recording/crash-recovery CSV export.
-- **Processors** then move to a worker lane on the playback bus with exactly one GUI
-  marshal (derived control writes reach `manager.write`, which creates QThreads →
-  QueuedConnection signal), and the lane/mode constants + threading doc are published
-  through `ferrodac.plugin` (`Widget.feed` guaranteed GUI; `Processor.process` default
-  worker with a `requires_gui = True` opt-out).
+- **Processors** run OFF the GUI thread while live (DONE): `Dashboard._run_processors`
+  offloads `process()` to a worker pool with at-most-one-in-flight per processor
+  (conflate — the latest input wins, so a slow analysis like the gas Monte-Carlo can
+  never freeze acquisition); results marshal back via a `_derived` QueuedConnection
+  signal where the derived reading is published + control-routed (that reaches
+  `manager.write` → QThreads → must be the GUI thread). During a PARKED re-stream they
+  run inline (so a replayed slice's derived outputs stay complete/ordered), and a
+  processor may force inline with `requires_gui = True`. Scalars/bools dispatch to
+  processors too now (a float/bool processor is a first-class plugin), not only traces.
+- **The SDK contract is published** (DONE): `ferrodac.plugin` (API_VERSION 2, additive;
+  `manifest.is_compatible` = `api <= host`) exports the full driver vocabulary
+  (`BaseDevice`, `Source`, `Sink`, `SinkKind`, `Param`, `Option`, `Interface`,
+  `Modality`, `RateControl`, `RateMode`, `Status`, `DeviceDescriptor`) so a third-party
+  driver never reaches into `ferrodac.core`, plus the threading model in the module
+  docstring: `Widget.feed` guaranteed GUI; `Processor.process` default worker with the
+  `requires_gui` opt-out; driver `_read`/`_connect`/`_write` on the device's own
+  threads. All Qt-free imports so a driver/processor-only plugin stays Qt-free.
