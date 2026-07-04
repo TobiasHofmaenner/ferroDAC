@@ -114,7 +114,6 @@ class MainWindow(QMainWindow):
         self._tasks = TaskRunner(self)
         set_default_runner(self._tasks)    # reachable by dialogs deep in the tree
         self._gui_bridge = GuiBridge(self)
-        self._rec_start_mid = None         # the open REC marker while recording
 
         # durable store: persist EVERYTHING continuously (§7.4) so data survives a
         # restart and a span can be recorded retroactively. Degrades to the RAM
@@ -175,6 +174,16 @@ class MainWindow(QMainWindow):
             is_live=(lambda: self.time_context.following)
             if self.time_context is not None else None)
         self.dashboard.add_panel("chart")
+
+        # recording lifecycle (start/stop span → auto-export, crash recovery) lives
+        # in a Qt-free, testable controller; the shell supplies the collaborators.
+        from ..core.recording import RecordingController
+        self._recording = RecordingController(
+            markers=self.dashboard.markers, resolver=self.resolver,
+            store_writer=self.store_writer, run_export=self._run_recording_export,
+            runs_dir=self._runs_dir, export_sources=self.dashboard.export_sources,
+            on_status=lambda msg, timeout=0: self.statusBar().showMessage(msg, timeout),
+            on_saved=self._on_recording_saved, commit=self._commit_project)
 
         # networking: publish to / consume from a hub (optional, needs grpcio)
         self.hub = HubController(
@@ -1728,23 +1737,23 @@ class MainWindow(QMainWindow):
         return out
 
     def _toggle_record(self):
-        """A recording is just a marked SPAN over the always-on durable store.
-        Start opens a REC marker (data is already being persisted); Stop closes it
-        and auto-exports the span as a bundle from the resolver/Zarr."""
-        ms = self.dashboard.markers
-        if self._rec_start_mid is None:                 # start
-            self._rec_start_mid = ms.add(time.time(), kind=RECORDING, label="REC",
-                                         comment="recording…")
-            self.record_action.setText("■ Stop")
-            self.statusBar().showMessage("● Recording — persisting to the store")
-        else:                                            # stop → finalise + export
-            mid, self._rec_start_mid = self._rec_start_mid, None
-            self.record_action.setText("● Record")
-            m = ms.get(mid)
-            t0 = m.t if m else time.time()
-            t1 = time.time()
-            ms.update(mid, t_end=t1)                      # close the region
-            self._finalize_recording(mid, t0, t1)
+        """Start/stop a recording — the lifecycle lives in RecordingController; here
+        we just flip the toolbar button to match."""
+        state = self._recording.toggle()
+        self.record_action.setText("■ Stop" if state == "started" else "● Record")
+
+    def _run_recording_export(self, dest, sources, t0, t1, *, flush, exclusive,
+                              on_ok, on_fail):
+        """Adapter: the RecordingController's export runner → the shell's task-backed
+        export_window helper (off the GUI thread)."""
+        self._export_task(dest, sources, t0, t1, title="Saving recording",
+                          on_ok=on_ok, on_fail=on_fail, flush=flush,
+                          exclusive=exclusive)
+
+    def _on_recording_saved(self, mid, dest, n):
+        self._refresh_explorer()                   # the new recording card shows up
+        self.statusBar().showMessage(
+            f"■ Saved recording: {n} source(s) → {dest}", 8000)
 
     def _export_task(self, dest, sources, t0, t1, *, title, on_ok,
                      on_fail=None, flush=False, exclusive="") -> None:
@@ -1781,58 +1790,13 @@ class MainWindow(QMainWindow):
             exclusive=exclusive or f"export:{dest}", on_busy="reject",
             on_done=on_ok, on_error=fail)
 
-    def _finalize_recording(self, mid, t0, t1) -> None:
-        """Materialise the span as a self-describing bundle (export_window via the
-        resolver — RAM + store + hub) on a background Task. The durable Zarr store
-        IS the crash-safe data, so the export never blocks and never risks loss."""
-        if self.resolver is None:
-            return
-        sources = self.dashboard.export_sources()
-        dest = os.path.join(self._runs_dir(),
-                            "run_" + time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(t0)))
-
-        def ok(man):
-            n = len(man.get("sources", []))
-            self.dashboard.markers.update(mid, run_dir=dest, comment=f"{n} sources")
-            self._refresh_explorer()               # the new recording card shows up
-            self.statusBar().showMessage(
-                f"■ Saved recording: {n} source(s) → {dest}", 8000)
-            self._commit_project(f"Recorded {os.path.basename(dest)}")   # §8.2 commit
-
-        def fail(msg):
-            self.statusBar().showMessage(f"Recording kept; export failed: {msg}", 8000)
-
-        self.statusBar().showMessage("■ Saving recording in the background…", 4000)
-        self._export_task(dest, sources, t0, t1, title="Saving recording",
-                          on_ok=ok, on_fail=fail, flush=True,
-                          exclusive=f"export:{mid}")
-
     def _recover_open_recordings(self) -> None:
-        """A recording interrupted by a crash survives as an OPEN REC marker
-        (t_end=None) in the restored session — the data is already in the store.
-        Finalise the span (t_end = the last data we have) and export the bundle."""
-        ms = self.dashboard.markers
-        open_recs = [m for m in ms.all() if m.kind == RECORDING and m.t_end is None]
-        for m in open_recs:
-            t_end = self._last_data_time(m.t) or m.t
-            ms.update(m.id, t_end=t_end)
-            self._finalize_recording(m.id, m.t, t_end)
-        if open_recs:
+        """Finalise any recording interrupted by a crash (delegated to the
+        controller); tell the user how many were recovered."""
+        n = self._recording.recover_open()
+        if n:
             self.statusBar().showMessage(
-                f"Recovered {len(open_recs)} recording(s) interrupted by a crash.", 8000)
-
-    def _last_data_time(self, t0):
-        """Latest stored sample time in [t0, now] across sources (for finalising a
-        crashed recording's end). None if nothing was stored."""
-        if self.resolver is None:
-            return None
-        now = time.time()
-        latest = None
-        for key in self.dashboard.export_sources():
-            for a, b in self.resolver.coverage(key):
-                if a <= now and b >= t0:
-                    latest = min(b, now) if latest is None else max(latest, min(b, now))
-        return latest
+                f"Recovered {n} recording(s) interrupted by a crash.", 8000)
 
     def _on_tick(self):
         self.sources_panel.update_live(self.engine.latest())
@@ -2260,9 +2224,8 @@ class MainWindow(QMainWindow):
             self.dashboard.set_time_window(*self.time_context.window)
 
     def closeEvent(self, event):  # noqa: N802
-        if self._rec_start_mid is not None:    # close the open recording cleanly
-            self.dashboard.markers.update(self._rec_start_mid, t_end=time.time())
-            self._rec_start_mid = None         # store_writer.stop() below flushes it
+        if getattr(self, "_recording", None) is not None:
+            self._recording.close_open_marker()   # store_writer.stop() below flushes it
         if self._autosave_on:
             self._do_autosave()
             self._save_global_tags()        # flush the global tag catalog
