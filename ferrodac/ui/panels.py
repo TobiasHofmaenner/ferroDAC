@@ -722,6 +722,11 @@ class ChartPanel(Panel):
         for key, buf in self._buf.items():
             buf.clear()
             self._curves[key].setData([], [])
+        for lo, hi, _fill, _vb in self._bands.values():
+            lo.setData([], [])                # clear σ bands too, else a source with no
+            hi.setData([], [])                # data in the new window keeps a stale band
+        #                                       drawn as a horizontal span (the re-stream
+        #                                       only repaints bands for sources it feeds)
         self._sync_markers()                  # reposition tags at the new time base
         self.plot.enableAutoRange()           # a freshly-loaded slice auto-fits once;
         #                                       then the user's zoom/pan is respected

@@ -135,6 +135,21 @@ def test_uncertainty_bands_toggle_convert_and_scale(qapp):
     assert "g/p" not in p._bands
 
 
+def test_clear_history_clears_stale_bands(qapp):
+    """clear_history (a window change / re-stream) must empty the σ bands, not just the
+    curves — else a source with no data in the new window keeps its old band drawn as a
+    horizontal span across the window (the range-select artifact)."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False, "show_sigma": True})
+    p.add_source("g/p", _src("P", "mbar"))
+    p.feed([types.SimpleNamespace(key="g/p", value=10.0, status=0, t=1.0, sigma=0.5),
+            types.SimpleNamespace(key="g/p", value=11.0, status=0, t=2.0, sigma=0.5)])
+    lo, hi, _f, _v = p._bands["g/p"]
+    assert lo.getData()[1] is not None and len(lo.getData()[1]) == 2
+    p.clear_history()
+    assert len(lo.getData()[1] or []) == 0 and len(hi.getData()[1] or []) == 0
+
+
 def test_band_uses_inline_sigma_from_reading(qapp):
     """A processor output that CREATES uncertainty carries σ inline on the Reading; the
     chart draws the band from it — no provider needed (that's the gas-fit path)."""
