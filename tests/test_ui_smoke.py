@@ -15,6 +15,17 @@ pytest.importorskip("qtpy")
 pytest.importorskip("pyqtgraph")
 
 
+def _wait_tasks(w, qapp, timeout=10.0):
+    """Pump the event loop until the window's background TaskRunner is idle (git
+    push/clone, exports, backups now run as tasks — §21.3)."""
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline and w._tasks.active():
+        qapp.processEvents()
+        time.sleep(0.01)
+    qapp.processEvents()
+
+
 def _mainwindow(qapp):
     import tempfile
     from ferrodac.core.engine import Engine
@@ -893,6 +904,7 @@ def test_push_on_share(qapp, tmp_path):
         rec2["git_remote"] = str(bare)
         w._project_mgr.apply_hub_record(rec2)
         w._on_hub_projects_changed()                       # → push the queued content
+        _wait_tasks(w, qapp)                                # push runs in the background
 
         assert local.id not in w._pending_share            # pushed + cleared
         files = subprocess.run(["git", "-C", str(bare), "ls-tree", "-r", "--name-only", "HEAD"],
@@ -930,6 +942,7 @@ def test_clone_hub_project(qapp, tmp_path, monkeypatch):
         monkeypatch.setattr(QFileDialog, "getExistingDirectory",
                             staticmethod(lambda *a, **k: str(parent)))
         w._clone_hub_project(sid)
+        _wait_tasks(w, qapp)                                      # clone runs in the background
         dest = parent / "Shared"
         assert (dest / "project.json").exists()                  # cloned working copy
         assert w._project_mgr.active is not None and not w._project_mgr.active.is_hub

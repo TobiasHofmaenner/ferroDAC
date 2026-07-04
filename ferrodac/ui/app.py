@@ -3018,17 +3018,22 @@ class MainWindow(QMainWindow):
             if not url:
                 continue                                  # not provisioned (yet / native dial)
             self._pending_share.pop(pid, None)
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            QApplication.processEvents()
-            try:
+
+            def work(ctx, path=path, url=url):
                 repo = ProjectRepo(path)
                 repo.set_remote(url)
-                ok, msg = repo.push()
-            finally:
-                QApplication.restoreOverrideCursor()
-            self.statusBar().showMessage(
-                "Pushed the shared project to its repo — collaborators can clone it now."
-                if ok else f"Couldn't push the shared project to its repo: {msg}", 8000)
+                return repo.push()                        # (ok, msg)
+
+            self._tasks.run(
+                work, title="Publishing shared project",
+                why="Uploading the project's history so collaborators can clone it",
+                exclusive=f"push:{path}", on_busy="reject",
+                on_done=lambda res: self.statusBar().showMessage(
+                    "Pushed the shared project to its repo — collaborators can clone it now."
+                    if res[0] else
+                    f"Couldn't push the shared project to its repo: {res[1]}", 8000),
+                on_error=lambda m: self.statusBar().showMessage(
+                    f"Couldn't push the shared project to its repo: {m}", 8000))
 
     def _republish_active_if_hub(self) -> None:
         """A local edit to a hub project — bump its version and push the record up."""
@@ -3053,19 +3058,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Folder exists",
                                 f"{dest} already exists — choose another folder.")
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        QApplication.processEvents()
-        try:
-            ProjectRepo.clone(url, dest)
-        except Exception as exc:                        # noqa: BLE001
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "Clone failed", str(exc))
-            return
-        QApplication.restoreOverrideCursor()
-        local = self._project_mgr.track(dest)
-        self._refresh_explorer()
-        self._switch_project(local.id)
-        self.statusBar().showMessage(f"Cloned “{p.name}” → {dest}", 6000)
+        name = p.name
+        self.statusBar().showMessage(f"Cloning “{name}” in the background…", 4000)
+
+        def done(_r):
+            local = self._project_mgr.track(dest)     # adopt the clone (GUI thread)
+            self._refresh_explorer()
+            self._switch_project(local.id)
+            self.statusBar().showMessage(f"Cloned “{name}” → {dest}", 6000)
+
+        self._tasks.run(
+            lambda ctx: ProjectRepo.clone(url, dest),
+            title="Cloning project", why=f"Checking out “{name}” from {url}",
+            exclusive=f"clone:{dest}", on_busy="reject",
+            on_done=done,
+            on_error=lambda m: QMessageBox.warning(self, "Clone failed", m))
 
     def _reveal_path(self, path: str) -> None:
         from qtpy.QtCore import QUrl
@@ -4166,7 +4173,6 @@ class MainWindow(QMainWindow):
         """File ▸ Back up project — write a self-contained .zip of the active project
         (readable metadata + an invisible git history bundle) to a user-chosen path.
         Read-only by being a zip; measurements are not included (DESIGN §20.2)."""
-        from qtpy.QtWidgets import QApplication
         p = self._project_mgr.active if self._project_mgr else None
         if p is None:
             self.statusBar().showMessage("No active project to back up.", 5000)
@@ -4183,15 +4189,15 @@ class MainWindow(QMainWindow):
             path += ".zip"
         s.setValue("backup/dir", os.path.dirname(path))
         from ..core.archive import archive_project
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            archive_project(p, path)
-        except Exception as exc:                       # noqa: BLE001
-            self.statusBar().showMessage(f"Backup failed: {exc}", 8000)
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-        self.statusBar().showMessage(f"Backed up “{p.name}” → {path}", 8000)
+        self.statusBar().showMessage(f"Backing up “{p.name}” in the background…", 4000)
+        self._tasks.run(
+            lambda ctx: archive_project(p, path),
+            title="Backing up project",
+            why=f"Zipping “{p.name}” (metadata + history bundle) to {path}",
+            exclusive=f"backup:{path}", on_busy="reject",
+            on_done=lambda _r: self.statusBar().showMessage(
+                f"Backed up “{p.name}” → {path}", 8000),
+            on_error=lambda m: self.statusBar().showMessage(f"Backup failed: {m}", 8000))
 
     def _set_hub_backup_folder(self) -> None:
         """File ▸ Set hub backup folder — pick where the hub mirrors the active project
@@ -4211,7 +4217,6 @@ class MainWindow(QMainWindow):
 
     def _download_project_copy(self) -> None:
         """File ▸ Download project copy — fetch a self-contained zip from the hub."""
-        from qtpy.QtWidgets import QApplication
         client = self.hub.backup if getattr(self, "hub", None) else None
         p = self._project_mgr.active if self._project_mgr else None
         if client is None or p is None:
@@ -4225,15 +4230,16 @@ class MainWindow(QMainWindow):
             return
         if not path.lower().endswith(".zip"):
             path += ".zip"
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            client.download(p.id, path)
-        except Exception as exc:                       # noqa: BLE001
-            self.statusBar().showMessage(f"Download failed: {exc}", 8000)
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-        self.statusBar().showMessage(f"Downloaded “{p.name}” → {path}", 8000)
+        pid = p.id
+        self.statusBar().showMessage(f"Downloading “{p.name}” in the background…", 4000)
+        self._tasks.run(
+            lambda ctx: client.download(pid, path),
+            title="Downloading project copy",
+            why=f"Fetching a self-contained zip of “{p.name}” from the hub → {path}",
+            exclusive=f"download:{path}", on_busy="reject",
+            on_done=lambda _r: self.statusBar().showMessage(
+                f"Downloaded “{p.name}” → {path}", 8000),
+            on_error=lambda m: self.statusBar().showMessage(f"Download failed: {m}", 8000))
 
     @staticmethod
     def _remember(path: str) -> None:

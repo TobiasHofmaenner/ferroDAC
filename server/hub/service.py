@@ -257,65 +257,95 @@ def _chunk_from_pb(req) -> dict:
 
 
 class StoreServicer(rpc.StoreServicer):
+    """Durable historic data. Every RPC does blocking Zarr disk I/O + a Python
+    float-by-float protobuf conversion, so it runs in a THREAD-POOL executor (like
+    BackupServicer) — otherwise one slow historic Query stalls the single event
+    loop that also carries every live stream. The hub's ZarrStore serializes
+    concurrent access behind its own RLock (DESIGN §21.2)."""
+
     def __init__(self, store):
         self.store = store
+
+    @staticmethod
+    async def _run(fn):
+        return await asyncio.get_running_loop().run_in_executor(None, fn)
 
     async def GetSyncState(self, request, context):  # noqa: N802
         if self.store is None:
             return pb.SyncState()
-        epochs = [pb.EpochLen(source=s, epoch=e, n=n)
-                  for (s, e), n in self.store.epoch_lengths().items()]
-        return pb.SyncState(epochs=epochs)
+
+        def work():
+            return pb.SyncState(epochs=[
+                pb.EpochLen(source=s, epoch=e, n=n)
+                for (s, e), n in self.store.epoch_lengths().items()])
+        return await self._run(work)
 
     async def PushChunk(self, request, context):  # noqa: N802
         if self.store is None:
             return pb.ChunkAck(n=0)
-        n = self.store.apply_chunk(request.source, request.epoch, _chunk_from_pb(request))
-        return pb.ChunkAck(n=n)
+        chunk = _chunk_from_pb(request)
+
+        def work():
+            return pb.ChunkAck(n=self.store.apply_chunk(
+                request.source, request.epoch, chunk))
+        return await self._run(work)
 
     async def ListSources(self, request, context):  # noqa: N802
         if self.store is None:
             return pb.Sources()
-        out = []
-        for key in self.store.sources():
-            name, unit, dtype = self.store.source_meta(key)
-            out.append(pb.SourceInfo(key=key, name=name, unit=unit, dtype=dtype))
-        return pb.Sources(sources=out)
+
+        def work():
+            out = []
+            for key in self.store.sources():
+                name, unit, dtype = self.store.source_meta(key)
+                out.append(pb.SourceInfo(key=key, name=name, unit=unit, dtype=dtype))
+            return pb.Sources(sources=out)
+        return await self._run(work)
 
     async def GetCoverage(self, request, context):  # noqa: N802
-        ivs = []
-        if self.store is not None:
+        if self.store is None:
+            return pb.Coverage()
+
+        def work():
             try:
-                ivs = [pb.Interval(t0=a, t1=b)
-                       for (a, b) in self.store.coverage(request.source)]
+                return pb.Coverage(intervals=[
+                    pb.Interval(t0=a, t1=b)
+                    for (a, b) in self.store.coverage(request.source)])
             except Exception:                       # noqa: BLE001  unknown source
-                pass
-        return pb.Coverage(intervals=ivs)
+                return pb.Coverage()
+        return await self._run(work)
 
     async def Query(self, request, context):  # noqa: N802
-        x = y = []
-        if self.store is not None:
+        if self.store is None:
+            return pb.Series()
+
+        def work():
             try:
                 qx, qy = self.store.query(request.source, request.t0, request.t1,
                                           request.max_points or 2000)
-                x, y = [float(v) for v in qx], [float(v) for v in qy]
+                return pb.Series(x=[float(v) for v in qx], y=[float(v) for v in qy])
             except Exception:                       # noqa: BLE001
-                pass
-        return pb.Series(x=x, y=y)
+                return pb.Series()
+        return await self._run(work)
 
     async def ReadRaw(self, request, context):  # noqa: N802
-        t = v = []
-        if self.store is not None:
+        if self.store is None:
+            return pb.RawScalar()
+
+        def work():
             try:
                 rt, rv = self.store.read_raw(request.source, request.t0, request.t1)
-                t, v = [float(x) for x in rt], [float(x) for x in rv]
+                return pb.RawScalar(t=[float(x) for x in rt], v=[float(x) for x in rv])
             except Exception:                       # noqa: BLE001
-                pass
-        return pb.RawScalar(t=t, v=v)
+                return pb.RawScalar()
+        return await self._run(work)
 
     async def ReadRawTrace(self, request, context):  # noqa: N802
-        blocks = []
-        if self.store is not None:
+        if self.store is None:
+            return pb.RawTrace()
+
+        def work():
+            blocks = []
             try:
                 for times, Y, x in self.store.read_raw_trace(
                         request.source, request.t0, request.t1):
@@ -327,7 +357,8 @@ class StoreServicer(rpc.StoreServicer):
                         x=[float(v) for v in np.asarray(x)], m=m))
             except Exception:                       # noqa: BLE001
                 pass
-        return pb.RawTrace(blocks=blocks)
+            return pb.RawTrace(blocks=blocks)
+        return await self._run(work)
 
 
 class BackupServicer(rpc.BackupServicer):

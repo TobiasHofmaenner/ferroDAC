@@ -679,32 +679,44 @@ def _time_binned(scans, t0, t1, rows, hold=True):
                      key=lambda s: s[0])
     if not rows_in:
         return None, 0
-    img = np.full((rows, m), np.nan, np.float32)
+    # Vectorised (DESIGN §21 Tier-1): the old per-scan Python loop did a sliding
+    # np.median AND a full m-wide row copy per scan — 60–70 ms at the 8000-scan cap,
+    # re-run every 500 ms tick. Here the median is one strided pass and the row copy
+    # is a single gather; only the cheap integer owner-fill stays a loop (it fixes the
+    # last-scan-wins overwrite order exactly, so the image is byte-identical).
+    n = len(rows_in)
     span = t1 - t0
-    ts = np.array([t for t, _ in rows_in])
-    diffs = np.diff(ts) if len(ts) > 1 else None
+    ts = np.fromiter((t for t, _ in rows_in), dtype="f8", count=n)
+    Y = np.asarray([y for _, y in rows_in], dtype=np.float32)      # (n, m)
+    img = np.full((rows, m), np.nan, np.float32)
+    i0 = np.clip(((ts - t0) / span * rows).astype(np.int64), 0, rows - 1)
+    if not hold:
+        img[i0] = Y                                # one row per scan (last wins on dup)
+        return img, m
     _K = 8          # half-window of neighbouring gaps for the LOCAL cadence
-
-    def _bin(t):
-        return min(rows - 1, max(0, int((t - t0) / span * rows)))
-
-    for j, (t, y) in enumerate(rows_in):
-        i0 = _bin(t)
-        if not hold:
-            img[i0] = y                            # one row per scan (bare data points)
-            continue
-        t_next = rows_in[j + 1][0] if j + 1 < len(rows_in) else t1
-        if diffs is not None:
-            # Hold across a NORMAL gap, but a gap >> the LOCAL scan cadence is a
-            # real outage (device offline) → leave it blank. The cadence is a
-            # SLIDING window of nearby inter-scan gaps (the rate can change over
-            # time); a centered median is robust to a lone outage yet tracks a
-            # genuine rate change.
-            a, b = max(0, j - _K), min(len(diffs), j + _K)
-            cad = float(np.median(diffs[a:b])) if b > a else span
-            t_next = min(t_next, t + max(3.0 * cad, 1e-9))
-        i1 = max(i0 + 1, min(rows, int((t_next - t0) / span * rows)))
-        img[i0:i1] = y
+    t_next = np.empty(n, dtype="f8")
+    t_next[-1] = t1
+    if n > 1:
+        t_next[:-1] = ts[1:]                       # hold until the next scan…
+        diffs = np.diff(ts)
+        # …but cap the hold at 3× the LOCAL scan cadence (a bigger gap = a real
+        # outage → leave it blank). Cadence = median of the ±_K nearby gaps,
+        # computed as one strided pass (edge-padded ≈ the old truncated window).
+        win = np.lib.stride_tricks.sliding_window_view(
+            np.pad(diffs, (_K, _K), mode="edge"), 2 * _K)          # (n, 2K)
+        cad = np.median(win, axis=1)
+        # interior windows are exact; the padded ≤2K edge scans used replication
+        # instead of truncation — recompute just those exactly (cheap, keeps the
+        # image byte-identical to the per-scan version).
+        for j in [*range(min(_K, n)), *range(max(_K, n - _K), n)]:
+            cad[j] = np.median(diffs[max(0, j - _K):min(diffs.size, j + _K)])
+        t_next = np.minimum(t_next, ts + np.maximum(3.0 * cad, 1e-9))
+    i1 = np.clip(((t_next - t0) / span * rows).astype(np.int64), i0 + 1, rows)
+    owner = np.full(rows, -1, dtype=np.int64)
+    for a, b, j in zip(i0.tolist(), i1.tolist(), range(n)):
+        owner[a:b] = j                             # later scans overwrite (sample-hold)
+    covered = owner >= 0
+    img[covered] = Y[owner[covered]]               # one gather for the m-wide copy
     return img, m
 
 
