@@ -50,10 +50,12 @@ class Processor:
     def process(self, value) -> dict:
         """Map one input value to ``{output_key: value}`` to publish. A processor that
         CREATES uncertainty (e.g. a fit) may add a reserved ``"_sigma"`` entry mapping
-        output keys to their 1σ — ``{"_sigma": {output_key: sigma}}`` — and the framework
-        attaches it inline to the published Reading so charts draw a band (DESIGN §19.0).
-        It rides IN this dict (not via instance state) so it can't race the offload
-        worker; ``_sigma`` is not itself an output port."""
+        output keys to their 1σ — ``{"_sigma": {output_key: sigma}}`` where ``sigma``
+        is a float (symmetric ±σ) or a ``(σ_lo, σ_hi)`` pair (asymmetric, e.g. a fit
+        folded against a physical bound — §19.7) — and the framework attaches it inline
+        to the published Reading so charts draw a band (DESIGN §19.0). It rides IN this
+        dict (not via instance state) so it can't race the offload worker; ``_sigma``
+        is not itself an output port."""
         raise NotImplementedError
 
     def units_out(self, input_unit: str) -> str:

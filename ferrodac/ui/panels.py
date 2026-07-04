@@ -553,24 +553,49 @@ class ChartPanel(Panel):
             return
         # Inline σ (a processor output that CREATES uncertainty — the gas fit) wins;
         # otherwise the model provider (device channels reconstruct σ from their model).
+        # Inline σ may be asymmetric (fit folded at a physical bound, §19.7); model σ
+        # is always symmetric.
         if buf.has_sigma:
-            sig = buf.sigma
+            s_lo, s_hi = buf.sigma_lo, buf.sigma_hi
         elif self._sigma_provider is not None:
             sig = self._sigma_provider(key, buf.x, buf.y)
+            if sig is None:
+                lo.setData([], [])
+                hi.setData([], [])
+                return
+            s_lo = s_hi = np.asarray(sig, dtype=float)
         else:
-            sig = None
-        if sig is None:
             lo.setData([], [])
             hi.setData([], [])
             return
-        sig = np.asarray(sig, dtype=float)
-        lo_y = buf.y - self._k * sig
-        hi_y = buf.y + self._k * sig
-        if self._logy:                        # a log axis can't show a ≤0 lower bound
-            lo_y = np.where(lo_y > 0, lo_y, np.nan)
+        lo_y = buf.y - self._k * np.asarray(s_lo, dtype=float)
+        hi_y = buf.y + self._k * np.asarray(s_hi, dtype=float)
+        if buf.has_sigma:
+            # Inline σ is a fit against a physical x≥0 bound (§19.7): its 1σ edge
+            # is pre-clamped at 0, but k>1 would scale straight past the floor.
+            lo_y = np.maximum(lo_y, 0.0)
         conv = self._meta[key][2]
         if conv is not None:
             lo_y, hi_y = conv(lo_y), conv(hi_y)
+        if self._logy:
+            # A log axis can't show a ≤0 lower edge — but NaN-ing ONLY the lower
+            # curve desynchronises FillBetweenItem's subpath pairing (the band
+            # vanishes or bridges gaps — §19.7). Clamp to a floor safely under
+            # the drawn data instead, and gap BOTH curves where the upper edge
+            # itself is unplottable.
+            pos = hi_y > 0
+            if not pos.any():
+                lo.setData([], [])
+                hi.setData([], [])
+                return
+            floor = float(np.min(hi_y[pos])) * 1e-2
+            lo_y = np.where(lo_y > 0, lo_y, floor)
+            lo_y = np.where(pos, lo_y, np.nan)
+            hi_y = np.where(pos, hi_y, np.nan)
+        bad = ~(np.isfinite(lo_y) & np.isfinite(hi_y))    # σ gaps: break BOTH curves
+        if bad.any():                                     # at the same samples so the
+            lo_y = np.where(bad, np.nan, lo_y)            # fill pairs its subpaths
+            hi_y = np.where(bad, np.nan, hi_y)
         lo.setData(buf.x, lo_y, connect="finite")
         hi.setData(buf.x, hi_y, connect="finite")
 
@@ -656,13 +681,20 @@ class ChartPanel(Panel):
             # log Y needs strictly-positive values; a linear axis accepts any finite one
             ok = (r.status == 0 and r.value == r.value
                   and (r.value > 0 or not self._logy))
-            tx, ty, ts = touched.setdefault(r.key, ([], [], []))
+            tx, ty, tlo, thi = touched.setdefault(r.key, ([], [], [], []))
             tx.append(self._x(r.t))
             ty.append(r.value if ok else float("nan"))
             s = getattr(r, "sigma", None)         # inline σ from an uncertainty-creating
-            ts.append(float(s) if (ok and s is not None and s == s) else float("nan"))
-        for key, (tx, ty, ts) in touched.items():   # processor (e.g. the gas fit)
-            self._buf[key].append(tx, ty, ts)
+            if ok and s is not None:              # processor: scalar or (σ_lo, σ_hi)
+                s_lo, s_hi = (s if isinstance(s, (tuple, list)) and len(s) == 2
+                              else (s, s))
+                tlo.append(float(s_lo) if s_lo == s_lo else float("nan"))
+                thi.append(float(s_hi) if s_hi == s_hi else float("nan"))
+            else:
+                tlo.append(float("nan"))
+                thi.append(float("nan"))
+        for key, (tx, ty, tlo, thi) in touched.items():   # e.g. the gas fit
+            self._buf[key].append(tx, ty, (tlo, thi))
             self._set_curve_data(key)
 
     def clear_history(self):
@@ -2033,13 +2065,23 @@ class _BarsView(QWidget):
         lay.addWidget(self.plot)
 
     def set_bars(self, labels, heights, errors=None, title="", ylabel=None):
+        """``errors`` is a per-bar sequence for symmetric ±err, or an ``(lo, hi)``
+        pair of sequences for asymmetric errors (e.g. the gas fit's folded
+        bootstrap, §19.7). NaN (no information) draws no whisker."""
         n = len(labels)
         x = np.arange(n, dtype=float)
         h = np.asarray(heights, dtype=float) if n else np.array([])
         self._bars.setOpts(x=x, height=h, width=0.6)
         if errors is not None and len(errors):
-            e = np.asarray(errors, dtype=float)
-            self._err.setData(x=x, y=h, top=e, bottom=np.minimum(e, h), beam=0.25)
+            if isinstance(errors, tuple) and len(errors) == 2:
+                e_lo = np.asarray(errors[0], dtype=float)
+                e_hi = np.asarray(errors[1], dtype=float)
+            else:
+                e_lo = e_hi = np.asarray(errors, dtype=float)
+            e_lo = np.nan_to_num(e_lo, nan=0.0)          # no info → no whisker
+            e_hi = np.nan_to_num(e_hi, nan=0.0)
+            self._err.setData(x=x, y=h, top=e_hi, bottom=np.minimum(e_lo, h),
+                              beam=0.25)
         else:
             self._err.setData(x=np.array([]), y=np.array([]))
         short = [s if len(s) <= 18 else s[:17] + "…" for s in labels]
@@ -2201,13 +2243,37 @@ class CompositionPanel(Panel):
         if self._proc_id is None or self._get is None:
             return
         a = self._get(self._proc_id)
-        if a is None or not any(
-                r.key == self._src_key and isinstance(r.value, Trace)
-                and not r.partial for r in batch):
+        if a is None:
+            return
+        # Redraw when the FIT RESULTS land (the derived gas/<id>/<n> readings) —
+        # NOT when the raw spectrum does: the fit runs on an offload worker, so at
+        # raw-trace time the analyzer still holds the PREVIOUS scan (§19.7: bars
+        # lagged one scan; a session's last scan never displayed). Heights and
+        # whiskers come from the readings themselves — value + inline σ travel
+        # together, race-free; only the title reads analyzer state, which was
+        # written before these readings were published.
+        prefix = f"gas/{self._proc_id}/"
+        got = {r.key[len(prefix):]: r for r in batch
+               if r.key.startswith(prefix) and isinstance(r.value, (int, float))}
+        if not got:
             return
         names = a.gas_names
-        heights = [max(0.0, a.last_amounts.get(n, 0.0)) for n in names]
-        errors = [a.last_sd.get(n, 0.0) for n in names] if a.last_sd else None
+        heights, e_lo, e_hi = [], [], []
+        for n in names:
+            r = got.get(n)
+            v = r.value if r is not None else a.last_amounts.get(n, 0.0)
+            heights.append(max(0.0, v))
+            s = getattr(r, "sigma", None) if r is not None else a.last_sd.get(n)
+            if isinstance(s, (tuple, list)) and len(s) == 2:
+                e_lo.append(float(s[0]))
+                e_hi.append(float(s[1]))
+            elif isinstance(s, (int, float)):
+                e_lo.append(float(s))
+                e_hi.append(float(s))
+            else:
+                e_lo.append(float("nan"))     # no information → no whisker
+                e_hi.append(float("nan"))
+        errors = (e_lo, e_hi) if any(v == v for v in e_lo + e_hi) else None
         flags = "   ⚠ unresolved: " + ", ".join(f"{p[0]}↔{p[1]}"
                                                  for p in a.last_degenerate) \
             if a.last_degenerate else ""

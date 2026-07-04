@@ -100,3 +100,24 @@ def test_sigma_stays_aligned_through_trim():
     b.trim(3.0)                                    # drop < 3.0
     np.testing.assert_allclose(b.x, [3.0, 4.0])
     np.testing.assert_allclose(b.sigma, [3.0, 4.0])
+
+
+def test_asymmetric_sigma_lanes():
+    """A (lo, hi) σ pair (a fit folded at a physical bound, §19.7) buffers as two
+    lanes; a plain 1-D σ fills both (symmetric)."""
+    b = CurveBuffer(cap=10)
+    b.append([1.0, 2.0], [10.0, 20.0], ([0.1, 0.2], [1.0, 2.0]))
+    np.testing.assert_allclose(b.sigma_lo, [0.1, 0.2])
+    np.testing.assert_allclose(b.sigma_hi, [1.0, 2.0])
+    assert b.has_sigma
+    b.append([3.0], [30.0], [0.5])                 # symmetric → both lanes equal
+    assert b.sigma_lo[-1] == b.sigma_hi[-1] == 0.5
+
+
+def test_asymmetric_sigma_stays_aligned_through_decimation():
+    b = CurveBuffer(cap=4)
+    xs = [1.0, 2.0, 3.0, 4.0]
+    b.append(xs, xs, ([v / 10 for v in xs], xs))
+    b.append([5.0, 6.0], [5.0, 6.0], ([0.5, 0.6], [5.0, 6.0]))  # overflow → decimate
+    np.testing.assert_allclose(b.sigma_lo, b.x / 10)  # lo[i] still matches x[i]
+    np.testing.assert_allclose(b.sigma_hi, b.x)       # hi[i] still matches x[i]

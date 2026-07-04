@@ -34,7 +34,10 @@ class CurveBuffer:
         c0 = min(_INIT, self.cap)
         self._x = np.empty(c0, dtype="f8")
         self._y = np.empty(c0, dtype="f8")
-        self._s = np.empty(c0, dtype="f8")   # parallel inline σ lane (NaN = none)
+        # parallel inline σ lanes (NaN = none); lo == hi for symmetric sources,
+        # they differ for a fit folded against a physical bound (DESIGN §19.7)
+        self._slo = np.empty(c0, dtype="f8")
+        self._shi = np.empty(c0, dtype="f8")
         self._n = 0
 
     def __len__(self) -> int:
@@ -42,26 +45,36 @@ class CurveBuffer:
 
     def append(self, xs, ys, ss=None) -> None:
         """Append parallel sequences of x (time), y (value), and optional σ (inline
-        uncertainty; absent → NaN). Decimates first if the new points would exceed
-        `cap`, so the buffer never grows past it."""
+        uncertainty; absent → NaN). ``ss`` is a 1-D sequence for symmetric ±σ or a
+        ``(lo, hi)`` pair of sequences for asymmetric errors. Decimates first if the
+        new points would exceed `cap`, so the buffer never grows past it."""
         xs = np.asarray(xs, dtype="f8").ravel()
         ys = np.asarray(ys, dtype="f8").ravel()
         k = min(xs.shape[0], ys.shape[0])
         if k == 0:
             return
-        ss = (np.full(k, np.nan) if ss is None
-              else np.asarray(ss, dtype="f8").ravel())
-        if ss.shape[0] < k:                    # short/absent σ → pad with NaN
-            ss = np.concatenate([ss, np.full(k - ss.shape[0], np.nan)])
+
+        def _lane(a):
+            a = np.full(k, np.nan) if a is None else np.asarray(a, dtype="f8").ravel()
+            if a.shape[0] < k:                 # short/absent σ → pad with NaN
+                a = np.concatenate([a, np.full(k - a.shape[0], np.nan)])
+            return a
+
+        if isinstance(ss, tuple) and len(ss) == 2:
+            slo, shi = _lane(ss[0]), _lane(ss[1])
+        else:
+            slo = shi = _lane(ss)
         if k > self.cap:                       # a single batch bigger than the cap
-            xs, ys, ss, k = xs[-self.cap:], ys[-self.cap:], ss[-self.cap:], self.cap
+            xs, ys, k = xs[-self.cap:], ys[-self.cap:], self.cap
+            slo, shi = slo[-self.cap:], shi[-self.cap:]
             self._n = 0                        # …keep only its most recent tail
         while self._n + k > self.cap:          # would overflow → coarsen to fit
             self._decimate()
         self._reserve(self._n + k)
         self._x[self._n:self._n + k] = xs[:k]
         self._y[self._n:self._n + k] = ys[:k]
-        self._s[self._n:self._n + k] = ss[:k]
+        self._slo[self._n:self._n + k] = slo[:k]
+        self._shi[self._n:self._n + k] = shi[:k]
         self._n += k
 
     def _reserve(self, need: int) -> None:
@@ -74,11 +87,13 @@ class CurveBuffer:
         newcap = min(newcap, self.cap)
         nx = np.empty(newcap, dtype="f8")
         ny = np.empty(newcap, dtype="f8")
-        ns = np.empty(newcap, dtype="f8")
+        nlo = np.empty(newcap, dtype="f8")
+        nhi = np.empty(newcap, dtype="f8")
         nx[:self._n] = self._x[:self._n]
         ny[:self._n] = self._y[:self._n]
-        ns[:self._n] = self._s[:self._n]
-        self._x, self._y, self._s = nx, ny, ns
+        nlo[:self._n] = self._slo[:self._n]
+        nhi[:self._n] = self._shi[:self._n]
+        self._x, self._y, self._slo, self._shi = nx, ny, nlo, nhi
 
     def _decimate(self) -> None:
         """Halve the stored points, keeping the full span (stride 2). Coarsens the
@@ -87,7 +102,8 @@ class CurveBuffer:
         h = (n + 1) // 2
         self._x[:h] = self._x[:n:2]
         self._y[:h] = self._y[:n:2]
-        self._s[:h] = self._s[:n:2]
+        self._slo[:h] = self._slo[:n:2]
+        self._shi[:h] = self._shi[:n:2]
         self._n = h
 
     def trim(self, x_min: float) -> bool:
@@ -99,7 +115,8 @@ class CurveBuffer:
                 m = self._n - i
                 self._x[:m] = self._x[i:self._n]
                 self._y[:m] = self._y[i:self._n]
-                self._s[:m] = self._s[i:self._n]
+                self._slo[:m] = self._slo[i:self._n]
+                self._shi[:m] = self._shi[i:self._n]
                 self._n = m
                 return True
         return False
@@ -116,11 +133,21 @@ class CurveBuffer:
         return self._y[:self._n]
 
     @property
+    def sigma_lo(self):
+        return self._slo[:self._n]
+
+    @property
+    def sigma_hi(self):
+        return self._shi[:self._n]
+
+    @property
     def sigma(self):
-        return self._s[:self._n]
+        """The upper σ lane — identical to the lower one for symmetric sources
+        (which is every source except a fit folded against a physical bound)."""
+        return self._shi[:self._n]
 
     @property
     def has_sigma(self) -> bool:
         """True if any buffered sample carries an inline σ (a processor output that
         CREATES uncertainty). Device channels leave σ NaN and use the model path."""
-        return self._n > 0 and bool(np.isfinite(self._s[:self._n]).any())
+        return self._n > 0 and bool(np.isfinite(self._shi[:self._n]).any())

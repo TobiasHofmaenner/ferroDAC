@@ -1,6 +1,7 @@
 """The gas analyzer publishes its bootstrap fit uncertainty INLINE (DESIGN §19.0 / X3b):
-process() carries a reserved "_sigma" entry mapping each partial-pressure output to its
-1σ, so a chart can draw a band. Qt-free (the fit math itself is reviewed separately)."""
+process() carries a reserved "_sigma" entry mapping each partial-pressure output to an
+asymmetric (σ_lo, σ_hi) pair (§19.7 — the fit folds at the x≥0 bound), so a chart can
+draw a band. Qt-free (the fit calibration itself is pinned in test_deconvolve_sigma)."""
 import numpy as np
 
 from ferrodac.analysis.gas import GasAnalyzer
@@ -22,10 +23,12 @@ def test_gas_publishes_sigma_inline_when_mc_on():
     ga = GasAnalyzer("g1", "rga/spec", gases=names, mc=32)
     out = ga.process(_spectrum(names))
     assert "_sigma" in out
-    for n in names:                             # every partial pressure carries a 1σ
+    for n in names:                             # every partial pressure carries an error
         k = f"gas/g1/{n}"
         assert k in out and k in out["_sigma"]
-        assert np.isfinite(out["_sigma"][k]) and out["_sigma"][k] >= 0.0
+        s_lo, s_hi = out["_sigma"][k]           # asymmetric (σ_lo, σ_hi) pair
+        assert np.isfinite(s_lo) and np.isfinite(s_hi) and s_lo >= 0.0
+        assert s_hi > 0.0                       # positive noise floor → never ±0
     assert "_sigma" not in [p.key for p in ga.outputs()]   # not itself a port
 
 

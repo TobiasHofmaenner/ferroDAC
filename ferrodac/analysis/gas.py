@@ -11,12 +11,16 @@ from __future__ import annotations
 import numpy as np
 
 from ..core.trace import Trace
-from .deconvolve import deconvolve, deconvolve_mc
+from .deconvolve import _rsf, deconvolve, deconvolve_mc
 from .library import DEFAULT_GASES, LIBRARY, get_gases
 from .processor import Port, Processor, register
 
 # points/amu of the fine axis a reconstructed (Gaussian) spectrum is drawn on
 _RECON_PPA = 32
+
+# fixed bootstrap seed: an unchanged spectrum gives unchanged error bars, so the
+# uncertainty bands don't flicker from re-drawn MC noise between frames
+_MC_SEED = 0xF17
 
 
 @register
@@ -38,7 +42,7 @@ class GasAnalyzer(Processor):
         self.unit = unit
         # latest results, for the composition panel
         self.last_amounts: dict = {}
-        self.last_sd: dict = {}                 # 1-sigma uncertainty (MC only)
+        self.last_sd: dict = {}                 # {gas: (σ_lo, σ_hi)} asymmetric (MC only)
         self.last_residual = float("nan")
         self.last_degenerate: list = []         # unresolvable (a, b, corr) pairs
 
@@ -84,7 +88,7 @@ class GasAnalyzer(Processor):
         y = np.zeros(len(fine))
         g = LIBRARY.get(name)
         if g is not None and amount > 0:
-            contrib = amount * (g.rsf or 1.0)        # un-sensitivity-corrected
+            contrib = amount * _rsf(g)               # un-sensitivity-corrected
             sigma = max(self.peak_fwhm, 1e-3) / 2.3548
             for m, frac in g.norm_pattern.items():
                 y += contrib * frac * np.exp(-0.5 * ((fine - m) / sigma) ** 2)
@@ -100,7 +104,7 @@ class GasAnalyzer(Processor):
             g = LIBRARY.get(n)
             if g is None or amt <= 0:
                 continue
-            contrib = amt * (g.rsf or 1.0)
+            contrib = amt * _rsf(g)
             for m, frac in g.norm_pattern.items():
                 model[np.abs(x - m) <= 0.5] += contrib * frac
         return model
@@ -108,10 +112,10 @@ class GasAnalyzer(Processor):
     def process(self, value) -> dict:
         sigma = getattr(value, "sigma", None)   # measured per-mass noise, if any
         if self.mc > 1:
-            med, sd, resid, pairs = deconvolve_mc(
+            amounts, err, resid, pairs = deconvolve_mc(
                 value.x, value.y, self._gases, runs=self.mc,
-                sparsity=self.sparsity, sigma=sigma)
-            self.last_amounts, self.last_sd = med, sd
+                sparsity=self.sparsity, sigma=sigma, seed=_MC_SEED)
+            self.last_amounts, self.last_sd = amounts, err
             self.last_residual, self.last_degenerate = resid, pairs
         else:
             amounts, resid = deconvolve(value.x, value.y, self._gases,
@@ -136,14 +140,17 @@ class GasAnalyzer(Processor):
         # residual on the measured axis: leftover peaks = unaccounted species
         resid = np.asarray(value.y, float) - self._stick_model(value.x)
         out[f"residual/{self.id}"] = self._trace(value.x, resid, lo, hi)
-        # The fit CREATES uncertainty: publish the bootstrap 1σ (MC only) inline with
+        # The fit CREATES uncertainty: publish the bootstrap error (MC only) inline with
         # each partial pressure (DESIGN §19.0), so the charts draw it as a band. Travels
         # IN the result dict (not via self.last_sd) so it can't race the offload worker.
-        # ⚠ this bootstrap sd is NOT a calibrated 1σ yet — see deconvolve_mc + DESIGN §19.7
-        # (noise-floor collapse + x≥0 boundary folding). Rough guide until those fixes land.
+        # Asymmetric (σ_lo, σ_hi): near the x≥0 bound the bootstrap folds, so the honest
+        # band hugs zero from below while keeping the full upside (DESIGN §19.7).
         if self.last_sd:
-            out["_sigma"] = {f"gas/{self.id}/{n}": s
-                             for n, s in self.last_sd.items() if s == s}
+            sig = {f"gas/{self.id}/{n}": (slo, shi)
+                   for n, (slo, shi) in self.last_sd.items()
+                   if slo == slo and shi == shi}       # drop no-information NaNs
+            if sig:
+                out["_sigma"] = sig
         return out
 
     def state(self) -> dict:

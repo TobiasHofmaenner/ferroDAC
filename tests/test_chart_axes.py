@@ -120,6 +120,49 @@ def test_band_uses_inline_sigma_from_reading(qapp):
     np.testing.assert_allclose(hi.getData()[1], [10.5])   # value + inline σ
 
 
+def test_band_uses_asymmetric_inline_sigma(qapp):
+    """A fit folded against a physical bound carries (σ_lo, σ_hi) — the band hugs
+    the bound from below while keeping the full upside (§19.7)."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False, "show_sigma": True})
+    p.add_source("gas/g1/CO2", _src("CO2", "mbar"))
+    p.feed([types.SimpleNamespace(key="gas/g1/CO2", value=1.0, status=0, t=1.0,
+                                  sigma=(1.0, 3.0))])
+    lo, hi, _f, _v = p._bands["gas/g1/CO2"]
+    np.testing.assert_allclose(lo.getData()[1], [0.0])    # value − σ_lo → the floor
+    np.testing.assert_allclose(hi.getData()[1], [4.0])    # value + σ_hi (full upside)
+
+
+def test_folded_band_survives_a_log_axis(qapp):
+    """On a log axis the folded lower edge (value − σ_lo == 0) must be clamped to a
+    positive floor, NOT NaN-ed: NaN-ing only the lower curve desynchronises the
+    fill's subpath pairing and the band vanishes (§19.7). Both curves must carry
+    the same finite samples."""
+    p = _chart(qapp)
+    p.apply_config({"logy": True, "show_sigma": True})
+    p.add_source("gas/g1/N2", _src("N2", "mbar"))
+    p.feed([types.SimpleNamespace(key="gas/g1/N2", value=v, status=0, t=1000.0 + i,
+                                  sigma=(v, 0.5))          # folded: σ_lo == value
+            for i, v in enumerate([5.0, 4.0, 1.0])])
+    lo, hi, _f, _v = p._bands["gas/g1/N2"]
+    lo_y, hi_y = lo.getData()[1], hi.getData()[1]
+    assert len(lo_y) == 3 and len(hi_y) == 3
+    assert np.isfinite(lo_y).all() and np.isfinite(hi_y).all()   # band still drawn
+    assert (np.isfinite(lo_y) == np.isfinite(hi_y)).all()        # curves in sync
+
+
+def test_2sigma_never_pushes_a_folded_band_below_zero(qapp):
+    """k=2 must not scale a bound-folded σ_lo past the physical x≥0 floor (§19.7)."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False, "show_sigma": True, "sigma_2": True})
+    p.add_source("gas/g1/O2", _src("O2", "mbar"))
+    p.feed([types.SimpleNamespace(key="gas/g1/O2", value=v, status=0, t=1000.0 + i,
+                                  sigma=(0.9 * v, 0.5))
+            for i, v in enumerate([5.0, 4.0, 0.5])])
+    lo, _hi, _f, _v = p._bands["gas/g1/O2"]
+    assert (lo.getData()[1] >= 0.0).all()
+
+
 def test_band_converts_to_the_axis_display_unit(qapp):
     p = _chart(qapp)
     p.apply_config({"logy": False, "show_sigma": True})
