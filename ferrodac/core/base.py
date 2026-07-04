@@ -86,6 +86,11 @@ class BaseDevice(Device):
         self._name = name
         self._interface = interface
         self._sources = list(sources)
+        # First-class uncertainty (DESIGN §19.0): the live σ MODEL per source, seeded
+        # from each Source's declaration and re-declarable at runtime (set_uncertainty).
+        self._uncertainty = {s.id: s.uncertainty for s in self._sources
+                             if getattr(s, "uncertainty", None) is not None}
+        self._provenance_dirty = False   # set when a model changes → app re-pushes
         self._sinks = list(sinks)
         self._options = list(options)
         self._option_values = {o.key: o.value for o in self._options}
@@ -173,7 +178,8 @@ class BaseDevice(Device):
             cal_due=self._cal_due,
             cal_cert=self._cal_cert,
             asset_tag=self._asset_tag,
-            sources=list(self._sources),
+            sources=[replace(s, uncertainty=self._uncertainty.get(s.id, s.uncertainty))
+                     for s in self._sources],
             sinks=sinks,
             options=[replace(o, value=self._option_values.get(o.key, o.value))
                      for o in self._options],
@@ -222,6 +228,27 @@ class BaseDevice(Device):
             self._disconnect()
         finally:
             self._status = Status.DISCONNECTED
+
+    # -- uncertainty (DESIGN §19.0) ------------------------------------------
+    def set_uncertainty(self, source_id: str, model) -> None:
+        """Re-declare a source's σ MODEL at runtime — e.g. a Keithley range change,
+        where accuracy depends on the setting. Flags provenance dirty so the app
+        re-pushes the record; the store's change-log then time-resolves which model
+        was in effect at each point (device_record_at), no new time-series needed.
+        Cheap + Qt-free, safe to call from a driver's worker thread."""
+        if self._uncertainty.get(source_id) == model:
+            return
+        if model is None:
+            self._uncertainty.pop(source_id, None)
+        else:
+            self._uncertainty[source_id] = model
+        self._provenance_dirty = True
+
+    def take_provenance_dirty(self) -> bool:
+        """True (once) if a σ model changed since the last check — the app polls this
+        after a write to decide whether to re-push the device record."""
+        dirty, self._provenance_dirty = self._provenance_dirty, False
+        return dirty
 
     # -- sinks (control) ------------------------------------------------------
     def write(self, sink_id: str, value=None) -> None:

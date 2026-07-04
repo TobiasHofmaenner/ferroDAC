@@ -134,6 +134,7 @@ class MainWindow(QMainWindow):
             # freeze device provenance ALONGSIDE the data: push the merged snapshot
             # (descriptor + user metadata) whenever the active set changes.
             manager.active_changed.connect(self._push_device_records)
+            manager.provenance_changed.connect(self._push_device_records)  # σ re-declare
             self._push_device_records()
             # the read path: one query() over the live RAM ring + the durable store
             self.resolver = Resolver([RamTier(self.history), store])
@@ -1404,6 +1405,12 @@ class MainWindow(QMainWindow):
             rec["device_id"] = did
             rec["uuid"] = d.uuid or ""
             rec["instance_id"] = d.instance_id or ""
+            # Per-source σ MODEL (DESIGN §19.0), serialised so the change-log
+            # time-resolves it (Keithley range → device_record_at at query time).
+            for s in d.sources:
+                u = getattr(s, "uncertainty", None)
+                if u is not None:
+                    rec[f"uncertainty:{s.id}"] = u.to_dict()
             recs[did] = rec
         self.store_writer.set_device_records(recs)
 

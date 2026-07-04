@@ -35,6 +35,7 @@ from typing import Optional
 
 from ..core.base import BaseDevice
 from ..core.serial_arbiter import PORTS_IN_USE, SERIAL_LOCK
+from .uncertainty_specs import keithley_current_uncertainty
 from ..core.device import (
     Interface,
     Modality,
@@ -274,7 +275,9 @@ class Keithley6221Device(BaseDevice):
         self._port = probe.port
         sources = [
             Source(id="iout", name="Output current", unit="A",
-                   modality=Modality.SCALAR, prefer_log=False),
+                   modality=Modality.SCALAR, prefer_log=False,
+                   uncertainty=keithley_current_uncertainty(0.0)),   # range-resolved
+
         ]
         sinks = [
             Sink(id="current", name="Current", kind=SinkKind.SETPOINT,
@@ -387,6 +390,11 @@ class Keithley6221Device(BaseDevice):
                 raise ValueError(f"compliance {value} V out of range "
                                  f"({MIN_COMPLIANCE}–{MAX_COMPLIANCE} V)")
         super().write(sink_id, value)
+        # Accuracy is range-dependent → re-declare the σ model for the new level, so
+        # the change-log time-resolves it (DESIGN §19.0). Auto-range picks the range
+        # from the level, so the level is the right key.
+        if sink_id == "current" and value is not None:
+            self.set_uncertainty("iout", keithley_current_uncertainty(float(value)))
 
     # -- data plane ---------------------------------------------------------- #
     def _read(self, source: Source):

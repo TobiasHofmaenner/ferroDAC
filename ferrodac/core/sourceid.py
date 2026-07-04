@@ -75,3 +75,26 @@ def resolve_source(key, *, live_ports=None, store=None, now=None) -> SourceInfo:
         rec = store.device_record_at(device_id, time.time() if now is None else now)
     return SourceInfo(key, device_id, (rec.get("name") or "").strip(), channel,
                       unit, _DTYPE_MAP.get(dtype, "float"), "historic", False, rec)
+
+
+def uncertainty_at(store, source_key: str, t: float):
+    """The σ MODEL in effect for a source at time ``t`` — from the device provenance
+    change-log (DESIGN §19.0), time-resolved via ``device_record_at`` — or None. How a
+    historic window recovers the model that was live when the data was taken (e.g. the
+    Keithley's range-dependent accuracy). Reconstruction (X3) evaluates it over a window,
+    segmenting on the change-log's epochs. Qt-free."""
+    if store is None:
+        return None
+    device_id, _, channel = source_key.partition("/")
+    try:
+        rec = store.device_record_at(device_id, float(t))
+    except Exception:                        # noqa: BLE001 — missing/old store → no σ
+        return None
+    d = rec.get(f"uncertainty:{channel}")
+    if not d:
+        return None
+    from .uncertainty import Uncertainty
+    try:
+        return Uncertainty.from_dict(d)
+    except Exception:                        # noqa: BLE001 — corrupt/unknown model
+        return None

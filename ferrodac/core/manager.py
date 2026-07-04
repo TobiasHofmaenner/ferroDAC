@@ -62,6 +62,7 @@ class _OpWorker(QThread):
 class DeviceManager(QObject):
     available_changed = Signal()
     active_changed = Signal()
+    provenance_changed = Signal()   # a device's σ model (or other provenance) changed
 
     def __init__(
         self,
@@ -176,10 +177,16 @@ class DeviceManager(QObject):
         device = self._active.get(instance_id)
         if device is None:
             return
-        self._run_async(
-            lambda: device.write(sink_id, value),
-            on_finished=None if silent else self.active_changed.emit,
-        )
+
+        def _finished():
+            if not silent:
+                self.active_changed.emit()
+            # A σ-model re-declaration (e.g. Keithley range) rides even SILENT writes,
+            # so its change-log entry is captured without a full active_changed rebuild.
+            if device.take_provenance_dirty():
+                self.provenance_changed.emit()
+
+        self._run_async(lambda: device.write(sink_id, value), on_finished=_finished)
 
     def set_rate(self, instance_id: str, hz: float) -> None:
         device = self._active.get(instance_id)
