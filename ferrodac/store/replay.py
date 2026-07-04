@@ -159,16 +159,26 @@ class PlaybackSource:
         self.bus = bus
         self.chunk = chunk
 
-    def stream(self, sources, t0, t1, on_progress=None) -> int:
+    def stream(self, sources, t0, t1, on_progress=None, should_stop=None,
+               pump=None) -> int:
         """Read full-res raw for `sources` over [t0,t1], merge by time, and emit
         through the bus in time-ordered chunks. Returns the number of readings
         emitted. `on_progress(frac)` (0..1) reports the load: the read phase is
-        the first half, the emit phase the second. (Window-bounded; the read is
-        synchronous for now — a worker thread is the later optimisation for big
-        slices.)"""
+        the first half, the emit phase the second.
+
+        `should_stop()` is polled between sources and chunks so a superseded
+        re-stream (park twice, or go-live mid-load) bails out promptly.
+
+        `pump(batch)` renders a published chunk: in the live app it marshals the
+        bus drain onto the GUI thread and blocks until it repaints (so this can
+        run on a worker thread — DESIGN §21.3 — while panels stay GUI-only). When
+        None (headless/tests/server) it falls back to the synchronous in-caller
+        drain, so behaviour is byte-identical to before."""
         srcs = list(sources)
         rows: list = []
         for i, sid in enumerate(srcs):
+            if should_stop is not None and should_stop():
+                return 0
             dev, _, src = sid.rpartition("/")        # key 'device/source' → Reading
             if self._is_trace(sid):                  # 2-D scans → Trace readings
                 for times, Y, x in self.store.read_raw_trace(sid, t0, t1):
@@ -192,12 +202,14 @@ class PlaybackSource:
         for _, rd in rows:
             batch.append(rd)
             if len(batch) >= self.chunk:
-                n += self._emit(batch)
+                if should_stop is not None and should_stop():
+                    return n
+                n += self._emit(batch, pump)
                 batch = []
                 if on_progress:
                     on_progress(0.5 + 0.5 * n / total)           # emit = second half
         if batch:
-            n += self._emit(batch)
+            n += self._emit(batch, pump)
         if on_progress:
             on_progress(1.0)
         return n
@@ -206,11 +218,14 @@ class PlaybackSource:
         sd = getattr(self.store, "source_dtype", None)
         return sd(sid) == "trace" if sd else False
 
-    def _emit(self, batch) -> int:
+    def _emit(self, batch, pump=None) -> int:
         for r in batch:
             self.bus.publish(r)
-        while self.bus.drain():                      # fan the chunk + flush any derived
-            pass                                     # a processor emits back onto the bus
+        if pump is not None:
+            pump(batch)                              # GUI-marshalled drain (worker)
+        else:
+            while self.bus.drain():                  # fan the chunk + flush any derived
+                pass                                 # a processor emits back onto the bus
         return len(batch)
 
 
@@ -226,7 +241,7 @@ class ReplayController:
     optimisation, signalled by the realtime-rate readout)."""
 
     def __init__(self, engine, store, time_context, sources=None, on_reset=None,
-                 on_progress=None, reader=None):
+                 on_progress=None, reader=None, runner=None, gui_pump=None):
         self.store = store
         self.tc = time_context
         self.bus = Bus()                             # what the dashboard subscribes to
@@ -237,6 +252,15 @@ class ReplayController:
         self._sources = sources or store.sources     # callable → [source keys]
         self.on_reset = on_reset
         self.on_progress = on_progress               # frac 0..1 during a load; None=done
+        # Off-GUI park/scrub (DESIGN §21.3): with a `runner` (a TaskRunner) the
+        # full-res re-stream runs on a worker thread and `gui_pump(fn)` marshals
+        # each chunk's bus drain onto the GUI thread, blocking the worker until it
+        # paints (backpressure). Without a runner (headless/tests/server) the load
+        # is synchronous exactly as before. `_generation` bumps on every render/
+        # go-live so a superseded worker can't smear stale readings into a new view.
+        self._runner = runner
+        self._gui_pump = gui_pump
+        self._generation = 0
         self._was_following = time_context.following
         self._last_nav = time_context.nav            # to detect navigation vs transport
         self._last_window = None                     # last window we rendered (skip if same)
@@ -279,15 +303,18 @@ class ReplayController:
     def _render(self, t0, t1, progress=True) -> None:
         """Clear the panels and re-stream the exact window [t0,t1] in time order."""
         self._last_window = (t0, t1)
+        self._generation += 1                        # invalidate any in-flight load
         if self.on_reset:
             self.on_reset()                          # clear stale data (panels re-fit)
         self._load(t0, t1, progress)
 
     def _load(self, t0, t1, progress=True) -> None:
-        """Full-res re-stream of [t0,t1] with a progress callback + a re-entrancy
-        guard (the UI's progress handler may pump the event loop). `progress` is
-        off for play-steps so the bar doesn't flash every frame."""
+        """Full-res re-stream of [t0,t1]. With a runner it goes on a worker thread
+        (cancellable, GUI-paced); without one it runs synchronously as before."""
         cb = self.on_progress if (progress and self.on_progress) else None
+        if self._runner is not None:
+            self._load_async(t0, t1, cb)
+            return
         self._busy = True
         try:
             self.playback.stream(list(self._sources()), t0, t1, on_progress=cb)
@@ -296,6 +323,47 @@ class ReplayController:
             if cb:
                 cb(None)                             # done → hide the indicator
 
+    def _load_async(self, t0, t1, cb) -> None:
+        gen = self._generation
+        sources = list(self._sources())
+        span = max(0.0, t1 - t0)
+        why = (f"Re-streaming {span / 3600:.1f} h of history at full resolution "
+               "through the analysis pipeline" if span >= 3600 else
+               f"Re-streaming {span:.0f} s of history at full resolution")
+
+        def should_stop():
+            return gen != self._generation          # superseded by a newer view
+
+        def pump(_batch):
+            # Marshal the bus drain onto the GUI thread and block until it paints
+            # — panels stay GUI-only (§21.1); the worker can't outrun rendering.
+            if self._gui_pump is not None and not should_stop():
+                self._gui_pump(self._drain_gui)
+
+        def work(ctx):
+            # progress flows through the TaskRunner UI (ctx.progress → queued to
+            # the GUI). The GUI on_progress (cb) is NEVER called from here — it
+            # would touch Qt off-thread; `finish` calls it on the GUI thread.
+            self.playback.stream(sources, t0, t1,
+                                 on_progress=lambda f: ctx.progress(f, ""),
+                                 should_stop=should_stop, pump=pump)
+            return None
+
+        def finish(_res=None):
+            if cb:
+                cb(None)                             # GUI thread: hide any indicator
+
+        self._runner.run(work, title="Loading history", why=why, cancellable=True,
+                         exclusive="replay", on_busy="supersede",
+                         on_done=finish, on_error=finish)
+
+    def _drain_gui(self) -> None:
+        """GUI thread: fan the just-published chunk to panels + flush any derived
+        processor readings (the same loop the synchronous path used)."""
+        while self.bus.drain():
+            pass
+
     def stop(self) -> None:
+        self._generation += 1                        # cancel any in-flight load
         self._live_unsub()
         self._ctx_unsub()

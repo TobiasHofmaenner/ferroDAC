@@ -2207,7 +2207,14 @@ class MainWindow(QMainWindow):
         # StoreWriter (Zarr) is the crash-safe write path; a "recording" is just
         # a marked span over it, auto-exported on Stop (no separate capture file).
         self.history = HistoryBuffer()
-        engine.subscribe(self.history.feed)
+        engine.subscribe(self.history.feed, thread="worker", mode="lossless",
+                         name="history")
+        # user-triggered waits run as background Tasks (park/scrub, exports, …)
+        # so the GUI never freezes (DESIGN §21.3); the GuiBridge marshals worker
+        # chunks back to the GUI thread for painting.
+        from .tasks import GuiBridge, TaskRunner
+        self._tasks = TaskRunner(self)
+        self._gui_bridge = GuiBridge(self)
         self._rec_start_mid = None         # the open REC marker while recording
 
         # durable store: persist EVERYTHING continuously (§7.4) so data survives a
@@ -2247,6 +2254,8 @@ class MainWindow(QMainWindow):
                 on_reset=self._replay_reset,
                 on_progress=self._replay_progress,
                 reader=self.resolver,        # replay full-res via RAM+store+hub tier
+                runner=self._tasks,          # park/scrub off the GUI thread (§21.3)
+                gui_pump=self._gui_bridge.post_and_wait,
             )
         except Exception as exc:                       # noqa: BLE001
             logging.getLogger("ferrodac").warning("durable store disabled: %s", exc)
@@ -2405,6 +2414,9 @@ class MainWindow(QMainWindow):
             self._load_bar.setFormat("loading %p%")
             self._load_bar.setVisible(False)
             self.statusBar().addPermanentWidget(self._load_bar)
+        # the what/why/ETA/cancel readout for every background Task (§21.3)
+        from .tasks import TaskStatusWidget
+        self.statusBar().addPermanentWidget(TaskStatusWidget(self._tasks, self))
 
         # in-app log viewer: a QtLogHandler on the root logger forwards every
         # record (incl. worker-thread ones, e.g. the sync runner) here.
@@ -3261,19 +3273,17 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Export window to folder")
         if not folder:
             return
-        from ..store import export_window
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(t1))
         dest = os.path.join(folder, f"ferrodac_export_{stamp}")
-        try:
-            man = export_window(dest, sources, self.resolver, t0, t1,
-                                tags=self.dashboard.markers.to_list())
-        except Exception as exc:                       # noqa: BLE001
-            self.statusBar().showMessage(f"Export failed: {exc}", 8000)
-            return
-        n = len(man.get("sources", []))
         dur = max(0, int(t1 - t0))
-        self.statusBar().showMessage(
-            f"Exported {n} source(s) over {dur} s → {dest}", 8000)
+
+        def ok(man):
+            n = len(man.get("sources", []))
+            self.statusBar().showMessage(
+                f"Exported {n} source(s) over {dur} s → {dest}", 8000)
+
+        self.statusBar().showMessage("Exporting in the background…", 4000)
+        self._export_task(dest, sources, t0, t1, title="Exporting window", on_ok=ok)
 
     # -- recording-region actions (from the Events dock) ---------------------
     def _jump_to_tag(self, mid):
@@ -3318,21 +3328,21 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Export recording to folder")
         if not folder:
             return
-        from ..store import export_window
         label = re.sub(r"[^\w.-]", "_", m.label or "recording").strip("_") or "recording"
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(m.t))
         dest = os.path.join(folder, f"{label}_{stamp}")
-        try:
-            man = export_window(dest, sources, self.resolver, m.t, m.t_end,
-                                tags=self.dashboard.markers.to_list())
-        except Exception as exc:                       # noqa: BLE001
-            self.statusBar().showMessage(f"Export failed: {exc}", 8000)
-            return
-        n = len(man.get("sources", []))
-        if n == 0:
-            self.statusBar().showMessage("This recording's window has no stored data.", 6000)
-            return
-        self.statusBar().showMessage(f"Exported {n} source(s) → {dest}", 8000)
+
+        def ok(man):
+            n = len(man.get("sources", []))
+            if n == 0:
+                self.statusBar().showMessage(
+                    "This recording's window has no stored data.", 6000)
+            else:
+                self.statusBar().showMessage(f"Exported {n} source(s) → {dest}", 8000)
+
+        self.statusBar().showMessage("Exporting recording in the background…", 4000)
+        self._export_task(dest, sources, m.t, m.t_end, title="Exporting recording",
+                          on_ok=ok)
 
     def _export_plots(self, mid=None):
         """The rec-card 🖼 Plots button: render THIS recording's charts (through the
@@ -3781,32 +3791,66 @@ class MainWindow(QMainWindow):
             ms.update(mid, t_end=t1)                      # close the region
             self._finalize_recording(mid, t0, t1)
 
+    def _export_task(self, dest, sources, t0, t1, *, title, on_ok,
+                     on_fail=None, flush=False, exclusive="") -> None:
+        """Run an export_window off the GUI thread as a cancellable Task (§21.3),
+        so Stop-Recording / File▸Export never freeze on a big span. `flush` also
+        drains the store writer's pending buffer first (thread-safe). `on_ok(man)`
+        / `on_fail(msg)` run on the GUI thread."""
+        if self._tasks is None or self.resolver is None:
+            return
+        from ..store import export_window
+        resolver = self.resolver
+        tags = self.dashboard.markers.to_list()
+        writer = self.store_writer if flush else None
+
+        def work(ctx):
+            if writer is not None:
+                try:
+                    writer.flush_all()               # a clean stop loses nothing
+                except Exception:                    # noqa: BLE001
+                    pass
+            return export_window(dest, sources, resolver, t0, t1, tags=tags)
+
+        def fail(msg):
+            if on_fail is not None:
+                on_fail(msg)
+            else:
+                self.statusBar().showMessage(f"Export failed: {msg}", 8000)
+
+        span = max(0, int(t1 - t0))
+        self._tasks.run(
+            work, title=title,
+            why=f"Materialising {span} s across {len(sources)} source(s) as a "
+                "reimportable CSV bundle",
+            exclusive=exclusive or f"export:{dest}", on_busy="reject",
+            on_done=on_ok, on_error=fail)
+
     def _finalize_recording(self, mid, t0, t1) -> None:
-        """Flush the store and materialise the span as a self-describing bundle
-        (export_window via the resolver — RAM + store + hub). The durable Zarr
-        store IS the crash-safe data; there's no separate capture file."""
-        if self.store_writer is not None:
-            try:
-                self.store_writer.flush_all()             # a clean stop loses nothing
-            except Exception:                             # noqa: BLE001
-                pass
+        """Materialise the span as a self-describing bundle (export_window via the
+        resolver — RAM + store + hub) on a background Task. The durable Zarr store
+        IS the crash-safe data, so the export never blocks and never risks loss."""
         if self.resolver is None:
             return
         sources = self.dashboard.export_sources()
-        from ..store import export_window
         dest = os.path.join(self._runs_dir(),
                             "run_" + time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(t0)))
-        try:
-            man = export_window(dest, sources, self.resolver, t0, t1,
-                                tags=self.dashboard.markers.to_list())
-        except Exception as exc:                          # noqa: BLE001
-            self.statusBar().showMessage(f"Recording kept; export failed: {exc}", 8000)
-            return
-        n = len(man.get("sources", []))
-        self.dashboard.markers.update(mid, run_dir=dest, comment=f"{n} sources")
-        self._refresh_explorer()                   # the new recording card shows up
-        self.statusBar().showMessage(f"■ Saved recording: {n} source(s) → {dest}", 8000)
-        self._commit_project(f"Recorded {os.path.basename(dest)}")   # §8.2 boundary commit
+
+        def ok(man):
+            n = len(man.get("sources", []))
+            self.dashboard.markers.update(mid, run_dir=dest, comment=f"{n} sources")
+            self._refresh_explorer()               # the new recording card shows up
+            self.statusBar().showMessage(
+                f"■ Saved recording: {n} source(s) → {dest}", 8000)
+            self._commit_project(f"Recorded {os.path.basename(dest)}")   # §8.2 commit
+
+        def fail(msg):
+            self.statusBar().showMessage(f"Recording kept; export failed: {msg}", 8000)
+
+        self.statusBar().showMessage("■ Saving recording in the background…", 4000)
+        self._export_task(dest, sources, t0, t1, title="Saving recording",
+                          on_ok=ok, on_fail=fail, flush=True,
+                          exclusive=f"export:{mid}")
 
     def _recover_open_recordings(self) -> None:
         """A recording interrupted by a crash survives as an OPEN REC marker
@@ -4269,7 +4313,10 @@ class MainWindow(QMainWindow):
             self._save_global_tags()        # flush the global tag catalog
         self.hub.disconnect()
         if self.replay is not None:
-            self.replay.stop()              # unsubscribe the playback bus
+            self.replay.stop()              # unsubscribe the playback bus (+ cancel
+            #                                 any in-flight re-stream via generation)
+        if getattr(self, "_tasks", None) is not None:
+            self._tasks.shutdown()          # cancel background exports/loads
         if self.store_writer is not None:
             self.store_writer.stop()        # flush the buffer + build final rollups
         self.dashboard.shutdown()

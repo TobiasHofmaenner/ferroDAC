@@ -15,6 +15,7 @@ Qt-free. Scalar only this slice (traces ride in with the trace-epoch work).
 
 from __future__ import annotations
 
+import threading
 import time
 
 import numpy as np
@@ -43,6 +44,12 @@ class StoreWriter:
         self._device_records: dict = {}  # device_id -> merged provenance snapshot (pushed
         #                                  from the GUI thread; captured at flush time)
         self._device_written: dict = {}  # device_id -> last snapshot persisted (to diff)
+        # `feed` runs on the writer's own bus pump thread (DESIGN §21.2), but
+        # `flush_all` is also a cross-thread entry point — Stop-Recording calls it
+        # from the GUI thread while the pump is live. This lock guards the pending
+        # buffer so those never race (held only around buffer + append, never on
+        # the per-reading hot path beyond a cheap append).
+        self._buflock = threading.RLock()
         self._unsub = None
         # one epoch per app session, so a restart leaves a real coverage gap (the
         # resolver breaks the line there) instead of bridging stop→resume.
@@ -97,24 +104,27 @@ class StoreWriter:
         for key in list(self._known):   # ZarrStore serializes behind its RLock)
             self._rollup(key)           # final rollups for fast historic query
 
-    # -- ingest (the writer's bus pump thread — single-threaded by contract) --
+    # -- ingest (the writer's own bus pump thread; flush_all may cross in) ----
     def feed(self, batch) -> None:
         now = time.monotonic()
-        for r in batch:
-            if getattr(r, "partial", False):
-                continue                         # preview frame — only complete scans
-            v = r.value
-            if isinstance(v, Trace):
-                self._feed_trace(r.key, r.t, v)
-                continue
-            if isinstance(v, bool):
-                v = 1.0 if v else 0.0            # persist bool as 0/1 scalar
-            elif not isinstance(v, (int, float)):
-                continue
-            tb, vb = self._buf.setdefault(r.key, ([], []))
-            tb.append(float(r.t)); vb.append(float(v))
-            if len(tb) >= self._chunk or now - self._last_flush.get(r.key, 0.0) > self._interval:
-                self._flush(r.key)
+        with self._buflock:
+            for r in batch:
+                if getattr(r, "partial", False):
+                    continue                     # preview frame — only complete scans
+                v = r.value
+                if isinstance(v, Trace):
+                    self._feed_trace(r.key, r.t, v)
+                    continue
+                if isinstance(v, bool):
+                    v = 1.0 if v else 0.0        # persist bool as 0/1 scalar
+                elif not isinstance(v, (int, float)):
+                    continue
+                tb, vb = self._buf.setdefault(r.key, ([], []))
+                tb.append(float(r.t))
+                vb.append(float(v))
+                if len(tb) >= self._chunk or \
+                        now - self._last_flush.get(r.key, 0.0) > self._interval:
+                    self._flush(r.key)
 
     def _feed_trace(self, key, t, trace) -> None:
         x = np.asarray(trace.x, dtype="f8")
@@ -136,7 +146,7 @@ class StoreWriter:
         self.store.append_trace(key, t, x, trace.y,
                                 epoch=f"{self._epoch}__t{self._trace_gen[key]}")
 
-    # -- internals -----------------------------------------------------------
+    # -- internals (call with _buflock held) ---------------------------------
     def _flush(self, key) -> None:
         tb, vb = self._buf.get(key, ([], []))
         if not tb:
@@ -148,7 +158,8 @@ class StoreWriter:
         self.store.append(key, np.asarray(tb, dtype="f8"),
                           np.asarray(vb, dtype="f8"), epoch=self._epoch)
         n = len(tb)
-        tb.clear(); vb.clear()
+        tb.clear()
+        vb.clear()
         self._last_flush[key] = time.monotonic()
         self._since_rollup[key] = self._since_rollup.get(key, 0) + n
         if self._since_rollup[key] >= self._rollup_every:
@@ -162,5 +173,6 @@ class StoreWriter:
             pass                                 # query falls back to raw-bucketing
 
     def flush_all(self) -> None:
-        for key in list(self._buf):
-            self._flush(key)
+        with self._buflock:
+            for key in list(self._buf):
+                self._flush(key)
