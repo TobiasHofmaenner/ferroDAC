@@ -14,6 +14,7 @@ them into the json (no sync burden). Qt-free + testable.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -34,6 +35,24 @@ def _now() -> str:
 
 def is_project(path: str) -> bool:
     return os.path.isfile(os.path.join(path, _META))
+
+
+def unsafe_project_dir(path: str) -> str:
+    """A reason string if `path` is a dangerous place to make a project — a system
+    or home ROOT whose git/backup/archive ops would scan a huge tree (a project
+    must be its own dedicated folder). '' if it's fine. Guards against the
+    '/home became a git repo' class of bug."""
+    ap = os.path.abspath(path).rstrip("/") or "/"
+    home = os.path.abspath(os.path.expanduser("~"))
+    roots = {"/", home, os.path.dirname(home) or "/",
+             "/home", "/root", "/usr", "/etc", "/var", "/tmp", "/opt",
+             "/mnt", "/media", "/boot", "/dev", "/proc", "/sys", "/bin", "/lib",
+             "/Users", "/Applications", "/System", "/Library",
+             os.path.abspath(os.sep)}
+    if ap in {r.rstrip("/") or "/" for r in roots}:
+        return (f"“{ap}” is a system or home folder. Pick a location and ferroDAC "
+                "will make a dedicated project subfolder inside it.")
+    return ""
 
 
 class Project:
@@ -399,6 +418,9 @@ class Project:
     # -- creation ------------------------------------------------------------
     @classmethod
     def create(cls, path: str, name: str, description: str = "") -> "Project":
+        reason = unsafe_project_dir(path)            # never make a repo at a system root
+        if reason:
+            raise ValueError(reason)
         os.makedirs(path, exist_ok=True)
         p = cls(path)
         p.meta = {
@@ -464,6 +486,10 @@ class ProjectManager:
             pass
         self._by_id = {}
         for p in paths:
+            if unsafe_project_dir(p):                # auto-heal a bad registry entry —
+                logging.getLogger("ferrodac").warning(   # a project pointed at a system
+                    "dropping project registered at an unsafe path: %s", p)  # /home root
+                continue
             if is_project(p):                        # silently drop moved/deleted ones
                 proj = Project(p)
                 if proj.id:

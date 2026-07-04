@@ -64,6 +64,11 @@ class ProjectRepo:
         """Stage everything and commit if there's anything to commit. `author` is an
         optional (name, email) attributing the commit to the real user (else the repo's
         configured identity). Returns the new sha, or None (nothing to commit / failure)."""
+        from .projects import unsafe_project_dir
+        reason = unsafe_project_dir(self.path)      # never git a system/home ROOT —
+        if reason:                                  # `git add -A` would scan the whole tree
+            log.warning("refusing git in unsafe project dir %s: %s", self.path, reason)
+            return None
         try:
             self.init()
             self._git("add", "-A")

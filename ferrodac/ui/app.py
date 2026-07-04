@@ -841,21 +841,42 @@ class MainWindow(QMainWindow):
         self._refresh_explorer()
 
     def _add_project(self) -> None:
-        """Pick a folder → ADOPT the project there if it already is one, else create
-        a new one in it. Either way the folder is tracked in the registry."""
-        from ..core.projects import is_project
-        folder = QFileDialog.getExistingDirectory(self, "Project folder")
+        """Pick a folder. If it IS already a project, adopt it in place. Otherwise
+        treat it as a LOCATION and create a dedicated `<location>/<name>/` subfolder
+        for the project — so picking a big/system folder (e.g. /home) can never turn
+        the whole tree into a project repo."""
+        from ..core.projects import _safe, is_project, unsafe_project_dir
+        folder = QFileDialog.getExistingDirectory(self, "Project location")
         if not folder:
             return
-        if is_project(folder):
-            p = self._project_mgr.track(folder)           # adopt existing
+        if is_project(folder):                            # pointed AT an existing project
+            p = self._project_mgr.track(folder)
         else:
-            base = os.path.basename(folder.rstrip("/\\")) or "Project"
             name, ok = QInputDialog.getText(self, "New project", "Project name:",
-                                            text=base)
+                                            text="My Project")
             if not ok or not name.strip():
                 return
-            p = self._project_mgr.track(folder, name.strip())   # create here
+            reason = unsafe_project_dir(folder)
+            # a system/home ROOT is fine as a LOCATION (we make a subfolder in it),
+            # but not as the project itself — the subfolder keeps it contained.
+            dest = os.path.join(folder, _safe(name.strip()) or "project")
+            if unsafe_project_dir(dest):                  # e.g. picked "/" → dest still a root
+                QMessageBox.warning(self, "Pick another location", reason or
+                                    "That location can't hold a project folder.")
+                return
+            if is_project(dest):                          # the subfolder is already a project
+                p = self._project_mgr.track(dest)
+            elif os.path.isdir(dest) and os.listdir(dest):
+                QMessageBox.warning(
+                    self, "Folder in use",
+                    f"“{dest}” already exists and isn't empty — pick another name.")
+                return
+            else:
+                try:
+                    p = self._project_mgr.track(dest, name.strip())   # create the subfolder
+                except ValueError as exc:
+                    QMessageBox.warning(self, "Can't create project", str(exc))
+                    return
         self._refresh_explorer()
         self._switch_project(p.id)
 
