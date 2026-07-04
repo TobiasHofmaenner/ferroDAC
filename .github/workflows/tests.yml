@@ -27,7 +27,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pytest numpy "zarr>=3" numcodecs "grpcio>=1.60" "protobuf>=6.33.5" pyserial
+          pip install pytest numpy "zarr>=3" numcodecs "grpcio>=1.60" "protobuf>=6.33.5" pyserial "pint>=0.24" uncertainties
       - name: Run data-plane + gRPC suite
         run: pytest -m "not ui" -ra
 
@@ -48,7 +48,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pytest numpy "zarr>=3" numcodecs "grpcio>=1.60" "protobuf>=6.33.5"
+          pip install pytest numpy "zarr>=3" numcodecs "grpcio>=1.60" "protobuf>=6.33.5" "pint>=0.24" uncertainties
       - name: Run data-plane suite (store/path layer; gRPC e2e covered on Linux)
         run: pytest -m "not ui and not integration" -ra
 
@@ -71,7 +71,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest numpy "zarr>=3" numcodecs "grpcio>=1.60" "protobuf>=6.33.5" \
-                      PySide6 qtpy pyqtgraph pyserial
+                      PySide6 qtpy pyqtgraph pyserial "pint>=0.24" uncertainties
       - name: Run UI smoke tests
         env:
           QT_QPA_PLATFORM: offscreen

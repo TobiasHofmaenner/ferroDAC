@@ -9,6 +9,12 @@ pyserial>=3.5
 # uses on S3, so the local↔remote tiers share read code and sync is a chunk copy.
 zarr>=3.0
 numcodecs>=0.13
+# Units & uncertainty as first-class value semantics (DESIGN §19). pint is the unit
+# AUTHORITY (registry, dimensional algebra, affine temperature); `uncertainties`
+# (ufloat/unumpy) is the on-demand exact σ-propagation engine. Both pure-Python, so
+# the dev-box pip block and the PyInstaller Windows build cope.
+pint>=0.24
+uncertainties>=3.2
 # Resource monitor in the Timeline perf HUD (CPU/RAM + playback-rate readout).
 # Optional at runtime — the HUD degrades to "pip install psutil" if it's absent.
 psutil>=5.9

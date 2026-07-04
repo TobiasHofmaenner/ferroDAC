@@ -95,6 +95,19 @@ try:
 except Exception as exc:                                   # noqa: BLE001
     print(f"[ferrodac.spec] local store not fully bundled: {exc}")
 
+# Units & uncertainty (DESIGN §19). pint ships a data file (default_en.txt) that its
+# PyInstaller hook normally collects, but collect_submodules("ferrodac") has proven
+# unreliable on the Windows runner (see the devices note above) — so pull pint's data
+# explicitly and name both libs as hidden imports to guarantee they're frozen.
+try:
+    _pd, _pb, _ph = collect_all("pint")
+    datas += _pd
+    binaries += _pb
+    hiddenimports += _ph
+    hiddenimports += ["uncertainties", "uncertainties.unumpy"]
+except Exception as exc:                                   # noqa: BLE001
+    print(f"[ferrodac.spec] units/uncertainty libs not fully bundled: {exc}")
+
 try:
     hiddenimports += collect_submodules("rapidocr_onnxruntime")
     hiddenimports += collect_submodules("onnxruntime")

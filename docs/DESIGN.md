@@ -1199,7 +1199,75 @@ keep the membership model general and these stay cheap to add later.
 
 ## 19. Units & uncertainty (recorded 2026-06-24)
 
-> **Not scheduled — design captured before building.** How ferroDAC should treat
+### 19.0 First-class supersession & build plan (2026-07-04) — IN PROGRESS
+
+> **Revisited with the user and upgraded to FIRST-CLASS.** The original capture below
+> (§19.1–19.6, 2026-06-24) framed units/uncertainty as *opt-in edge/metadata* concerns.
+> That framing is **superseded**: units & uncertainty are now **intrinsic, mandatory,
+> enforced** properties of every value. The key reframe: **"first-class" is about the
+> CONTRACT being mandatory & enforced, NOT about a heavy per-sample representation** —
+> units/σ are per-*channel* (a gauge is always mbar; its σ is a *model* = f(value)), so
+> first-class guarantees are affordable while the wire/store stay plain `float64`. Most
+> of the original analysis (cost tables §19.2, the propagation toggle §19.3, the fit
+> statistics §19.4) still holds and is reused; the deltas are below.
+
+**Locked decisions (deltas from the original capture):**
+
+- **Units are mandatory & validated**, not opt-in. `pint` is the authority (see
+  `core/units.py` — a *thin edge adapter*: one shared registry + normalisation of the
+  messy strings we already carry (`°C`, `% RH`, `a.u.`) + `validate/canonical/
+  compatible/convert` wrappers; **no dimensional arithmetic written by hand**). Store &
+  wire unchanged; a `Quantity` materialises only at edges.
+- **Processors are barely affected:** the framework carries the unit through by
+  **default** (out-unit = in-unit); only dimension-changing processors (ratio →
+  dimensionless, integral → ×time, derivative → ÷time) declare `units_out()`.
+- **Charts group traces by DIMENSION → one Y axis per dimension** (mbar+Torr share a
+  pressure axis with conversion; °C gets its own), each with a per-axis "show in
+  ⟨unit⟩". A plot **never refuses** a mixed bind — it allocates an axis; the "refuse
+  incompatible" gate narrows to genuinely single-unit sinks (processor inputs, pinned
+  axes). [pyqtgraph linked `ViewBox`es; clean for 2 dims, busy for 3+.]
+- **Uncertainty is a derived LENS, not a streamed channel.** *Streaming σ was costed and
+  rejected as the default:* 2× storage forever + redundant for the model case + it STILL
+  needs the on-demand exact engine for correlations → worst of both. Instead **σ is
+  reconstructed over a BOUNDED WINDOW on demand** from raw floats + the declared model —
+  never a second data stream, never stored on the hot path, never computed over full
+  history. A stored σ-array exists **only** for instruments that genuinely *measure* one
+  (that mechanism must exist regardless, so build it — just don't default to it).
+- **Time-resolved σ rides the existing config-epoch / device-provenance change-log.**
+  The Keithley range-dependent-accuracy case (`σ = f(value, range(t))`) needs no new
+  time-series: the driver calls `set_uncertainty(model)` in the range-change handler it
+  already has → versioned + point-in-time-resolved by machinery that exists; the engine
+  segments the window by epoch and applies the right model per segment. A
+  `systematic_continuity` flag on a config edit tells the ufloat path whether a
+  systematic persists across the seam.
+- **Two compute modes stand** (§19.3): analytic scalar-σ live (cheap, independent-inputs)
+  + exact `ufloat`/`unumpy` recompute on-demand over the window (correlation-correct;
+  stateful chains fall back with a notice). Random/systematic split travels from source.
+- **Surfaces:** CSV gains GUM `u(x)` companion columns (k=1 default; split-cols option),
+  the bundle manifest carries model/split/k/epochs; charts get shaded bands + a toggle
+  (off / analytic-live / exact-on-demand via the TaskRunner + status chip), a k-factor,
+  and GUM sig-fig readouts.
+
+**Phased plan (each phase CI-green & independently shippable):**
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| **U1** | `core/units.py` unit authority (thin pint adapter) + tests | **DONE** (28 tests) |
+| **U2** | dimensional routing + charts multi-axis + processor `units_out()` | |
+| **X1** | `core/uncertainty.py` model types `Abs/Rel/FloorRel/Measured/Spec(random,systematic)` | |
+| **X2** | `Source(uncertainty=…)` + `set_uncertainty` provenance time-resolution + real drivers | |
+| **X3** | `store/uncertainty.py` windowed reconstruction engine (analytic + exact ufloat) | |
+| **X4** | surfaces — chart bands/toggle + GUM CSV columns + manifest | |
+| **R** | resume the paused refactor (remove dead `DataflowGraph`; remaining glue-layer) | |
+
+Pressure-test cases for the engine: **gauge** (static model), **Keithley** (epoch model +
+random/systematic split), **ratio of two channels** (the correlation case where scalar-σ
+over-estimates and the ufloat path earns its keep).
+
+---
+
+> **[Original capture, 2026-06-24 — retained for reference; see §19.0 for what changed.]**
+> How ferroDAC should treat
 > *physical units* and *measurement uncertainty* as first-class properties of a
 > value, **without taxing the streaming hot path (§11) or every plugin author
 > (§15).** Core thesis: **units and uncertainty are edge / on-demand concerns, not
@@ -1322,20 +1390,23 @@ Where the work lands (hot-path change vs *recompute/display only*):
 - **Plugin SDK (§15):** expose the uncertainty type, math facade, `propagate()` hook, registry; bump `API_VERSION`.
 - **Control surface:** the **compute toggle** (scope?), band show/hide, and the trust-device-σ-vs-residuals choice (§19.4).
 
-### 19.6 Open decisions
+### 19.6 Open decisions — RESOLVED in §19.0 (2026-07-04)
 
-1. **σ stored per-sample vs reconstructed from a model** (model = the cheap default).
-2. **Toggle scope** — per-chart, per-project, or global.
-3. **Random/systematic first-class from v1**, or random-only first.
-4. **Processor default contract** — facade vs analytic-hook vs unknown-fallback.
-5. **Sequencing:** units first (edge-only, lighter); uncertainty's heavy parts are
-   §19.2 (declare), §19.3 (toggle), §19.5 (charts).
+1. **σ stored per-sample vs reconstructed from a model** → **reconstructed from a model**
+   (the derived-lens); stored σ-array only for genuinely *measured* σ.
+2. **Toggle scope** → per-chart, three states (off / analytic-live / exact-on-demand).
+3. **Random/systematic first-class from v1** → **yes**, `Spec(random, systematic)` from X1.
+4. **Processor default contract** → **out-unit = in-unit by default**; framework
+   propagates σ for arithmetic; optional analytic `propagate()` hook otherwise;
+   σ = unknown fallback (never silently wrong).
+5. **Sequencing** → units first (Track A, U1–U2), then uncertainty (Track B, X1–X4).
 
-**Bottom line:** units and uncertainty are **metadata + an opt-in compute mode**, not
-a hot-path rewrite. One propagation mechanism with a *method×when* toggle; values stay
-`float64` on the wire; σ is a 2× channel (or a model); the heavy `uncertainties`
-machinery is bounded to on-demand windows and opt-in for processor authors. Decide the
-two **independently**, and do **units first**.
+**Bottom line (superseded by §19.0):** the original framing was *metadata + an opt-in
+compute mode*. The build makes both **first-class and mandatory** while keeping the same
+cheap mechanics — values still stay `float64` on the wire, σ is still a model reconstructed
+on-demand, the heavy `uncertainties` machinery is still bounded to on-demand windows. What
+changed is that units/σ are now *enforced everywhere* (not opt-in), and the framework —
+not the component author — absorbs the complexity.
 
 ## 20. Local-first archival & storage backends (recorded 2026-06-26)
 
