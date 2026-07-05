@@ -43,27 +43,38 @@ _CHUNK = 1 << 14     # raw array chunk (~16k samples)
 # the source group's `gap_k` attr.
 _GAP_K = 8.0         # a gap = a dt at least this many × the local median cadence …
 _GAP_MIN_S = 30.0    # … but never below this many seconds (ignore sub-30 s jitter)
+_GAP_EPS = 1e-3      # min half-width for a point interval so _partition can own its sample
+
+
+def _widen(s, e, eps):
+    """A coverage interval MUST have real width, or resolver._partition (which assigns an
+    owner by testing a segment's MIDPOINT against lo<=mid<=hi) can never own a zero-width
+    (t,t) interval → its lone sample is dropped from read_raw/query. Pad an isolated sample
+    (a flap between two gaps, or a 1-sample epoch) to a tiny real span; eps << any real gap."""
+    return (s - 0.5 * eps, e + 0.5 * eps) if e - s < eps else (s, e)
 
 
 def _split_intervals(t, gap_k=_GAP_K):
     """Split a monotonic timestamp array into contiguous-recording (start, end)
     intervals at real gaps — a dt >> the local median cadence. Endpoints are the
-    true first/last samples; a gapless series returns a single interval."""
+    true first/last samples; a gapless series returns a single interval. A degenerate
+    (isolated-sample) interval is widened so the resolver never drops its sample."""
     t = np.asarray(t, dtype="f8")
     if t.size == 0:
         return []
     if t.size < 3:
-        return [(float(t[0]), float(t[-1]))]
+        return [_widen(float(t[0]), float(t[-1]), _GAP_EPS)]
     d = np.diff(t)
     pos = d[d > 0]
     med = float(np.median(pos)) if pos.size else 0.0
     thresh = max(_GAP_MIN_S, gap_k * med) if med > 0 else _GAP_MIN_S
+    eps = max(_GAP_EPS, 0.25 * med)              # << thresh, so widened points stay disjoint
     cut = np.nonzero(d > thresh)[0]              # gap sits between t[i] and t[i+1]
     if cut.size == 0:
         return [(float(t[0]), float(t[-1]))]
     starts = [float(t[0])] + [float(t[i + 1]) for i in cut]
     ends = [float(t[i]) for i in cut] + [float(t[-1])]
-    return list(zip(starts, ends))
+    return [_widen(s, e, eps) for s, e in zip(starts, ends)]
 
 
 def _locked(fn):
@@ -386,11 +397,16 @@ class ZarrStore:
             a = eg.attrs
             if not a.get("n", 0):
                 continue
-            ivs = a.get("intervals")
-            if ivs is None:                          # not yet gap-split
-                if a.get("dirty", True):             # actively recording → don't scan;
-                    ivs = [(float(a["t0"]), float(a["t1"]))]   # splits on next rollup
-                else:                                # legacy finalized → migrate once
+            # `intervals` is cached at finalize_rollups, but further append()s (dirty=True)
+            # since the last rollup are NOT in it — trusting a stale `intervals` would under-
+            # report the epoch and make resolver.read_raw DROP those on-disk samples from
+            # exports / the processor re-stream. So gate on `dirty` FIRST: while recording,
+            # report the fresh full extent (the correct gap-split lands at the next rollup).
+            if a.get("dirty", True):
+                ivs = [(float(a["t0"]), float(a["t1"]))]
+            else:
+                ivs = a.get("intervals")
+                if ivs is None:                      # legacy finalized → migrate once
                     ivs = _split_intervals(np.asarray(eg["t"][:]), gap_k)
                     try:
                         eg.attrs["intervals"] = [[s, e] for s, e in ivs]

@@ -95,6 +95,33 @@ def main() -> int:
     assert len(tr) == len(tc1) + len(tc2) and not np.isnan(vr).any(), "read_raw altered"
     print("✓ same-epoch reconnect gap: coverage split in two, query breaks, read_raw intact")
 
+    # series D — a MID-RECORDING rollup (the writer rolls up every N samples) then more
+    # appends must NOT drop the un-rolled-up tail: coverage() must report the fresh full
+    # extent while the epoch is dirty, not the stale cached `intervals`. (Data-loss regression.)
+    store.add_source("D")
+    td1 = np.arange(now - 2000, now - 1000, 0.1)
+    store.append("D", td1, np.ones(len(td1)), epoch="e0")
+    store.finalize_rollups("D", "e0")                 # rollup mid-recording → caches intervals
+    td2 = np.arange(now - 1000, now - 500, 0.1)       # …then keep recording (epoch dirty again)
+    store.append("D", td2, 2 * np.ones(len(td2)), epoch="e0")
+    covd = store.coverage("D")
+    assert len(covd) == 1 and covd[0][1] > now - 501, covd   # full extent, not stale
+    xd, _ = res.read_raw("D", now - 2000, now - 500)
+    assert len(xd) == len(td1) + len(td2), f"un-rolled-up tail dropped: {len(xd)}"
+    print("✓ mid-recording rollup + append: coverage spans full extent, read_raw keeps all")
+
+    # series E — an isolated sample (a 1-flap reconnect) must survive read_raw, not be
+    # dropped by a ZERO-WIDTH coverage interval that _partition can't own. (Data-loss regression.)
+    store.add_source("E")
+    te = np.concatenate([np.arange(now - 5000, now - 4900, 0.1), [now - 1000.0]])
+    store.append("E", te, np.ones(len(te)), epoch="e0")
+    store.finalize_rollups("E", "e0")
+    cove = store.coverage("E")
+    assert len(cove) == 2, f"isolated sample not split out: {cove}"
+    xe, _ = res.read_raw("E", now - 5000, now - 900)
+    assert len(xe) == len(te), f"isolated flap sample dropped: {len(xe)} != {len(te)}"
+    print("✓ isolated flap sample: point interval widened, read_raw keeps it")
+
     print("\nRESOLVER SELFTEST PASS")
     return 0
 
