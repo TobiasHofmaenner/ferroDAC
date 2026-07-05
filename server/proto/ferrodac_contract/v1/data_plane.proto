@@ -22,8 +22,9 @@
 //     accepted unconditionally (allow-all stub); enforcement is a later flip to
 //     a gRPC-metadata interceptor — no message reshape needed.
 //
-// Versioned per DESIGN §17: bump CONTRACT_VERSION on a breaking change; old
-// agents/clients negotiate via the handshake.
+// Versioned per DESIGN §17: bump CONTRACT_VERSION on a breaking change. It is
+// carried in the handshake (Hello/Welcome/HubInfo); the hub currently WARNS on a
+// mismatch and proceeds — full negotiation/rejection is a reserved seam.
 
 syntax = "proto3";
 
@@ -32,7 +33,8 @@ syntax = "proto3";
 // Generated Python module path: ferrodac_contract.v1.data_plane_pb2.
 package ferrodac_contract.v1;
 
-// CONTRACT_VERSION = 1  (carried in Hello/Welcome/HubInfo for negotiation)
+// CONTRACT_VERSION = 1  (carried in Hello/Welcome/HubInfo; hub soft-checks, warns)
+// Mirrored once per deployable: ferrodac/net/__init__.py + server/hub/core.py — keep equal.
 
 // --------------------------------------------------------------------------- //
 //  Enums

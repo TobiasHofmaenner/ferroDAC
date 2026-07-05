@@ -20,7 +20,7 @@ from ferrodac_contract.v1 import data_plane_pb2 as pb
 
 log = logging.getLogger("hub")
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 1   # wire contract version; MIRRORED in ferrodac/net/__init__.py + the .proto — keep equal
 HUB_VERSION = "0.1.0"
 
 

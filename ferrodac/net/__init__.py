@@ -20,7 +20,7 @@ _GEN = os.path.abspath(
 if os.path.isdir(_GEN) and _GEN not in sys.path:
     sys.path.insert(0, _GEN)
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 1   # wire contract version; MIRRORED in server/hub/core.py + the .proto — keep equal
 
 # gRPC's default 4 MiB message cap is too small for the data plane: a backlogged
 # store-sync chunk or a full-res ReadRawTrace response can exceed it. Lift it on

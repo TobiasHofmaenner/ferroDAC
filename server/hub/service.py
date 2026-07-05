@@ -37,6 +37,11 @@ class IngestServicer(rpc.IngestServicer):
                 which = msg.WhichOneof("msg")
                 if which == "hello":
                     agent = msg.hello.agent_id or "?"
+                    cv = msg.hello.contract_version
+                    if cv and cv != CONTRACT_VERSION:   # soft check — log, don't reject
+                        log.warning("agent %s speaks contract v%s, hub is v%s — "
+                                    "proceeding; mismatched fields may be ignored",
+                                    agent, cv, CONTRACT_VERSION)
                     log.info("agent connected: %s", agent)
                     yield pb.HubMessage(welcome=pb.Welcome(
                         session_id=_uuid.uuid4().hex,

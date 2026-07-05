@@ -77,7 +77,11 @@ Invariants baked into the contract:
 - **Compositional identity** `(device_uuid, source_id)` — the UUID is portable.
 - **Auth is a reserved seam** — a `token` rides the handshake/requests, accepted
   unconditionally for now; enforcement is a later flip to a metadata interceptor.
-- **Versioned** — `contract_version` is negotiated in the handshake.
+- **Versioned** — `contract_version` rides the handshake (Hello/Welcome/HubInfo). It is
+  **carried, not yet negotiated**: the hub logs a warning on a mismatch and proceeds
+  (does not reject). Full negotiation/rejection is a reserved seam. The value lives once
+  per deployable (`ferrodac/net/__init__.py`, `server/hub/core.py`) and must track the
+  proto contract; keep them equal.
 
 ## Regenerating the stubs
 
