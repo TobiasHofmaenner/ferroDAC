@@ -1245,11 +1245,15 @@ keep the membership model general and these stay cheap to add later.
 - **Processors are barely affected:** the framework carries the unit through by
   **default** (out-unit = in-unit); only dimension-changing processors (ratio →
   dimensionless, integral → ×time, derivative → ÷time) declare `units_out()`.
-- **Charts group traces by DIMENSION → one Y axis per dimension** (mbar+Torr share a
-  pressure axis with conversion; °C gets its own), each with a per-axis "show in
-  ⟨unit⟩". A plot **never refuses** a mixed bind — it allocates an axis; the "refuse
-  incompatible" gate narrows to genuinely single-unit sinks (processor inputs, pinned
-  axes). [pyqtgraph linked `ViewBox`es; clean for 2 dims, busy for 3+.]
+- **Charts hold ONE physical dimension (revised 2026-07-06, Option B — docs/AXIS-DECISION).**
+  The original per-dimension multi-viewbox design (a right-side axis per extra dimension,
+  linked `ViewBox`es) regressed 3× on lifecycle transitions and fights pyqtgraph (0.14 has no
+  built-in multi-axis). Now a chart adopts the dimension of its first real-unit source;
+  same-dimension sources share the axis WITH conversion (mbar+Torr, K+°C); a dimensionally-
+  incompatible source is **REFUSED** at routing (the chart mirrors its unit onto its SinkPort so
+  the route menu greys it out) and **migrated to a sibling chart** so nothing is silently
+  dropped. Single-pane cross-dimension dual-Y is the one feature traded away, for a
+  correct-by-construction model.
 - **Uncertainty is a derived LENS, not a streamed channel.** *Streaming σ was costed and
   rejected as the default:* 2× storage forever + redundant for the model case + it STILL
   needs the on-demand exact engine for correlations → worst of both. Instead **σ is
