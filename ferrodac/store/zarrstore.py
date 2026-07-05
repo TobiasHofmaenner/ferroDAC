@@ -64,9 +64,25 @@ def _downsample(t, mn, mx, factor):
 class ZarrStore:
     _DEVICES = "devices"        # top-level group holding per-device provenance records
 
+    # On-disk format version. Stamped on the store root + every source/device/epoch group
+    # so a future breaking layout change has a home and a way to tell old bytes from new
+    # (you cannot retrofit a version onto data already written — audit 2026-07-05). Readers
+    # branch on `schema_version()`; add entries to MIGRATORS when the layout changes.
+    SCHEMA_VERSION = 1
+    MIGRATORS: dict = {}        # {from_version: callable(root) -> None}, run in order
+
     def __init__(self, root, mode: str = "a"):
         self.root = zarr.open_group(store=str(root), mode=mode)
         self._lock = threading.RLock()   # see _locked — cross-thread store access
+        # Stamp the version on a NEW (empty) store. An existing store with no stamp is
+        # pre-versioning → reads back as 0 (legacy); we don't mislabel it as v1.
+        if mode != "r" and "schema_version" not in self.root.attrs \
+                and next(self.root.group_keys(), None) is None:
+            self.root.attrs["schema_version"] = self.SCHEMA_VERSION
+
+    def schema_version(self) -> int:
+        """The store's on-disk format version (0 = written before versioning existed)."""
+        return int(self.root.attrs.get("schema_version", 0))
 
     # -- sources -------------------------------------------------------------
     @staticmethod
@@ -84,6 +100,7 @@ class ZarrStore:
     def add_source(self, uuid, name="", unit="", dtype="scalar"):
         g = self.root.require_group(self._gname(uuid))
         if "key" not in g.attrs:                     # init once, original key kept
+            g.attrs["schema_version"] = self.SCHEMA_VERSION
             g.attrs["key"] = str(uuid)
             g.attrs["name"], g.attrs["unit"], g.attrs["dtype"] = name, unit, dtype
             g.attrs["epochs"] = []
@@ -128,6 +145,7 @@ class ZarrStore:
         """Create/refresh a device's identity + current metadata snapshot."""
         g = self.root.require_group(self._DEVICES).require_group(self._gname(device_id))
         if "device_id" not in g.attrs:
+            g.attrs["schema_version"] = self.SCHEMA_VERSION
             g.attrs["device_id"] = str(device_id)
             g.attrs["meta"] = []
         g.attrs["current"] = dict(fields or {})
@@ -274,6 +292,7 @@ class ZarrStore:
         ta.resize((n0 + len(t),)); ta[n0:] = t
         va.resize((n0 + len(v),)); va[n0:] = v
         if n0 == 0:                          # first append: t0 from the new data —
+            eg.attrs["schema_version"] = self.SCHEMA_VERSION
             eg.attrs["t0"] = float(t[0])     # avoids decompressing chunk 0 every
         eg.attrs["t1"] = float(t[-1])        # flush just to re-read ta[0] (mech #2)
         eg.attrs["n"] = int(n0 + len(t))
@@ -381,6 +400,7 @@ class ZarrStore:
             eg.create_array("t", shape=(0,), chunks=(4096,), dtype="f8")
             eg.create_array("y", shape=(0, m), chunks=(256, m), dtype="f8")
             self._put(eg, "x", x)
+            eg.attrs["schema_version"] = self.SCHEMA_VERSION
             eg.attrs["modality"] = "trace"
             eg.attrs["m"] = int(m)
         ta, ya = eg["t"], eg["y"]
