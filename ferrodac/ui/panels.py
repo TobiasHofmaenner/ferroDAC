@@ -826,12 +826,17 @@ class ChartPanel(Panel):
                 self._curves[key].setData([], [])
         self._windowed = set()
 
-    def set_window_curve(self, key, x, y):
-        """Draw a parked curve from a pre-reduced store-query envelope (min/max polyline,
-        pixel-budgeted). Fed through the (now non-decimating) buffer so conversion, the σ
-        band, and the coverage gap-break all apply unchanged — the buffer just holds the
-        ~2·width envelope points without ever hitting its cap. The resolver's own NaN gap
-        markers are stripped here; _set_curve_data re-inserts breaks from live coverage."""
+    def set_window_curve(self, key, x, y, own=True):
+        """Draw a curve from a pre-reduced store-query envelope (min/max polyline, pixel-budgeted).
+        Fed through the (now non-decimating) buffer so conversion, the σ band, and the coverage
+        gap-break all apply unchanged — the buffer just holds the ~2·width envelope points without
+        ever hitting its cap. The resolver's own NaN gap markers are stripped here; _set_curve_data
+        re-inserts breaks from live coverage.
+
+        own=True (a PARKED window): the query owns the curve — feed() ignores the re-stream for it.
+        own=False (grow-mode extended-back-while-LIVE): draw the historic envelope but leave the key
+        un-owned so feed() keeps appending the live tail — the feed monotonicity guard drops the
+        redundant older re-stream (≤ the envelope's last time) and keeps the forward live points."""
         buf = self._buf.get(key)
         if buf is None:
             return
@@ -840,7 +845,8 @@ class ChartPanel(Panel):
         finite = np.isfinite(x)                    # drop resolver gap markers (gap_split re-adds)
         buf.clear()
         buf.append(x[finite], y[finite])
-        self._windowed.add(key)
+        if own:
+            self._windowed.add(key)
         self._set_curve_data(key)
 
     def clear_history(self):

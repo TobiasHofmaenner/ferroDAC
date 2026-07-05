@@ -252,6 +252,27 @@ def test_exit_window_clears_so_feed_rebuilds_monotonically(qapp):
     assert list(p._curves["g/p"].getData()[0]) == [1000.0, 1001.0]  # rebuilt in order, no diagonal
 
 
+def test_extend_back_while_live_shows_history_and_keeps_appending(qapp):
+    """Grow-mode: dragging the tail back while LIVE draws the historic envelope UN-owned
+    (own=False), so feed() keeps appending the live tail. The redundant re-stream of the same
+    span (≤ the envelope's last time) is dropped by the monotonic guard; forward live is kept.
+    Regression: this path returned early / had its history dropped → the chart showed nothing."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False})
+    p.add_source("g/p", _src("P", "mbar"))
+    p.feed([types.SimpleNamespace(key="g/p", value=1.0, status=0, t=100.0),
+            types.SimpleNamespace(key="g/p", value=2.0, status=0, t=101.0)])   # live tail
+    p.clear_history()                                                          # on_reset
+    p.set_window_curve("g/p", np.array([10.0, 50.0, 101.0]),
+                       np.array([5.0, 6.0, 2.0]), own=False)                   # historic, un-owned
+    assert "g/p" not in p._windowed and p._buf["g/p"].x[0] == 10.0
+    p.feed([types.SimpleNamespace(key="g/p", value=9.0, status=0, t=50.0)])    # redundant re-stream
+    assert 9.0 not in list(p._curves["g/p"].getData()[1])                      # dropped (≤ last)
+    p.feed([types.SimpleNamespace(key="g/p", value=3.0, status=0, t=102.0)])   # live continues
+    dx = list(p._curves["g/p"].getData()[0])
+    assert dx[0] == 10.0 and dx[-1] == 102.0        # history kept AND live tail appended
+
+
 def test_feed_drops_backward_out_of_order_points(qapp):
     """A live time-series display must never step back in time: a stray older reading (a device
     clock correction, a leftover envelope) is dropped so connect='finite' can't draw a diagonal

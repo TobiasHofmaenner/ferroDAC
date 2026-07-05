@@ -2423,10 +2423,16 @@ class MainWindow(QMainWindow):
         re-stream (_load) starts, so the bounded rollup query (~10 ms even over millions of samples)
         never contends with the re-stream for the store lock — the chart updates immediately on a
         select. An async read would be starved behind a huge re-stream and the chart wouldn't
-        update until it finished. Zoom stays async (it can fire while a re-stream is in flight)."""
+        update until it finished. Zoom stays async (it can fire while a re-stream is in flight).
+
+        Runs for LIVE too: dragging the tail back in grow mode extends the window into history while
+        still following the live front. There the historic envelope is drawn UN-OWNED so feed()
+        keeps appending the live tail — the historic part is the query, the tail is live, and the
+        feed guard keeps them monotonic. Only a genuinely PARKED window is owned (feed skips it)."""
         tc = self.time_context
-        if tc is None or tc.following or self.resolver is None or self.replay is None:
+        if tc is None or self.resolver is None or self.replay is None:
             return
+        following = tc.following
         t0, t1 = tc.window
         for panel in self.dashboard.panels():
             if not hasattr(panel, "set_window_curve"):
@@ -2437,12 +2443,13 @@ class MainWindow(QMainWindow):
                         and self.resolver.knows(k)]                # in a tier (not derived); O(1)
                 if not keys:
                     continue
-                panel.enter_window(keys)             # feed() ignores them (re-stream feeds procs)
+                if not following:
+                    panel.enter_window(keys)         # parked → feed skips the re-stream entirely
                 mp = max(400, int(panel.plot.width()) * 2)
                 for key in keys:
                     try:
                         x, y = self.resolver.query(key, t0, t1, mp)
-                        panel.set_window_curve(key, x, y)
+                        panel.set_window_curve(key, x, y, own=not following)
                     except Exception:                # noqa: BLE001 — one bad curve ≠ blank chart
                         logging.getLogger("ferrodac").debug(
                             "window query failed for %s", key, exc_info=True)
