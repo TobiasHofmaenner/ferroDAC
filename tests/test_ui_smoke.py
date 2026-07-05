@@ -1075,6 +1075,36 @@ def test_route_to_chart_backfills_recorded_history(qapp):
 
 
 @pytest.mark.ui
+def test_chart_dimensional_routing_gate_and_migration(qapp):
+    """One dimension per chart (Option B): a pressure chart refuses a temperature source,
+    the routing menu greys it out, and a refused route is MIGRATED to a new sibling chart so
+    nothing is silently dropped. This makes the old 'leftover unitless primary + two
+    secondaries' bug structurally impossible."""
+    from ferrodac.ui.workspace import SourcePort
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        db._sources["dev/p"] = SourcePort("dev/p", "P", "float", "mbar", "Dev", "device")
+        db._sources["dev/t"] = SourcePort("dev/t", "T", "float", "°C", "Dev", "device")
+        pid = db.add_panel("chart")
+        db.set_route("dev/p", pid, True)
+        assert db._sinks[pid].unit == "mbar"                     # chart mirrored its dimension
+        assert pid not in [k for k, _ in db.compatible_sinks("dev/t")]   # menu greys out temp
+        n_charts = sum(1 for k in db._panels if k.startswith("chart"))
+        db.set_route("dev/t", pid, True)                         # route temp anyway → refused
+        qapp.processEvents()                                     # let the deferred migration run
+        assert "dev/t" not in db.panel(pid)._curves             # pressure chart refused it
+        assert pid not in db._routes.get("dev/t", set())        # route dropped, not kept
+        charts = [k for k in db._panels if k.startswith("chart")]
+        assert len(charts) == n_charts + 1                      # a sibling chart was spawned
+        sib = next(db.panel(k) for k in charts
+                   if k != pid and db.panel(k)._display_unit == "°C")
+        assert "dev/t" in sib._curves                           # temp landed on the sibling
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_processor_node_routing(qapp):
     """A processor is a routable node: added BLANK (no input), bound by routing a
     source into its input port, its outputs are virtual sources, and it's removable.

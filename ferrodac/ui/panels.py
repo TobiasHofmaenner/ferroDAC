@@ -237,22 +237,6 @@ def _unit_label(unit: str):
     return f"[{u}]" if u.casefold() not in _ARBITRARY else None
 
 
-class _AxisSlot:
-    """One Y axis on a chart = one physical DIMENSION (DESIGN §19.0). The primary slot
-    reuses the plot's built-in left axis + main ViewBox; each further dimension gets its
-    own right-side AxisItem + a ViewBox X-linked to the main one. All curves on a slot
-    are converted to the slot's ``display_unit`` so e.g. mbar and Torr share one axis."""
-    __slots__ = ("dimkey", "vb", "ax", "display_unit", "primary", "keys")
-
-    def __init__(self, dimkey, vb, ax, display_unit, primary):
-        self.dimkey = dimkey
-        self.vb = vb
-        self.ax = ax
-        self.display_unit = display_unit
-        self.primary = primary
-        self.keys = set()
-
-
 class ChartPanel(Panel):
     kind = "chart"
     accepts = frozenset({"float", "bool"})
@@ -277,11 +261,20 @@ class ChartPanel(Panel):
         item.setDownsampling(auto=True, mode="peak")
         item.setClipToView(True)
         lay.addWidget(self.plot)
-        self._pi = item                       # the PlotItem (for multi-axis wiring)
+        self._pi = item
         self._curves: dict = {}
         self._buf: dict = {}
-        self._meta: dict = {}                 # key -> (dimkey, src_unit, conv-callable|None)
-        self._axes: dict = {}                 # dimkey -> _AxisSlot (one Y axis per dimension)
+        self._conv_of: dict = {}              # key -> conv callable|None (source unit → display)
+        self._unit_of: dict = {}              # key -> raw source unit (for dim bookkeeping)
+        # ONE physical dimension per chart (Option B — docs/AXIS-DECISION-2026-07). The chart
+        # adopts the dimension of its first REAL-unit source; same-dimension sources share the
+        # axis (converted, e.g. mbar+Torr); a dimensionally-incompatible source is REFUSED at
+        # routing time. This replaces the fragile per-dimension multi-viewbox model that
+        # regressed 3× (leftover axes, reload mis-wiring, auto-range death).
+        self._dim = None                      # the chart's dimension dimkey (None = none yet)
+        self._display_unit = ""               # canonical display unit for the Y axis
+        self.on_dim_changed = None            # callback(display_unit): the Dashboard mirrors it
+        #                                       onto the SinkPort so the route menu gates by it
         self._t0 = None
         self._ylabel = ""
         self._logy = True
@@ -290,15 +283,10 @@ class ChartPanel(Panel):
         self.clock = None
         self.markers = None
         self._marker_lines: dict = {}
-        # Keep every extra ViewBox glued to the main plot rect as it resizes/zooms.
-        self._pi.vb.sigResized.connect(self._sync_axis_geometry)
-        # The built-in auto-range button only re-ranges the MAIN viewbox; also re-fit the
-        # per-dimension right-axis viewboxes (else it "does nothing" on a multi-axis chart).
-        self._pi.autoBtn.clicked.connect(self._autorange_extra_axes)
         # Uncertainty bands (DESIGN §19.0): a shaded value ∓ k·σ per curve, σ from an
         # injected provider (the app wires reconstruct() with a cached model timeline).
         self._sigma_provider = None           # (key, times, values) -> σ array | None
-        self._bands: dict = {}                # key -> (lo, hi, fill, vb)
+        self._bands: dict = {}                # key -> (lo, hi, fill)
         self._bands_on = False
         self._k = 1.0
 
@@ -318,16 +306,7 @@ class ChartPanel(Panel):
         if "logy" in values:
             self._logy = bool(values["logy"])
             self._logy_explicit = True                           # user chose → keep it
-            self.plot.setLogMode(x=False, y=self._logy)          # primary axis + its curves
-            for slot in self._axes.values():                     # extra axes + their curves
-                if not slot.primary:
-                    try:
-                        slot.ax.setLogMode(self._logy)
-                    except Exception:
-                        pass
-            for key, (dimkey, _u, _c) in self._meta.items():
-                if not self._axes[dimkey].primary:
-                    self._curves[key].setLogMode(False, self._logy)
+            self.plot.setLogMode(x=False, y=self._logy)          # the single Y axis + curves
         if "show_sigma" in values:
             self._bands_on = bool(values["show_sigma"])
         if "sigma_2" in values:
@@ -487,82 +466,56 @@ class ChartPanel(Panel):
         can still force either via the config toggle."""
         return units.compatible(unit or "", "Pa")
 
-    def _alloc_slot(self, dimkey, unit):
-        display_unit = units.canonical(unit) or unit
-        if not self._axes:                    # first dimension → the built-in left axis
-            if not self._logy_explicit:       # data-driven default (until the user picks)
-                want = self._default_logy(unit)
-                if want != self._logy:
-                    self._logy = want
-                    self.plot.setLogMode(x=False, y=self._logy)
-            slot = _AxisSlot(dimkey, self._pi.vb, self._pi.getAxis("left"),
-                             display_unit, primary=True)
-            self._axes[dimkey] = slot
+    def _is_real_dim(self, unit) -> bool:
+        """`unit` carries a REAL physical dimension (mbar, °C) vs dimensionless / unknown
+        ('', 'a.u.') — which never claims or conflicts with the chart's axis dimension."""
+        return self._dimkey(unit) != self._dimkey("")
+
+    def accepts_unit(self, unit) -> bool:
+        """Whether a source with `unit` may be routed here: yes if the chart has no dimension
+        yet, or the unit is dimensionless, or it shares the chart's dimension. The Dashboard's
+        routing gate calls this BEFORE add_source (docs/AXIS-DECISION-2026-07)."""
+        return (self._dim is None or not self._is_real_dim(unit)
+                or self._dimkey(unit) == self._dim)
+
+    @property
+    def display_unit(self) -> str:
+        return self._display_unit
+
+    def _adopt_dimension(self, unit) -> None:
+        """The chart takes on this (real) dimension for its single Y axis: canonical display
+        unit, the per-dimension log/linear default (pressure→log, else linear, until the user
+        picks), the axis label, and a notify so the Dashboard mirrors the unit onto the
+        SinkPort (the routing menu then greys out incompatible sources)."""
+        self._dim = self._dimkey(unit)
+        self._display_unit = units.canonical(unit) or unit
+        if not self._logy_explicit:
+            want = self._default_logy(unit)
+            if want != self._logy:
+                self._logy = want
+                self.plot.setLogMode(x=False, y=self._logy)
+        self._apply_primary_label()
+        if self.on_dim_changed is not None:
+            self.on_dim_changed(self._display_unit)
+
+    def _reset_dimension(self) -> None:
+        """The chart emptied → forget its dimension so it can adopt a new one + free the sink."""
+        if self._dim is not None:
+            self._dim = None
+            self._display_unit = ""
             self._apply_primary_label()
-            return slot
-        index = len(self._axes)               # 1 = built-in right axis, 2+ = new axes
-        vb = pg.ViewBox()
-        vb.setXLink(self._pi.vb)
-        vb.enableAutoRange(axis=vb.YAxis, enable=True)
-        vb.setAutoVisible(y=True)
-        if index == 1:
-            self._pi.showAxis("right")
-            ax = self._pi.getAxis("right")
-        else:
-            ax = pg.AxisItem("right")
-            self._pi.layout.addItem(ax, 2, index + 1)   # stack further axes rightward
-        self._pi.scene().addItem(vb)
-        ax.linkToView(vb)
-        ax.setLabel(_unit_label(display_unit))
-        try:
-            ax.setLogMode(self._logy)
-        except Exception:
-            pass
-        slot = _AxisSlot(dimkey, vb, ax, display_unit, primary=False)
-        self._axes[dimkey] = slot
-        self._sync_axis_geometry()
-        return slot
-
-    def _sync_axis_geometry(self):
-        rect = self._pi.vb.sceneBoundingRect()
-        for slot in self._axes.values():
-            if not slot.primary:
-                slot.vb.setGeometry(rect)
-                slot.vb.linkedViewChanged(self._pi.vb, slot.vb.XAxis)
-
-    def _autorange_extra_axes(self, *_):
-        """Re-enable Y auto-range on the per-dimension right-axis viewboxes (the auto-range
-        button + a re-wire only touch the main viewbox otherwise). `*_` swallows the
-        button's clicked-signal argument."""
-        for slot in self._axes.values():
-            if not slot.primary:
-                slot.vb.enableAutoRange(axis=slot.vb.YAxis, enable=True)
-                slot.vb.setAutoVisible(y=True)
-
-    def showEvent(self, ev):
-        # On app reload the per-dimension right-axis viewboxes are created during
-        # route-rebind BEFORE this panel is laid out, so their geometry (from an empty
-        # sceneBoundingRect) and Y auto-range come out wrong and never recover — a
-        # restored multi-axis chart then can't auto-range / renders its extra axis off
-        # (remove+re-add fixes it). Re-wire once we're actually on screen (deferred a tick
-        # so the layout has real geometry). A fresh chart is unaffected (no-op).
-        super().showEvent(ev)
-        QTimer.singleShot(0, self._rewire_axes)
-
-    def _rewire_axes(self):
-        self._sync_axis_geometry()
-        self._autorange_extra_axes()
+            if self.on_dim_changed is not None:
+                self.on_dim_changed("")
 
     def _apply_primary_label(self):
         if self._ylabel:
             self.plot.setLabel("left", self._ylabel)      # manual label wins
             return
-        prim = next((s for s in self._axes.values() if s.primary), None)
-        self.plot.setLabel("left", _unit_label(prim.display_unit) if prim else None)
+        self.plot.setLabel("left", _unit_label(self._display_unit))
 
     def _set_curve_data(self, key):
         buf = self._buf[key]
-        conv = self._meta[key][2]
+        conv = self._conv_of.get(key)
         y = conv(buf.y) if conv is not None else buf.y
         self._curves[key].setData(buf.x, y, connect="finite")
         if self._bands_on:
@@ -578,9 +531,6 @@ class ChartPanel(Panel):
     def _ensure_band(self, key):
         if key in self._bands or key not in self._curves:
             return
-        slot = self._axes.get(self._meta[key][0])
-        if slot is None:
-            return
         lo, hi = pg.PlotDataItem([], []), pg.PlotDataItem([], [])
         lo.setLogMode(False, self._logy)
         hi.setLogMode(False, self._logy)
@@ -588,15 +538,15 @@ class ChartPanel(Panel):
         c.setAlpha(45)
         fill = pg.FillBetweenItem(lo, hi, brush=pg.mkBrush(c))
         fill.setZValue(-20)                   # behind the curve + grid
-        slot.vb.addItem(fill)
-        self._bands[key] = (lo, hi, fill, slot.vb)
+        self.plot.addItem(fill)               # single Y axis → always the main viewbox
+        self._bands[key] = (lo, hi, fill)
 
     def _update_band(self, key):
         entry = self._bands.get(key)
         buf = self._buf.get(key)
         if entry is None or buf is None:
             return
-        lo, hi, _fill, _vb = entry
+        lo, hi, _fill = entry
         if buf.y.size == 0:
             lo.setData([], [])
             hi.setData([], [])
@@ -624,7 +574,7 @@ class ChartPanel(Panel):
             # Inline σ is a fit against a physical x≥0 bound (§19.7): its 1σ edge
             # is pre-clamped at 0, but k>1 would scale straight past the floor.
             lo_y = np.maximum(lo_y, 0.0)
-        conv = self._meta[key][2]
+        conv = self._conv_of.get(key)
         if conv is not None:
             lo_y, hi_y = conv(lo_y), conv(hi_y)
         if self._logy:
@@ -653,7 +603,7 @@ class ChartPanel(Panel):
         entry = self._bands.pop(key, None)
         if entry is not None:
             try:
-                entry[3].removeItem(entry[2])
+                self.plot.removeItem(entry[2])    # the FillBetweenItem (main viewbox)
             except Exception:
                 pass
 
@@ -668,56 +618,54 @@ class ChartPanel(Panel):
                 self._ensure_band(key)
                 self._update_band(key)
 
-    def add_source(self, key, source):
-        if key in self._curves:
-            return
+    def add_source(self, key, source) -> bool:
+        """Route a source onto the chart's single Y axis. Returns True if adopted (or
+        already shown), False if REFUSED (a different physical dimension than the chart's —
+        the caller drops the route). A dimensionless source is always accepted; the first
+        real-unit source claims the chart's dimension; and if a source that bound
+        dimensionless later gets a real unit (the reload case), it's adopted in place — no
+        viewbox surgery, which is what made the old per-dimension model regress."""
         unit = getattr(source, "unit", "") or ""
-        dimkey = self._dimkey(unit)
-        slot = self._axes.get(dimkey)
-        if slot is None:
-            slot = self._alloc_slot(dimkey, unit)
-        elif not slot.primary and not slot.keys:
-            slot.ax.show()                    # re-show an axis emptied earlier
+        if key in self._curves:                       # already shown — maybe a late unit
+            if self._is_real_dim(unit) and self._dim is None:
+                self._adopt_dimension(unit)           # reload: real unit arrived after ""
+            if self._dim is not None and self._dimkey(unit) == self._dim:
+                self._unit_of[key] = unit
+                self._conv_of[key] = self._conv(unit, self._display_unit)
+                self._set_curve_data(key)             # re-draw with the conversion
+            return True
+        if not self.accepts_unit(unit):
+            return False                              # incompatible dimension → REFUSE
+        if self._dim is None and self._is_real_dim(unit):
+            self._adopt_dimension(unit)               # first real dimension claims the axis
         name = getattr(source, "label", source.name)
-        pen = pg.mkPen(color_for(key), width=2)
-        if slot.primary:
-            curve = self.plot.plot([], [], pen=pen, name=name)
-        else:
-            curve = pg.PlotDataItem([], [], pen=pen, name=name)
-            curve.setLogMode(False, self._logy)
-            curve.setDownsampling(auto=True, method="peak")   # stable, honest — see the
-            curve.setClipToView(True)                         # primary axis note (#10)
-            slot.vb.addItem(curve)
-            if self._legend is not None:
-                self._legend.addItem(curve, name)
+        curve = self.plot.plot([], [], pen=pg.mkPen(color_for(key), width=2), name=name)
         self._curves[key] = curve
         self._buf[key] = CurveBuffer()
-        self._meta[key] = (dimkey, unit, self._conv(unit, slot.display_unit))
-        slot.keys.add(key)
+        self._unit_of[key] = unit
+        self._conv_of[key] = self._conv(unit, self._display_unit)
         if self._bands_on:
             self._ensure_band(key)
+        return True
 
     def remove_source(self, key):
         self._remove_band(key)
         curve = self._curves.pop(key, None)
-        meta = self._meta.pop(key, None)
+        self._conv_of.pop(key, None)
+        self._unit_of.pop(key, None)
         self._buf.pop(key, None)
         if curve is None:
             return
-        slot = self._axes.get(meta[0]) if meta else None
-        if slot is not None and not slot.primary:
-            slot.vb.removeItem(curve)
-        else:
-            self.plot.removeItem(curve)
+        self.plot.removeItem(curve)
         if self._legend is not None:
             try:
                 self._legend.removeItem(curve)
             except Exception:
                 pass
-        if slot is not None:
-            slot.keys.discard(key)
-            if not slot.keys and not slot.primary:
-                slot.ax.hide()                # keep the slot for reuse, just hide it
+        # No real-dimension source left → forget the dimension so the chart can adopt a new
+        # one and the Dashboard frees the SinkPort's unit gate.
+        if not any(self._is_real_dim(u) for u in self._unit_of.values()):
+            self._reset_dimension()
 
     def feed(self, batch):
         # Accumulate the batch per source, then setData ONCE per source (not per
@@ -751,7 +699,7 @@ class ChartPanel(Panel):
         for key, buf in self._buf.items():
             buf.clear()
             self._curves[key].setData([], [])
-        for lo, hi, _fill, _vb in self._bands.values():
+        for lo, hi, _fill in self._bands.values():
             lo.setData([], [])                # clear σ bands too, else a source with no
             hi.setData([], [])                # data in the new window keeps a stale band
         #                                       drawn as a horizontal span (the re-stream
@@ -759,9 +707,6 @@ class ChartPanel(Panel):
         self._sync_markers()                  # reposition tags at the new time base
         self.plot.enableAutoRange()           # a freshly-loaded slice auto-fits once;
         #                                       then the user's zoom/pan is respected
-        for slot in self._axes.values():      # extra axes auto-fit their own Y too
-            if not slot.primary:
-                slot.vb.enableAutoRange(axis=slot.vb.YAxis, enable=True)
 
     def zoom_time(self, t0, t1):
         self.plot.setXRange(t0, t1, padding=0.05)     # time is the X axis here

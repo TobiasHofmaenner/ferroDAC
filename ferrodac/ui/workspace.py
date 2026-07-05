@@ -225,6 +225,11 @@ class Dashboard(QObject):
         # app backfills the panel from that source's recorded history over the current
         # window, so a routed chart shows existing data (not just live from now, #8).
         self._on_display = on_display
+        # on_route_refused(source_key, sink_key): a chart refused a dimensionally-incompatible
+        # source (one axis per chart, Option B). Default = migrate it to a NEW sibling chart so
+        # a restored dual-dimension layout never silently drops a source. The app may override
+        # to add a user notice.
+        self._on_route_refused = self._migrate_refused_route
         # is_live() → are we following the live edge (vs a parked replay)? Heavy
         # processors run off the GUI thread while LIVE (so a slow analysis never
         # freezes acquisition); during a parked re-stream they run inline so the
@@ -348,6 +353,10 @@ class Dashboard(QObject):
                 accepts=getattr(cls, "accepts", frozenset({"float", "bool"})),
                 single_bind=getattr(cls, "single_bind", False), panel=panel,
             )
+            # A chart owns ONE dimension: mirror its adopted unit onto the SinkPort so the
+            # routing menu (compatible_sinks) greys out dimensionally-incompatible sources.
+            if hasattr(panel, "on_dim_changed"):
+                panel.on_dim_changed = lambda u, pid=pid: self._on_chart_dim(pid, u)
             if self.default_sink_id is None and kind == "chart":
                 self.default_sink_id = pid
 
@@ -798,14 +807,23 @@ class Dashboard(QObject):
             self._sinks[key] = port
 
         # auto-rebind: re-apply the side-effects of existing routes that touch a
-        # port which just came (back) online.
+        # port which just came (back) online. A chart may now REFUSE a source whose real
+        # unit (arrived on reconnect) is a different dimension than the chart already holds
+        # → drop that route + migrate (one axis per chart, Option B).
+        refused = []
         for skey in returning_src:
-            for sink_key in self._routes.get(skey, ()):
-                self._apply_route(skey, sink_key)
+            for sink_key in list(self._routes.get(skey, ())):
+                if self._apply_route(skey, sink_key) is False:
+                    refused.append((skey, sink_key))
         for sink_key in returning_snk:
-            for skey, targets in self._routes.items():
+            for skey, targets in list(self._routes.items()):
                 if sink_key in targets:
-                    self._apply_route(skey, sink_key)
+                    if self._apply_route(skey, sink_key) is False:
+                        refused.append((skey, sink_key))
+        for skey, sink_key in refused:
+            self._routes.get(skey, set()).discard(sink_key)
+            if self._on_route_refused is not None:
+                self._on_route_refused(skey, sink_key)
 
         # Track genuinely new device sources but DON'T auto-route them — the user
         # wires sources to sinks explicitly (silent auto-routing to the default chart
@@ -911,11 +929,12 @@ class Dashboard(QObject):
         for sp in self.sink_ports():
             if src.dtype not in sp.accepts:
                 continue
-            # A sink that DECLARES a unit constrains the dimension it accepts (a
-            # pressure-only processor input won't take a voltage). A unitless sink
-            # (charts, generic numeric) accepts any dimension — it just grows an axis
-            # (DESIGN §19.0). Fail open when either unit is unknown, so an unparseable
-            # label never blocks a route.
+            # A sink that DECLARES a unit constrains the dimension it accepts: a
+            # pressure-only processor input won't take a voltage, and a chart that has
+            # already adopted a dimension (its SinkPort.unit is mirrored from it, Option B)
+            # won't take an incompatible one. An empty-unit sink (a fresh chart, generic
+            # numeric) accepts any dimension. Fail open when either unit is unknown, so an
+            # unparseable label never blocks a route.
             if sp.unit and src.unit and not units.compatible(src.unit, sp.unit):
                 continue
             out.append((sp.key, sp.name))
@@ -953,8 +972,14 @@ class Dashboard(QObject):
                         if sink.kind == "display" and sink.panel is not None:
                             sink.panel.remove_source(skey)
             targets.add(sink_key)
-            self._apply_route(source_key, sink_key)
-            if (self._on_display is not None and sink is not None
+            if self._apply_route(source_key, sink_key) is False:
+                # a chart REFUSED the source (a different physical dimension than the one it
+                # already shows — one axis per chart, Option B). Drop the route and let the
+                # app migrate it (spawn a sibling chart for that dimension / surface a notice).
+                targets.discard(sink_key)
+                if self._on_route_refused is not None:
+                    self._on_route_refused(source_key, sink_key)
+            elif (self._on_display is not None and sink is not None
                     and sink.kind == "display" and sink.panel is not None):
                 self._on_display(source_key, sink.panel)   # backfill history (#8)
         else:
@@ -967,14 +992,16 @@ class Dashboard(QObject):
                     proc.bind_input(None)               # unroute → unbind the processor
         self.ports_changed.emit()
 
-    def _apply_route(self, source_key: str, sink_key: str) -> None:
-        """Live side-effects of a route — a no-op unless both ports are present."""
+    def _apply_route(self, source_key: str, sink_key: str):
+        """Live side-effects of a route. Returns False iff a display panel REFUSED the source
+        (dimensional gate); True/None otherwise (a no-op when a port is absent is not a refusal —
+        the route stays intent and binds when the port appears)."""
         sink = self._sinks.get(sink_key)
         src = self._sources.get(source_key)
         if sink is None or src is None:
-            return
+            return None
         if sink.kind == "display":
-            sink.panel.add_source(source_key, src)
+            return sink.panel.add_source(source_key, src)   # bool: accepted / refused
         elif sink.kind == "processor":
             proc = self._processors.get(sink.sink_id)
             if proc is not None:
@@ -984,6 +1011,27 @@ class Dashboard(QObject):
                 src.panel.set_range(sink.smin, sink.smax, sink.unit)   # no-op if not a setpoint
             if src.kind == "virtual" and src.dtype in ("float", "bool"):
                 self._write_to_device(sink, src.panel.current_value())
+
+    def _on_chart_dim(self, pid: str, unit: str) -> None:
+        """A chart adopted (or cleared) its dimension → mirror the unit onto its SinkPort so
+        the routing menu (compatible_sinks) gates incompatible sources by dimension."""
+        sp = self._sinks.get(pid)
+        if sp is not None and sp.unit != unit:
+            sp.unit = unit
+            self.ports_changed.emit()
+
+    def _migrate_refused_route(self, source_key: str, sink_key: str) -> None:
+        """A source was refused by a chart (different dimension). Spawn a NEW chart for it and
+        route it there, so a restored dual-dimension layout doesn't silently lose the source.
+        Deferred to avoid re-entrancy inside the current route/rebind pass."""
+        def spawn(source_key=source_key):
+            if source_key not in self._sources:
+                return
+            pid = self.add_panel("chart")
+            self.set_route(source_key, pid, True)
+            log.info("routing gate: %s didn't fit %s (different dimension) → new chart %s",
+                     source_key, sink_key, pid)
+        QTimer.singleShot(0, spawn)
 
     # -- data flow -----------------------------------------------------------
     def _on_data_batch(self, batch):

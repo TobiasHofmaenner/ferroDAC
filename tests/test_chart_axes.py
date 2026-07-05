@@ -1,6 +1,8 @@
-"""ChartPanel unit-aware multi-axis (DESIGN §19.0 / U2). One Y axis per physical
-DIMENSION: same-dimension sources share an axis (converted to a common display unit);
-a new dimension allocates a new right-side axis. UI-marked (needs a QApplication)."""
+"""ChartPanel single-axis + dimensional routing gate (Option B, docs/AXIS-DECISION-2026-07):
+ONE physical dimension per chart — the first real-unit source claims the Y axis, same-
+dimension sources share it (converted, mbar+Torr), a dimensionally-incompatible source is
+REFUSED (add_source→False so the Dashboard drops the route), and a source that bound with an
+unknown unit adopts the axis when its real unit arrives (the reload case). UI-marked."""
 import types
 
 import numpy as np
@@ -19,68 +21,67 @@ def _chart(qapp):
     return ChartPanel()
 
 
-def _primary(p):
-    return next(s for s in p._axes.values() if s.primary)
-
-
-def _extras(p):
-    return [s for s in p._axes.values() if not s.primary]
-
-
-def test_first_source_labels_the_left_axis_from_its_unit(qapp):
+def test_first_source_labels_the_axis_from_its_unit(qapp):
     p = _chart(qapp)
-    p.add_source("g/p", _src("pressure", "mbar"))
-    assert len(p._axes) == 1
-    prim = _primary(p)
-    assert prim.display_unit == "mbar"
+    assert p.add_source("g/p", _src("pressure", "mbar")) is True
+    assert p.display_unit == "mbar"
     assert p.plot.getAxis("left").labelText == "[mbar]"
 
 
-def test_same_dimension_shares_one_axis_with_conversion(qapp):
+def test_same_dimension_shares_the_axis_with_conversion(qapp):
     p = _chart(qapp)
     p.add_source("g/mbar", _src("A", "mbar"))
-    p.add_source("g/torr", _src("B", "Torr"))
-    # Both are pressure → ONE axis, displayed in the first-seen unit (mbar).
-    assert len(p._axes) == 1
-    assert _primary(p).display_unit == "mbar"
-    # The Torr curve carries a conversion to mbar: 1 Torr ≈ 1.33322 mbar.
-    conv = p._meta["g/torr"][2]
+    assert p.add_source("g/torr", _src("B", "Torr")) is True    # pressure → accepted, converted
+    assert p.display_unit == "mbar"                             # first-seen unit displays
+    # the Torr curve carries a conversion to mbar (1 Torr ≈ 1.33322 mbar); mbar is identity
+    conv = p._conv_of["g/torr"]
     assert conv is not None and conv(1.0) == pytest.approx(1.33322, rel=1e-4)
-    # The mbar curve needs no conversion (identity).
-    assert p._meta["g/mbar"][2] is None
+    assert p._conv_of["g/mbar"] is None
 
 
-def test_new_dimension_allocates_a_second_axis(qapp):
+def test_incompatible_dimension_is_refused(qapp):
+    """The gate: once a chart holds pressure, routing a temperature returns False (the
+    Dashboard drops the route) — no second axis, no leftover state."""
     p = _chart(qapp)
     p.add_source("g/p", _src("pressure", "mbar"))
-    p.add_source("s/t", _src("temp", "°C"))
-    assert len(p._axes) == 2
-    extra = _extras(p)
-    assert len(extra) == 1
-    assert extra[0].display_unit == "°C"
-    assert extra[0].ax.labelText == "[°C]"
-    # The temperature curve lives in its own ViewBox, not the main one.
-    assert p._curves["s/t"] not in p._pi.vb.addedItems
-    assert p._curves["s/t"] in extra[0].vb.addedItems
+    assert p.add_source("s/t", _src("temp", "°C")) is False
+    assert "s/t" not in p._curves and p.display_unit == "mbar"
+    assert p.accepts_unit("Torr") is True and p.accepts_unit("°C") is False
 
 
-def test_dimensionless_sources_share_a_single_axis(qapp):
+def test_dimensionless_sources_share_the_axis(qapp):
     p = _chart(qapp)
-    p.add_source("a/x", _src("X", ""))       # arbitrary / unitless
-    p.add_source("b/y", _src("Y", "a.u."))
-    assert len(p._axes) == 1                  # dimensionless family → one axis
-    assert p.plot.getAxis("left").labelText == ""    # no meaningless [a_u] label
+    assert p.add_source("a/x", _src("X", "")) is True        # arbitrary / unitless
+    assert p.add_source("b/y", _src("Y", "a.u.")) is True    # dimensionless never conflicts
+    assert p.plot.getAxis("left").labelText == ""            # no meaningless [a_u] label
+    assert p.add_source("g/p", _src("P", "mbar")) is True    # a real dim can still be adopted
 
 
-def test_removing_the_last_source_hides_its_extra_axis(qapp):
+def test_removing_all_sources_resets_the_dimension(qapp):
+    """Empty the chart → it forgets its dimension so it can adopt a new one (and the
+    Dashboard frees the sink's unit gate)."""
+    changed = []
     p = _chart(qapp)
+    p.on_dim_changed = changed.append
     p.add_source("g/p", _src("pressure", "mbar"))
-    p.add_source("s/t", _src("temp", "°C"))
-    extra = _extras(p)[0]
-    p.remove_source("s/t")
-    assert not extra.keys                      # slot emptied
-    assert not extra.ax.isVisible()            # axis hidden (slot kept for reuse)
-    assert _primary(p).keys == {"g/p"}         # primary untouched
+    p.remove_source("g/p")
+    assert p._dim is None and p.display_unit == ""
+    assert changed[-1] == ""                                  # notified the Dashboard
+    assert p.add_source("s/t", _src("temp", "°C")) is True    # now free to adopt temperature
+    assert p.display_unit == "°C"
+
+
+def test_late_unit_adopts_the_axis_in_place(qapp):
+    """The reload case (bug #1): a source binds with unit='' (a historic port before the
+    device reconnects), then its real unit arrives on a re-add → the chart adopts the
+    dimension in place, no viewbox surgery, buffered data preserved."""
+    p = _chart(qapp)
+    p.add_source("s/t", _src("temp", ""))                    # unknown unit first
+    p.feed([types.SimpleNamespace(key="s/t", value=22.0, status=0, t=1.0)])
+    assert p.add_source("s/t", _src("temp", "°C")) is True   # real unit arrives
+    assert p.display_unit == "°C"
+    assert p.plot.getAxis("left").labelText == "[°C]"
+    assert len(p._buf["s/t"]) == 1                           # data preserved
 
 
 def test_temperature_defaults_to_linear_and_keeps_its_unit_label(qapp):
@@ -122,12 +123,12 @@ def test_uncertainty_bands_toggle_convert_and_scale(qapp):
     assert "g/p" not in p._bands              # off by default
     p.apply_config({"show_sigma": True})
     assert "g/p" in p._bands                  # band created on toggle
-    lo, hi, _fill, _vb = p._bands["g/p"]
+    lo, hi, _fill = p._bands["g/p"]
     np.testing.assert_allclose(lo.getData()[1], [9.0, 18.0])    # value − 1σ
     np.testing.assert_allclose(hi.getData()[1], [11.0, 22.0])   # value + 1σ
 
     p.apply_config({"sigma_2": True})         # k = 2 → band doubles
-    lo2, hi2, _f, _v = p._bands["g/p"]
+    lo2, hi2, _f = p._bands["g/p"]
     np.testing.assert_allclose(lo2.getData()[1], [8.0, 16.0])
     np.testing.assert_allclose(hi2.getData()[1], [12.0, 24.0])
 
@@ -144,7 +145,7 @@ def test_clear_history_clears_stale_bands(qapp):
     p.add_source("g/p", _src("P", "mbar"))
     p.feed([types.SimpleNamespace(key="g/p", value=10.0, status=0, t=1.0, sigma=0.5),
             types.SimpleNamespace(key="g/p", value=11.0, status=0, t=2.0, sigma=0.5)])
-    lo, hi, _f, _v = p._bands["g/p"]
+    lo, hi, _f = p._bands["g/p"]
     assert lo.getData()[1] is not None and len(lo.getData()[1]) == 2
     p.clear_history()
     assert len(lo.getData()[1] or []) == 0 and len(hi.getData()[1] or []) == 0
@@ -158,7 +159,7 @@ def test_band_uses_inline_sigma_from_reading(qapp):
     p.add_source("gas/g1/H2O", _src("H2O", "mbar"))
     p.feed([types.SimpleNamespace(key="gas/g1/H2O", value=10.0, status=0, t=1.0,
                                   sigma=0.5)])
-    lo, hi, _f, _v = p._bands["gas/g1/H2O"]
+    lo, hi, _f = p._bands["gas/g1/H2O"]
     np.testing.assert_allclose(lo.getData()[1], [9.5])    # value − inline σ
     np.testing.assert_allclose(hi.getData()[1], [10.5])   # value + inline σ
 
@@ -171,7 +172,7 @@ def test_band_uses_asymmetric_inline_sigma(qapp):
     p.add_source("gas/g1/CO2", _src("CO2", "mbar"))
     p.feed([types.SimpleNamespace(key="gas/g1/CO2", value=1.0, status=0, t=1.0,
                                   sigma=(1.0, 3.0))])
-    lo, hi, _f, _v = p._bands["gas/g1/CO2"]
+    lo, hi, _f = p._bands["gas/g1/CO2"]
     np.testing.assert_allclose(lo.getData()[1], [0.0])    # value − σ_lo → the floor
     np.testing.assert_allclose(hi.getData()[1], [4.0])    # value + σ_hi (full upside)
 
@@ -187,7 +188,7 @@ def test_folded_band_survives_a_log_axis(qapp):
     p.feed([types.SimpleNamespace(key="gas/g1/N2", value=v, status=0, t=1000.0 + i,
                                   sigma=(v, 0.5))          # folded: σ_lo == value
             for i, v in enumerate([5.0, 4.0, 1.0])])
-    lo, hi, _f, _v = p._bands["gas/g1/N2"]
+    lo, hi, _f = p._bands["gas/g1/N2"]
     lo_y, hi_y = lo.getData()[1], hi.getData()[1]
     assert len(lo_y) == 3 and len(hi_y) == 3
     assert np.isfinite(lo_y).all() and np.isfinite(hi_y).all()   # band still drawn
@@ -202,7 +203,7 @@ def test_2sigma_never_pushes_a_folded_band_below_zero(qapp):
     p.feed([types.SimpleNamespace(key="gas/g1/O2", value=v, status=0, t=1000.0 + i,
                                   sigma=(0.9 * v, 0.5))
             for i, v in enumerate([5.0, 4.0, 0.5])])
-    lo, _hi, _f, _v = p._bands["gas/g1/O2"]
+    lo, _hi, _f = p._bands["gas/g1/O2"]
     assert (lo.getData()[1] >= 0.0).all()
 
 
@@ -213,7 +214,7 @@ def test_band_converts_to_the_axis_display_unit(qapp):
     p.add_source("g/mbar", _src("A", "mbar"))
     p.add_source("g/torr", _src("B", "Torr"))     # shares the pressure axis, converted
     p.feed([types.SimpleNamespace(key="g/torr", value=10.0, status=0, t=1.0)])
-    lo, hi, _f, _v = p._bands["g/torr"]
+    lo, hi, _f = p._bands["g/torr"]
     # σ=1 Torr around 10 Torr → [9,11] Torr, displayed in mbar (×1.33322)
     np.testing.assert_allclose(hi.getData()[1], [11.0 * 1.33322], rtol=1e-4)
     np.testing.assert_allclose(lo.getData()[1], [9.0 * 1.33322], rtol=1e-4)
