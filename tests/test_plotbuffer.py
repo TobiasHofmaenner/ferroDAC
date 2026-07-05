@@ -121,3 +121,51 @@ def test_asymmetric_sigma_stays_aligned_through_decimation():
     b.append([5.0, 6.0], [5.0, 6.0], ([0.5, 0.6], [5.0, 6.0]))  # overflow → decimate
     np.testing.assert_allclose(b.sigma_lo, b.x / 10)  # lo[i] still matches x[i]
     np.testing.assert_allclose(b.sigma_hi, b.x)       # hi[i] still matches x[i]
+
+
+def _feed_in_chunks(b, xs, ys, chunk=200):
+    """Feed like the park re-stream does — in batches well under the cap, so the
+    buffer accumulates and decimates in place (NOT the single-batch>cap tail path)."""
+    for i in range(0, len(xs), chunk):
+        b.append(xs[i:i + chunk], ys[i:i + chunk])
+
+
+def test_decimation_preserves_a_lone_spike():
+    """The min/max envelope must NOT drop a narrow feature the way stride-2 did:
+    a single tall spike buried in a flat baseline, once the buffer overflows and
+    decimates, must still be representable (its extreme value survives)."""
+    b = CurveBuffer(cap=1000)
+    n = 20_000                                 # >> cap → many decimations
+    xs = np.arange(n, dtype="f8")
+    ys = np.zeros(n)
+    ys[n // 2] = 42.0                          # one lone spike, flat elsewhere
+    _feed_in_chunks(b, xs, ys)
+    assert len(b) <= 1000
+    assert b.y.max() == 42.0                   # the spike is still there (stride lost it)
+    # ...and it stayed at roughly the right time (envelope carries the spike's own x)
+    spike_x = float(b.x[int(np.argmax(b.y))])
+    assert abs(spike_x - n / 2) < 16.0         # within a few buckets of its true time
+
+
+def test_decimation_keeps_min_and_max_extrema():
+    """Both extremes of an oscillation survive — the envelope keeps argmin AND
+    argmax per bucket, so a symmetric signal is not biased toward one rail."""
+    b = CurveBuffer(cap=1000)
+    n = 16_000
+    xs = np.arange(n, dtype="f8")
+    ys = np.sin(xs * 0.5)                       # full ±1 swing, aliasing-prone
+    _feed_in_chunks(b, xs, ys)
+    assert b.y.max() > 0.99 and b.y.min() < -0.99   # both rails preserved
+
+
+def test_decimation_preserves_a_buffered_nan_gap_marker():
+    """An offline-gap NaN that lives IN the buffer (a live drop) must remain a
+    break after the buffer overflows and decimates — never healed into a line."""
+    b = CurveBuffer(cap=1000)
+    n = 8_000
+    xs = np.arange(n, dtype="f8")
+    ys = np.ones(n)
+    ys[n // 2] = np.nan                        # a single gap marker
+    _feed_in_chunks(b, xs, ys)
+    assert len(b) <= 1000
+    assert np.isnan(b.y).any()                 # the break survived decimation

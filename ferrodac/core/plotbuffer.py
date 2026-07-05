@@ -96,15 +96,53 @@ class CurveBuffer:
         self._x, self._y, self._slo, self._shi = nx, ny, nlo, nhi
 
     def _decimate(self) -> None:
-        """Halve the stored points, keeping the full span (stride 2). Coarsens the
-        display; the store keeps full resolution for the Timeline/analysis."""
+        """Halve the stored points with a min/max **envelope**, keeping the full
+        span. Each group of 4 consecutive samples collapses to its two extrema
+        (the argmin and argmax of y, emitted in time order) — so a lone spike is
+        never dropped the way plain stride-2 would drop it, and it composes
+        losslessly with pyqtgraph's ``mode="peak"`` (min/max of min/max = min/max).
+        Coarsens the *display* only; the store keeps full resolution for the
+        Timeline/analysis. NaN-aware: any bucket holding a NaN emits a break, so a
+        buffered offline-gap marker survives decimation (a straight line must never
+        be drawn across a real gap)."""
         n = self._n
-        h = (n + 1) // 2
-        self._x[:h] = self._x[:n:2]
-        self._y[:h] = self._y[:n:2]
-        self._slo[:h] = self._slo[:n:2]
-        self._shi[:h] = self._shi[:n:2]
-        self._n = h
+        if n < 4:                              # too small to envelope → stride halve
+            h = (n + 1) // 2
+            for a in (self._x, self._y, self._slo, self._shi):
+                a[:h] = a[:n:2]
+            self._n = h
+            return
+        B = 4                                  # 4 samples → 2 extrema = 2:1, like stride
+        full = n // B
+        used = full * B
+        tail = n - used                        # 0..3 newest points, kept exact
+        m = 2 * full
+        rows = np.arange(full)
+        yb = self._y[:used].reshape(full, B)
+        nan_bucket = np.isnan(yb).any(axis=1)
+        imin = np.where(np.isnan(yb), np.inf, yb).argmin(axis=1)
+        imax = np.where(np.isnan(yb), -np.inf, yb).argmax(axis=1)
+        lo_i = np.minimum(imin, imax)          # earlier-in-time extremum first
+        hi_i = np.maximum(imin, imax)
+
+        def _fold(a):
+            ab = a[:used].reshape(full, B)
+            out = np.empty(m + tail, dtype="f8")
+            out[0:m:2] = ab[rows, lo_i]
+            out[1:m:2] = ab[rows, hi_i]
+            if tail:
+                out[m:] = a[used:n]            # newest tail verbatim (live cursor)
+            return out
+
+        nx, ny, nlo, nhi = (_fold(self._x), _fold(self._y),
+                            _fold(self._slo), _fold(self._shi))
+        if nan_bucket.any():                   # force a break where the gap lives
+            ny[:m].reshape(full, 2)[nan_bucket] = np.nan
+        self._x[:m + tail] = nx
+        self._y[:m + tail] = ny
+        self._slo[:m + tail] = nlo
+        self._shi[:m + tail] = nhi
+        self._n = m + tail
 
     def trim(self, x_min: float) -> bool:
         """Drop points older than x_min (slide mode). Returns True if it changed
