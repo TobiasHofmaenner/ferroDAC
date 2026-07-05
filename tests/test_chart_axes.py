@@ -234,6 +234,50 @@ def test_manual_zoom_fires_on_zoom_with_the_view_range(qapp):
     assert seen and abs(seen[-1][0] - 1000.0) < 50 and abs(seen[-1][1] - 2000.0) < 50
 
 
+def test_exit_window_resumes_feed_keeping_buffer(qapp):
+    """Review #3: Play walks the head forward → exit_window releases window ownership WITHOUT
+    clearing the buffer, so feed() drives the curve again (a parked stored curve must not
+    freeze when you press Play; the drawn points stay while the re-stream resumes)."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False})
+    p.add_source("g/p", _src("P", "mbar"))
+    p.enter_window(["g/p"])
+    p.set_window_curve("g/p", np.array([1000.0, 1001.0]), np.array([1.0, 2.0]))
+    assert "g/p" in p._windowed and len(p._curves["g/p"].getData()[0]) == 2
+    p.exit_window()
+    assert not p._windowed
+    p.feed([types.SimpleNamespace(key="g/p", value=3.0, status=0, t=1002.0)])
+    dx, dy = p._curves["g/p"].getData()
+    assert len(dx) == 3 and dy[-1] == 3.0             # buffer kept + feed appended
+
+
+def test_clear_history_cancels_pending_zoom_requery(qapp):
+    """Review #4: a pending zoom-debounce timer must be stopped on a window reset, else it
+    fires _fire_zoom on the STALE viewRange and paints the old window (and its shared query
+    key kills the fresh park query)."""
+    p = _chart(qapp)
+    p.add_source("g/p", _src("P", "mbar"))
+    p.plot.setXRange(1000, 2000, padding=0)
+    p._zoom_timer.start()                             # a zoom re-query is pending
+    assert p._zoom_timer.isActive()
+    p.clear_history()
+    assert not p._zoom_timer.isActive() and p._last_zoom_x is None
+
+
+def test_y_only_zoom_does_not_refire_on_zoom(qapp):
+    """Review #6: an unchanged X range (a Y-axis-only zoom still emits sigRangeChangedManually
+    in pyqtgraph 0.14) must not re-fire on_zoom — it would re-query the store and redraw every
+    windowed chart for zero visual change."""
+    p = _chart(qapp)
+    p.add_source("g/p", _src("P", "mbar"))
+    fired = []
+    p.on_zoom = lambda t0, t1: fired.append((t0, t1))
+    p.plot.setXRange(1000, 2000, padding=0)
+    p._fire_zoom()
+    p._fire_zoom()                                    # same X (Y-only) → must be a no-op
+    assert len(fired) == 1
+
+
 def test_band_uses_inline_sigma_from_reading(qapp):
     """A processor output that CREATES uncertainty carries σ inline on the Reading; the
     chart draws the band from it — no provider needed (that's the gas-fit path)."""

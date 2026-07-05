@@ -2382,6 +2382,10 @@ class MainWindow(QMainWindow):
         if tc is None or not tc.playing:
             self._play_wall = None
             return
+        for panel in self.dashboard.panels():        # Play walks the head forward WITHOUT a
+            if hasattr(panel, "exit_window"):        # reset → release parked-window ownership
+                panel.exit_window()                  # so the incremental re-stream drives the
+        #                                              curves again (else stored curves freeze)
         now = time.perf_counter()
         wall = (now - self._play_wall) if self._play_wall else 0.05
         self._play_wall = now

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .zarrstore import _downsample, _interleave
+from .zarrstore import _downsample, _interleave, _split_intervals
 
 
 def _merge(intervals):
@@ -36,8 +36,16 @@ class RamTier:
         self.history = history
 
     def coverage(self, series):
+        # Gap-aware: a plain (oldest, newest) span would advertise ONE continuous interval
+        # over a 30 s–300 s outage that the store correctly split, and _merge would union the
+        # store's split back into one → the chart draws a line across a real gap again. Split
+        # the RAM slice on the same dt rule so RAM and store agree (still one interval when
+        # the ring truly is continuous — no false breaks).
         sp = self.history.span(series)
-        return [sp] if sp else []
+        if not sp:
+            return []
+        ts = [t for (t, _v, s) in self.history.slice(series, sp[0], sp[1]) if s == 0]
+        return _split_intervals(np.asarray(ts, dtype="f8")) if ts else [sp]
 
     def query(self, series, t0, t1, max_points=2000):
         pts = [(t, v) for (t, v, s) in self.history.slice(series, t0, t1) if s == 0]

@@ -315,6 +315,7 @@ class ChartPanel(Panel):
         # setData / autorange / the sibling X-link — so it can't loop with them. Debounced so
         # a drag re-queries once it settles.
         self.on_zoom = None                   # callback(t0, t1) — set by the Dashboard
+        self._last_zoom_x = None              # last X range re-queried (skip Y-only zooms)
         self._zoom_timer = QTimer(self)
         self._zoom_timer.setSingleShot(True)
         self._zoom_timer.setInterval(150)
@@ -322,9 +323,15 @@ class ChartPanel(Panel):
         self._pi.vb.sigRangeChangedManually.connect(lambda *_: self._zoom_timer.start())
 
     def _fire_zoom(self):
-        if self.on_zoom is not None:
-            (t0, t1), _ = self._pi.vb.viewRange()
-            self.on_zoom(float(t0), float(t1))
+        if self.on_zoom is None:
+            return
+        (t0, t1), _ = self._pi.vb.viewRange()
+        if (self._last_zoom_x is not None                 # a Y-only zoom leaves X unchanged →
+                and abs(t0 - self._last_zoom_x[0]) < 1e-9  # no re-query (would be wasted store
+                and abs(t1 - self._last_zoom_x[1]) < 1e-9):  # reads + redraws for zero change)
+            return
+        self._last_zoom_x = (float(t0), float(t1))
+        self.on_zoom(float(t0), float(t1))
 
     def config_fields(self):
         return super().config_fields() + [
@@ -785,6 +792,13 @@ class ChartPanel(Panel):
         gradient-decimated flash before the clean envelope lands). Non-curve keys ignored."""
         self._windowed = {k for k in keys if k in self._curves}
 
+    def exit_window(self):
+        """Release window (query) ownership but KEEP the drawn buffer — so feed() drives the
+        curves again while the buffer's points stay. Used when Play walks the head forward:
+        the incremental re-stream must resume appending instead of being ignored (else every
+        stored curve freezes at the park front). Going fully live uses clear_history instead."""
+        self._windowed = set()
+
     def set_window_curve(self, key, x, y):
         """Draw a parked curve from a pre-reduced store-query envelope (min/max polyline,
         pixel-budgeted). Fed through the (now non-decimating) buffer so conversion, the σ
@@ -803,6 +817,10 @@ class ChartPanel(Panel):
         self._set_curve_data(key)
 
     def clear_history(self):
+        self._zoom_timer.stop()                   # cancel a pending zoom re-query for the OLD
+        self._last_zoom_x = None                  #   window (else it fires _fire_zoom on the
+        #                                           stale viewRange and paints the wrong slice,
+        #                                           and its shared key kills the fresh park query)
         self._windowed = set()                    # go-live / new window → feed drives again
         for key, buf in self._buf.items():
             buf.clear()
