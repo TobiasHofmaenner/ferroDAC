@@ -234,21 +234,38 @@ def test_manual_zoom_fires_on_zoom_with_the_view_range(qapp):
     assert seen and abs(seen[-1][0] - 1000.0) < 50 and abs(seen[-1][1] - 2000.0) < 50
 
 
-def test_exit_window_resumes_feed_keeping_buffer(qapp):
-    """Review #3: Play walks the head forward → exit_window releases window ownership WITHOUT
-    clearing the buffer, so feed() drives the curve again (a parked stored curve must not
-    freeze when you press Play; the drawn points stay while the re-stream resumes)."""
+def test_exit_window_clears_so_feed_rebuilds_monotonically(qapp):
+    """Play releases the window via exit_window, which CLEARS the envelope buffer — the query
+    envelope spans the whole parked window, so the resuming re-stream (which re-experiences that
+    span from its start) must rebuild the buffer, not append onto the envelope's later points and
+    make it step BACKWARD in time (which drew a diagonal to an out-of-order point)."""
     p = _chart(qapp)
     p.apply_config({"logy": False})
     p.add_source("g/p", _src("P", "mbar"))
     p.enter_window(["g/p"])
-    p.set_window_curve("g/p", np.array([1000.0, 1001.0]), np.array([1.0, 2.0]))
-    assert "g/p" in p._windowed and len(p._curves["g/p"].getData()[0]) == 2
+    p.set_window_curve("g/p", np.array([1000.0, 1001.0, 1002.0]), np.array([1.0, 2.0, 3.0]))
+    assert len(p._curves["g/p"].getData()[0]) == 3
     p.exit_window()
-    assert not p._windowed
-    p.feed([types.SimpleNamespace(key="g/p", value=3.0, status=0, t=1002.0)])
+    assert not p._windowed and len(p._buf["g/p"]) == 0            # buffer cleared on transition
+    p.feed([types.SimpleNamespace(key="g/p", value=1.0, status=0, t=1000.0),
+            types.SimpleNamespace(key="g/p", value=2.0, status=0, t=1001.0)])   # play re-streams
+    assert list(p._curves["g/p"].getData()[0]) == [1000.0, 1001.0]  # rebuilt in order, no diagonal
+
+
+def test_feed_drops_backward_out_of_order_points(qapp):
+    """A live time-series display must never step back in time: a stray older reading (a device
+    clock correction, a leftover envelope) is dropped so connect='finite' can't draw a diagonal
+    to an out-of-order point. Forward points are still accepted."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False})
+    p.add_source("g/p", _src("P", "mbar"))
+    p.feed([types.SimpleNamespace(key="g/p", value=1.0, status=0, t=1000.0),
+            types.SimpleNamespace(key="g/p", value=2.0, status=0, t=1001.0)])
+    p.feed([types.SimpleNamespace(key="g/p", value=9.0, status=0, t=1000.5)])   # stray OLDER point
     dx, dy = p._curves["g/p"].getData()
-    assert len(dx) == 3 and dy[-1] == 3.0             # buffer kept + feed appended
+    assert list(dx) == [1000.0, 1001.0] and 9.0 not in list(dy)  # backward point dropped
+    p.feed([types.SimpleNamespace(key="g/p", value=3.0, status=0, t=1002.0)])   # forward → kept
+    assert list(p._curves["g/p"].getData()[0]) == [1000.0, 1001.0, 1002.0]
 
 
 def test_clear_history_cancels_pending_zoom_requery(qapp):

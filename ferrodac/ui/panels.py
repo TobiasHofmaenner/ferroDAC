@@ -780,7 +780,23 @@ class ChartPanel(Panel):
                 tlo.append(float("nan"))
                 thi.append(float("nan"))
         for key, (tx, ty, tlo, thi) in touched.items():   # e.g. the gas fit
-            self._buf[key].append(tx, ty, (tlo, thi))
+            buf = self._buf[key]
+            # A live time-series display must never step BACKWARD in time: a stray older reading
+            # (a device wall-clock correction, or a leftover window envelope) would make the buffer
+            # non-monotonic and connect="finite" would draw a diagonal to the out-of-order point.
+            # Keep only samples that advance past the running max (buffer end + this batch so far).
+            tx_a = np.asarray(tx, dtype="f8")
+            floor = float(buf.x[-1]) if len(buf) else float("-inf")
+            runmax = np.maximum.accumulate(np.concatenate([[floor], tx_a[:-1]]))
+            keep = tx_a > runmax
+            if not keep.all():
+                if not keep.any():
+                    continue
+                tx = tx_a[keep]
+                ty = np.asarray(ty, dtype="f8")[keep]
+                tlo = np.asarray(tlo, dtype="f8")[keep]
+                thi = np.asarray(thi, dtype="f8")[keep]
+            buf.append(tx, ty, (tlo, thi))
             self._set_curve_data(key)
 
     def curve_keys(self):
@@ -795,10 +811,19 @@ class ChartPanel(Panel):
         self._windowed = {k for k in keys if k in self._curves}
 
     def exit_window(self):
-        """Release window (query) ownership but KEEP the drawn buffer — so feed() drives the
-        curves again while the buffer's points stay. Used when Play walks the head forward:
-        the incremental re-stream must resume appending instead of being ignored (else every
-        stored curve freezes at the park front). Going fully live uses clear_history instead."""
+        """Release window (query) ownership when Play walks the head forward, so feed() drives
+        the curves again. CLEAR the released buffers: the query envelope spans the whole parked
+        window, and the re-stream that resumes re-experiences that span from its start — appending
+        those points onto the envelope would make the buffer go BACKWARD in time (connect='finite'
+        then draws a diagonal to the out-of-order point). Clearing lets feed rebuild monotonically;
+        the curve refills within a frame or two of play. Only fires on the transition (the set is
+        non-empty just once), so it does not wipe the buffer every play tick."""
+        for key in self._windowed:
+            buf = self._buf.get(key)
+            if buf is not None:
+                buf.clear()
+            if key in self._curves:
+                self._curves[key].setData([], [])
         self._windowed = set()
 
     def set_window_curve(self, key, x, y):
