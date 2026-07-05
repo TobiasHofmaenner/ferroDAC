@@ -278,6 +278,34 @@ def test_y_only_zoom_does_not_refire_on_zoom(qapp):
     assert len(fired) == 1
 
 
+def test_remove_source_clears_windowed_so_reroute_draws(qapp):
+    """Review C6: remove_source must purge the key from _windowed, else re-routing the same
+    source onto a still-parked chart leaves feed() ignoring it → a permanently blank curve."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False})
+    p.add_source("g/p", _src("P", "mbar"))
+    p.enter_window(["g/p"])
+    assert "g/p" in p._windowed
+    p.remove_source("g/p")
+    assert "g/p" not in p._windowed
+    p.add_source("g/p", _src("P", "mbar"))            # re-route while still parked
+    p.feed([types.SimpleNamespace(key="g/p", value=5.0, status=0, t=1.0)])
+    assert p._curves["g/p"].getData()[1][-1] == 5.0   # drew (feed no longer suppressed)
+
+
+def test_set_x_range_stamps_last_zoom_x(qapp):
+    """Review C5: the X-link's programmatic set_x_range stamps _last_zoom_x, so a later Y-only
+    zoom on the followed panel is still recognised as X-unchanged (no wasted re-query storm)."""
+    p = _chart(qapp)
+    p.add_source("g/p", _src("P", "mbar"))
+    p.set_x_range(1000.0, 2000.0)
+    assert p._last_zoom_x == (1000.0, 2000.0)
+    fired = []
+    p.on_zoom = lambda t0, t1: fired.append((t0, t1))
+    p._fire_zoom()                                    # X came from the link, unchanged → no fire
+    assert not fired
+
+
 def test_band_uses_inline_sigma_from_reading(qapp):
     """A processor output that CREATES uncertainty carries σ inline on the Reading; the
     chart draws the band from it — no provider needed (that's the gas-fit path)."""

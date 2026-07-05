@@ -739,6 +739,8 @@ class ChartPanel(Panel):
         self._conv_of.pop(key, None)
         self._unit_of.pop(key, None)
         self._buf.pop(key, None)
+        self._windowed.discard(key)               # else a re-route while parked stays blank
+        #                                           (feed() would keep ignoring the stale key)
         if curve is None:
             return
         self.plot.removeItem(curve)
@@ -843,6 +845,8 @@ class ChartPanel(Panel):
     def set_x_range(self, t0, t1):
         """Adopt a sibling chart's X (time) range (cross-panel link) — exact, no padding."""
         self.plot.setXRange(t0, t1, padding=0)
+        self._last_zoom_x = (float(t0), float(t1))    # stamp so a later Y-only zoom on THIS
+        #                                               panel is still recognised as X-unchanged
 
     def zoom_time(self, t0, t1):
         self.plot.setXRange(t0, t1, padding=0.05)     # time is the X axis here
