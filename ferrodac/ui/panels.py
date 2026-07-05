@@ -292,6 +292,9 @@ class ChartPanel(Panel):
         self._marker_lines: dict = {}
         # Keep every extra ViewBox glued to the main plot rect as it resizes/zooms.
         self._pi.vb.sigResized.connect(self._sync_axis_geometry)
+        # The built-in auto-range button only re-ranges the MAIN viewbox; also re-fit the
+        # per-dimension right-axis viewboxes (else it "does nothing" on a multi-axis chart).
+        self._pi.autoBtn.clicked.connect(self._autorange_extra_axes)
         # Uncertainty bands (DESIGN §19.0): a shaded value ∓ k·σ per curve, σ from an
         # injected provider (the app wires reconstruct() with a cached model timeline).
         self._sigma_provider = None           # (key, times, values) -> σ array | None
@@ -526,6 +529,29 @@ class ChartPanel(Panel):
             if not slot.primary:
                 slot.vb.setGeometry(rect)
                 slot.vb.linkedViewChanged(self._pi.vb, slot.vb.XAxis)
+
+    def _autorange_extra_axes(self, *_):
+        """Re-enable Y auto-range on the per-dimension right-axis viewboxes (the auto-range
+        button + a re-wire only touch the main viewbox otherwise). `*_` swallows the
+        button's clicked-signal argument."""
+        for slot in self._axes.values():
+            if not slot.primary:
+                slot.vb.enableAutoRange(axis=slot.vb.YAxis, enable=True)
+                slot.vb.setAutoVisible(y=True)
+
+    def showEvent(self, ev):
+        # On app reload the per-dimension right-axis viewboxes are created during
+        # route-rebind BEFORE this panel is laid out, so their geometry (from an empty
+        # sceneBoundingRect) and Y auto-range come out wrong and never recover — a
+        # restored multi-axis chart then can't auto-range / renders its extra axis off
+        # (remove+re-add fixes it). Re-wire once we're actually on screen (deferred a tick
+        # so the layout has real geometry). A fresh chart is unaffected (no-op).
+        super().showEvent(ev)
+        QTimer.singleShot(0, self._rewire_axes)
+
+    def _rewire_axes(self):
+        self._sync_axis_geometry()
+        self._autorange_extra_axes()
 
     def _apply_primary_label(self):
         if self._ylabel:
