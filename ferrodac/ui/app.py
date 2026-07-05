@@ -2405,6 +2405,44 @@ class MainWindow(QMainWindow):
         self._coverage_cache.clear()                 # re-read gaps for the new slice
         if self.time_context is not None:           # re-bin waterfalls to the new window
             self.dashboard.set_time_window(*self.time_context.window)
+        self._draw_parked_windows()                  # parked scalars ← pixel-budgeted query
+
+    def _draw_parked_windows(self) -> None:
+        """Parked/historic: draw each chart's stored SCALAR curves from a pixel-budgeted
+        store query (a min/max envelope, async + superseded) rather than the full-res
+        re-stream fanned into the CurveBuffer — one uniform reduction, no old→new fidelity
+        gradient, and zoom re-resolves (Phase 3). The re-stream still runs for PROCESSORS;
+        derived / trace / not-yet-recorded curves stay on the feed path. No-op while
+        following the live edge (the live tail is the buffer's job)."""
+        tc = self.time_context
+        if (tc is None or tc.following or self.reads is None
+                or self.resolver is None or self.replay is None):
+            return
+        t0, t1 = tc.window
+        for panel in self.dashboard.panels():
+            if not hasattr(panel, "set_window_curve"):
+                continue                             # not a chart
+            try:
+                keys = [k for k in panel.curve_keys()
+                        if not self.replay.playback._is_trace(k)   # scalars only
+                        and self.resolver.coverage(k)]             # in the store (not derived)
+                if not keys:
+                    continue
+                panel.enter_window(keys)             # feed() ignores them from the first chunk
+                mp = max(400, int(panel.plot.width()) * 2)
+                for key in keys:
+                    self._query_window_curve(panel, key, t0, t1, mp)
+            except Exception:                        # noqa: BLE001 — never break a park
+                logging.getLogger("ferrodac").debug("parked window draw failed", exc_info=True)
+
+    def _query_window_curve(self, panel, key, t0, t1, mp) -> None:
+        def draw(res):
+            tc = self.time_context
+            if tc is None or tc.following or (t0, t1) != tc.window:
+                return                               # window moved on → stale result, drop
+            panel.set_window_curve(key, res[0], res[1])
+        # per (panel, series) key so a newer park/scrub supersedes the in-flight query
+        self.reads.query(key, t0, t1, mp, key=("chart-win", id(panel), key), on_result=draw)
 
     def closeEvent(self, event):  # noqa: N802
         if getattr(self, "_recording", None) is not None:

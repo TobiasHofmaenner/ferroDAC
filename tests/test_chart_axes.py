@@ -194,6 +194,33 @@ def test_no_gap_break_without_a_provider_or_when_contiguous(qapp):
     assert not np.isnan(p._curves["g/p"].getData()[1]).any()  # contiguous → still no break
 
 
+def test_parked_curve_drawn_from_query_envelope_ignores_restream_feed(qapp):
+    """Phase 2 (reduce once): a parked curve is drawn from a pixel-budgeted store-query
+    min/max envelope via set_window_curve; while windowed the full-res re-stream feed() is
+    IGNORED for that key (the query owns it — no second, fixed-cap decimation); going live
+    (clear_history) releases the key so the live tail feed drives it again."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False})               # linear → assert raw values
+    p.add_source("g/p", _src("P", "mbar"))
+
+    p.enter_window(["g/p"])                        # mark before the async result lands
+    assert "g/p" in p._windowed
+    p.feed([types.SimpleNamespace(key="g/p", value=999.0, status=0, t=1.0)])
+    dx0 = p._curves["g/p"].getData()[0]
+    assert dx0 is None or len(dx0) == 0            # re-stream feed ignored while windowed
+
+    x = np.array([1000.0, 1000.0, 1001.0, 1001.0])   # a min/max envelope polyline
+    y = np.array([1.0, 3.0, 2.0, 4.0])
+    p.set_window_curve("g/p", x, y)
+    dx, dy = p._curves["g/p"].getData()
+    assert len(dx) == 4 and dy.max() == 4.0 and 999.0 not in dy   # envelope, not the fed value
+
+    p.clear_history()                             # go live → feed drives again
+    assert not p._windowed
+    p.feed([types.SimpleNamespace(key="g/p", value=7.0, status=0, t=2.0)])
+    assert p._curves["g/p"].getData()[1][-1] == 7.0
+
+
 def test_band_uses_inline_sigma_from_reading(qapp):
     """A processor output that CREATES uncertainty carries σ inline on the Reading; the
     chart draws the band from it — no provider needed (that's the gas-fit path)."""

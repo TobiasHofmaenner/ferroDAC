@@ -292,6 +292,14 @@ class ChartPanel(Panel):
         # the buffer, and the processor bus are never touched (a NaN on the bus would
         # poison a windowed processor); the NaN lives only in the array handed to setData.
         self._gap_provider = None             # key -> [(t0,t1), …] merged coverage
+        # Parked/historic curves are drawn ONCE from a pixel-budgeted store query (a
+        # min/max envelope — the same reduction the Timeline preview uses), NOT from the
+        # full-res re-stream fanned into the CurveBuffer. That removes the second, fixed-cap
+        # decimation (the old→new fidelity gradient + zoom starvation) from the parked path;
+        # the buffer/peak path stays for the LIVE tail. A `_windowed` key is owned by the
+        # query draw, so feed() ignores the re-stream for it (the re-stream still feeds
+        # PROCESSORS — only the chart's own curve changes source). DESIGN §7.4 / §11.
+        self._windowed: set = set()           # keys drawn from a window query (not feed)
         self._bands: dict = {}                # key -> (lo, hi, fill)
         self._bands_on = False
         self._k = 1.0
@@ -727,8 +735,9 @@ class ChartPanel(Panel):
         # the buffer decimates in place at its cap.
         touched: dict = {}
         for r in batch:
-            if r.key not in self._buf or not isinstance(r.value, (int, float)):
-                continue
+            if (r.key not in self._buf or r.key in self._windowed
+                    or not isinstance(r.value, (int, float))):
+                continue                          # windowed → the query draw owns this curve
             # log Y needs strictly-positive values; a linear axis accepts any finite one
             ok = (r.status == 0 and r.value == r.value
                   and (r.value > 0 or not self._logy))
@@ -748,7 +757,36 @@ class ChartPanel(Panel):
             self._buf[key].append(tx, ty, (tlo, thi))
             self._set_curve_data(key)
 
+    def curve_keys(self):
+        """The source keys this chart draws (routed curves) — the app queries each
+        stored one for the parked window draw."""
+        return list(self._curves)
+
+    def enter_window(self, keys):
+        """Mark these keys as owned by the window (query) draw BEFORE the async result
+        arrives, so the parked re-stream's feed() ignores them from the first chunk (no
+        gradient-decimated flash before the clean envelope lands). Non-curve keys ignored."""
+        self._windowed = {k for k in keys if k in self._curves}
+
+    def set_window_curve(self, key, x, y):
+        """Draw a parked curve from a pre-reduced store-query envelope (min/max polyline,
+        pixel-budgeted). Fed through the (now non-decimating) buffer so conversion, the σ
+        band, and the coverage gap-break all apply unchanged — the buffer just holds the
+        ~2·width envelope points without ever hitting its cap. The resolver's own NaN gap
+        markers are stripped here; _set_curve_data re-inserts breaks from live coverage."""
+        buf = self._buf.get(key)
+        if buf is None:
+            return
+        x = np.asarray(x, dtype="f8")
+        y = np.asarray(y, dtype="f8")
+        finite = np.isfinite(x)                    # drop resolver gap markers (gap_split re-adds)
+        buf.clear()
+        buf.append(x[finite], y[finite])
+        self._windowed.add(key)
+        self._set_curve_data(key)
+
     def clear_history(self):
+        self._windowed = set()                    # go-live / new window → feed drives again
         for key, buf in self._buf.items():
             buf.clear()
             self._curves[key].setData([], [])
