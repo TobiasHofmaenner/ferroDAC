@@ -370,6 +370,7 @@ class Dashboard(QObject):
         panel.set_processor_host(self.add_processor, self.remove_processor,
                                  self.processor, self.processors_for)
         panel.set_sigma_provider(getattr(self, "_sigma_provider", None))
+        panel.set_gap_provider(getattr(self, "_gap_provider", None))
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -921,6 +922,13 @@ class Dashboard(QObject):
         self._sigma_provider = fn
         for panel in self._panels.values():
             panel.set_sigma_provider(fn)
+
+    def set_gap_provider(self, fn) -> None:
+        """Wire the recorded-coverage provider (DESIGN §7.4) into every chart panel,
+        existing and future, so a curve breaks at a data gap instead of drawing across it."""
+        self._gap_provider = fn
+        for panel in self._panels.values():
+            panel.set_gap_provider(fn)
 
     def sink_ports(self) -> list:
         return sorted(self._sinks.values(), key=lambda p: (p.kind != "device", p.name))

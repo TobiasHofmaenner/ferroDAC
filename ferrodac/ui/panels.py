@@ -286,6 +286,12 @@ class ChartPanel(Panel):
         # Uncertainty bands (DESIGN §19.0): a shaded value ∓ k·σ per curve, σ from an
         # injected provider (the app wires reconstruct() with a cached model timeline).
         self._sigma_provider = None           # (key, times, values) -> σ array | None
+        # Gap breaks (DESIGN §7.4): a coverage(key) -> [(t0,t1), …] provider lets the
+        # chart insert a NaN at a recorded-data gap so the curve/band BREAK instead of
+        # drawing a straight line across a span with no data. Display-only — the store,
+        # the buffer, and the processor bus are never touched (a NaN on the bus would
+        # poison a windowed processor); the NaN lives only in the array handed to setData.
+        self._gap_provider = None             # key -> [(t0,t1), …] merged coverage
         self._bands: dict = {}                # key -> (lo, hi, fill)
         self._bands_on = False
         self._k = 1.0
@@ -522,7 +528,8 @@ class ChartPanel(Panel):
         buf = self._buf[key]
         conv = self._conv_of.get(key)
         y = conv(buf.y) if conv is not None else buf.y
-        self._curves[key].setData(buf.x, y, connect="finite")
+        x, y = self._gap_split(key, np.asarray(buf.x), y)   # break the line at real gaps
+        self._curves[key].setData(x, y, connect="finite")
         if self._bands_on:
             self._update_band(key)
 
@@ -532,6 +539,44 @@ class ChartPanel(Panel):
         cached timeline). Charts stay decoupled from the store."""
         self._sigma_provider = fn
         self._refresh_bands()
+
+    # -- gap breaks (DESIGN §7.4) --------------------------------------------
+    def set_gap_provider(self, fn) -> None:
+        """Inject coverage(key) → [(t0,t1), …] (the app wires a cached resolver.coverage).
+        A NaN is then inserted at each recorded-data gap so the curve/band break instead
+        of drawing a line across it — the same break the Timeline preview shows."""
+        self._gap_provider = fn
+
+    def _gap_split(self, key, x, *ys):
+        """Return (x, *ys) with a NaN inserted at every recorded-coverage gap inside the
+        drawn span, so ``connect="finite"`` breaks the line there. Operates on COPIES
+        (``np.insert``) — the CurveBuffer and store are never mutated; recomputed each
+        draw from live coverage. All arrays get the break at the SAME positions, so a
+        curve and its σ band (and the fill's paired subpaths) stay aligned."""
+        fn = self._gap_provider
+        if fn is None or x.size < 2:
+            return (x, *ys)
+        try:
+            cov = fn(key)
+        except Exception:                              # coverage unavailable → no break
+            return (x, *ys)
+        if not cov or len(cov) < 2:
+            return (x, *ys)
+        mids, prev_b = [], cov[0][1]
+        for a, b in cov[1:]:
+            if a > prev_b + 1e-9:                      # a genuine gap (same test query() uses)
+                mids.append(0.5 * (prev_b + a))
+            prev_b = max(prev_b, b)
+        if not mids:
+            return (x, *ys)
+        mids = np.asarray(mids, dtype="f8")
+        mids = mids[(mids > x[0]) & (mids < x[-1])]    # only gaps within the drawn window
+        if mids.size == 0:
+            return (x, *ys)
+        pos = np.searchsorted(x, mids)                 # insert points, shared across lanes
+        nan = np.full(mids.size, np.nan)
+        nx = np.insert(x, pos, mids)
+        return (nx, *(np.insert(np.asarray(y, dtype="f8"), pos, nan) for y in ys))
 
     def _ensure_band(self, key):
         if key in self._bands or key not in self._curves:
@@ -601,8 +646,11 @@ class ChartPanel(Panel):
         if bad.any():                                     # at the same samples so the
             lo_y = np.where(bad, np.nan, lo_y)            # fill pairs its subpaths
             hi_y = np.where(bad, np.nan, hi_y)
-        lo.setData(buf.x, lo_y, connect="finite")
-        hi.setData(buf.x, hi_y, connect="finite")
+        # break the band at recorded-data gaps too (same insert positions as the curve,
+        # from the same buf.x → the fill's two subpaths stay paired across the gap)
+        gx, lo_y, hi_y = self._gap_split(key, np.asarray(buf.x), lo_y, hi_y)
+        lo.setData(gx, lo_y, connect="finite")
+        hi.setData(gx, hi_y, connect="finite")
 
     def _remove_band(self, key):
         entry = self._bands.pop(key, None)

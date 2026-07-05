@@ -151,6 +151,49 @@ def test_clear_history_clears_stale_bands(qapp):
     assert len(lo.getData()[1] or []) == 0 and len(hi.getData()[1] or []) == 0
 
 
+def test_curve_and_band_break_at_a_recorded_data_gap(qapp):
+    """A historic re-stream reads full-res (read_raw) with NO gap marker, so two samples
+    straddling a recording gap are adjacent → a line would be drawn across the gap. The
+    chart must insert a NaN break from the coverage provider (display-only), and the σ
+    band must break at the SAME x so the fill's subpaths stay paired."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False, "show_sigma": True})       # linear → raw values
+    p.set_sigma_provider(lambda key, t, v: np.full(len(v), 0.1))
+    # coverage: data over 1000–1100 and 1300–1400, a real 200 s gap between them
+    p.set_gap_provider(lambda key: [(1000.0, 1100.0), (1300.0, 1400.0)])
+    p.add_source("g/p", _src("P", "mbar"))
+    p.feed([types.SimpleNamespace(key="g/p", value=1.0, status=0, t=1000.0),
+            types.SimpleNamespace(key="g/p", value=1.0, status=0, t=1100.0),
+            types.SimpleNamespace(key="g/p", value=2.0, status=0, t=1300.0),
+            types.SimpleNamespace(key="g/p", value=2.0, status=0, t=1400.0)])
+
+    dx, dy = p._curves["g/p"].getData()
+    assert np.isnan(dy).any()                                 # the line breaks (no line across)
+    nan_x = dx[np.isnan(dy)]
+    assert nan_x.size == 1 and 1100.0 < nan_x[0] < 1300.0     # exactly one break, inside the gap
+    assert not np.isnan(dy[0]) and not np.isnan(dy[-1])       # covered stretches stay intact
+
+    lo, hi, _f = p._bands["g/p"]                              # the band breaks at the same x
+    lx, ly = lo.getData()
+    _hx, hy = hi.getData()
+    assert np.isnan(ly).any() and np.isnan(hy).any()
+    np.testing.assert_allclose(lx[np.isnan(ly)], nan_x)
+
+
+def test_no_gap_break_without_a_provider_or_when_contiguous(qapp):
+    """No provider → never break (live charts don't have coverage wired); and a provider
+    reporting a single contiguous interval inserts no NaN even across a config-epoch roll."""
+    p = _chart(qapp)
+    p.apply_config({"logy": False})
+    p.add_source("g/p", _src("P", "mbar"))
+    p.feed([types.SimpleNamespace(key="g/p", value=1.0, status=0, t=1000.0),
+            types.SimpleNamespace(key="g/p", value=2.0, status=0, t=1100.0)])
+    assert not np.isnan(p._curves["g/p"].getData()[1]).any()  # no provider → no break
+    p.set_gap_provider(lambda key: [(1000.0, 1100.0)])        # one contiguous interval
+    p.feed([types.SimpleNamespace(key="g/p", value=3.0, status=0, t=1050.0)])
+    assert not np.isnan(p._curves["g/p"].getData()[1]).any()  # contiguous → still no break
+
+
 def test_band_uses_inline_sigma_from_reading(qapp):
     """A processor output that CREATES uncertainty carries σ inline on the Reading; the
     chart draws the band from it — no provider needed (that's the gas-fit path)."""

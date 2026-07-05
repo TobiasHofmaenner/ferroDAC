@@ -191,11 +191,18 @@ class MainWindow(QMainWindow):
         # first logged at the opening flush shows up without a manual refresh).
         self._sigma_timelines: dict = {}
         manager.provenance_changed.connect(self._sigma_timelines.clear)
+        # Gap breaks (DESIGN §7.4): charts break the drawn curve at a recorded-data gap
+        # via a coverage provider. resolver.coverage takes the store lock, and this is
+        # consulted on the per-batch draw path, so cache it — invalidated on the same
+        # slow tick as σ (coverage grows as data records) and on every park/scrub reset.
+        self._coverage_cache: dict = {}
         self._sigma_refresh = QTimer(self)
         self._sigma_refresh.setInterval(2000)
         self._sigma_refresh.timeout.connect(self._sigma_timelines.clear)
+        self._sigma_refresh.timeout.connect(self._coverage_cache.clear)
         self._sigma_refresh.start()
         self.dashboard.set_sigma_provider(self._chart_sigma)
+        self.dashboard.set_gap_provider(self._chart_coverage)
 
         # recording lifecycle (start/stop span → auto-export, crash recovery) lives
         # in a Qt-free, testable controller; the shell supplies the collaborators.
@@ -1497,6 +1504,22 @@ class MainWindow(QMainWindow):
             return None                        # no model logged (yet) → no band, no read
         return reconstruct(store, key, times, values, timeline=tl)
 
+    def _chart_coverage(self, key):
+        """coverage(key) → merged [(t0,t1), …] for a chart's gap breaks, CACHED (cleared
+        on a slow tick + every park/scrub reset) so the per-batch draw path never blocks
+        on the store lock. A source the resolver doesn't know → [] (no break)."""
+        resolver = getattr(self, "resolver", None)
+        if resolver is None:
+            return []
+        cov = self._coverage_cache.get(key)
+        if cov is None:
+            try:
+                cov = list(resolver.coverage(key))
+            except Exception:                  # noqa: BLE001 — never break a draw
+                cov = []
+            self._coverage_cache[key] = cov
+        return cov
+
     # -- device journal / notes editor ---------------------------------------
     def _open_device_meta(self, instance_id: str, focus_notes: bool = False):
         """Open the lab-journal / notes editor for a device. Returns the dialog."""
@@ -2379,6 +2402,7 @@ class MainWindow(QMainWindow):
                 panel.clear_history()
             except Exception:
                 pass
+        self._coverage_cache.clear()                 # re-read gaps for the new slice
         if self.time_context is not None:           # re-bin waterfalls to the new window
             self.dashboard.set_time_window(*self.time_context.window)
 

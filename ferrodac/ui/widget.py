@@ -90,6 +90,11 @@ class Widget(QWidget):
         """Give a chart a σ(key, times, values) → ndarray|None provider for uncertainty
         bands (DESIGN §19.0). Only the chart widget uses it. Default: ignore."""
 
+    def set_gap_provider(self, fn) -> None:
+        """Give a chart a coverage(key) → [(t0,t1), …] provider so it can break the
+        drawn curve at a recorded-data gap instead of drawing a line across it. Only
+        the chart widget uses it; display-only. Default: ignore."""
+
     # -- data lifecycle (the Dashboard + replay drive these) -----------------
     def add_source(self, key: str, source) -> None: ...
 
