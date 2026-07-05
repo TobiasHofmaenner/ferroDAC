@@ -1826,6 +1826,45 @@ def test_async_config_option_applied_off_gui_thread(qapp):
 
 
 @pytest.mark.ui
+def test_resolve_path_also_applies_async_config_off_gui(qapp):
+    """The session-restore / discovery RESOLVE path (_apply_device_config) must offload
+    an async_config device too — else a cloud enumeration that sleeps freezes the GUI on
+    every discovery tick (the Shelly ~2 s watchdog stall)."""
+    import threading
+    from qtpy.QtCore import QThread
+    from ferrodac.core.manager import DeviceManager
+
+    gui_thread = QThread.currentThread()
+    seen = {}
+    release = threading.Event()
+
+    class _AsyncDev:
+        instance_id = "async:2"
+        async_config = True
+        def set_option(self, key, value):
+            seen["thread"] = QThread.currentThread()
+            release.wait(2.0)                           # block inside set_option
+            seen[key] = value
+
+    mgr = DeviceManager([])
+    dev = _AsyncDev()
+    mgr._active[dev.instance_id] = dev
+    mgr._apply_device_config(dev.instance_id, {"options": {"auth_key": "s"}})   # resolve path
+    for _ in range(200):
+        if "thread" in seen:
+            break
+        qapp.processEvents(); QThread.msleep(10)
+    assert seen.get("thread") is not None and seen["thread"] is not gui_thread  # off-GUI
+    assert "auth_key" not in seen                       # caller did NOT block
+    release.set()
+    for _ in range(300):
+        if seen.get("auth_key"):
+            break
+        qapp.processEvents(); QThread.msleep(10)
+    assert seen.get("auth_key") == "s"
+
+
+@pytest.mark.ui
 def test_driver_config_panel_embeds_and_checks(qapp, monkeypatch):
     """A driver-registered config panel is embedded in ConfigDialog (AUGMENTING the
     standard sections — the declarative server/key fields still render), and its

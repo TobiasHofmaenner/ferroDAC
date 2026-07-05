@@ -321,18 +321,29 @@ class DeviceManager(QObject):
         device = self._active.get(instance_id)
         if device is None:
             return
-        for key, value in entry.get("options", {}).items():
-            if hasattr(device, "set_option"):
-                device.set_option(key, value)
-        hz = entry.get("rate_hz")
-        if hz and hasattr(device, "set_rate_hz"):
-            device.set_rate_hz(hz)
-        for sid, value in entry.get("sink_values", {}).items():
-            try:
-                device.write(sid, value)
-            except Exception:
-                pass
-        self.active_changed.emit()
+
+        def apply():
+            for key, value in entry.get("options", {}).items():
+                if hasattr(device, "set_option"):
+                    device.set_option(key, value)
+            hz = entry.get("rate_hz")
+            if hz and hasattr(device, "set_rate_hz"):
+                device.set_rate_hz(hz)
+            for sid, value in entry.get("sink_values", {}).items():
+                try:
+                    device.write(sid, value)
+                except Exception:
+                    pass
+
+        # An async_config device's set_option can BLOCK (cloud enumeration — Shelly
+        # sleeps ~1 s per request): never on the GUI thread. The explicit-config path
+        # already offloads it; this session-restore / discovery resolve path did NOT,
+        # so a Shelly with bad creds froze the UI ~2 s on every discovery tick (watchdog).
+        if getattr(device, "async_config", False):
+            self._run_async(apply, on_finished=self.active_changed.emit)
+        else:
+            apply()
+            self.active_changed.emit()
 
     def descriptor(self, instance_id: str) -> DeviceDescriptor | None:
         device = self._active.get(instance_id) or self._available.get(instance_id)
