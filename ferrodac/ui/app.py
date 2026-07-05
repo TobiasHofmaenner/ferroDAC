@@ -2413,15 +2413,19 @@ class MainWindow(QMainWindow):
         self._draw_parked_windows()                  # parked scalars ← pixel-budgeted query
 
     def _draw_parked_windows(self) -> None:
-        """Parked/historic: draw each chart's stored SCALAR curves from a pixel-budgeted
-        store query (a min/max envelope, async + superseded) rather than the full-res
-        re-stream fanned into the CurveBuffer — one uniform reduction, no old→new fidelity
-        gradient, and zoom re-resolves (Phase 3). The re-stream still runs for PROCESSORS;
-        derived / trace / not-yet-recorded curves stay on the feed path. No-op while
-        following the live edge (the live tail is the buffer's job)."""
+        """Parked/historic: draw each chart's stored SCALAR curves from a pixel-budgeted store
+        query (a min/max envelope) rather than the full-res re-stream fanned into the CurveBuffer
+        — one uniform reduction, no old→new fidelity gradient, and zoom re-resolves (Phase 3). The
+        re-stream still runs for PROCESSORS; derived / trace / not-yet-recorded curves stay on the
+        feed path. No-op while following the live edge (the live tail is the buffer's job).
+
+        The query is SYNCHRONOUS here on purpose: this runs from on_reset, which fires BEFORE the
+        re-stream (_load) starts, so the bounded rollup query (~10 ms even over millions of samples)
+        never contends with the re-stream for the store lock — the chart updates immediately on a
+        select. An async read would be starved behind a huge re-stream and the chart wouldn't
+        update until it finished. Zoom stays async (it can fire while a re-stream is in flight)."""
         tc = self.time_context
-        if (tc is None or tc.following or self.reads is None
-                or self.resolver is None or self.replay is None):
+        if tc is None or tc.following or self.resolver is None or self.replay is None:
             return
         t0, t1 = tc.window
         for panel in self.dashboard.panels():
@@ -2433,21 +2437,17 @@ class MainWindow(QMainWindow):
                         and self.resolver.knows(k)]                # in a tier (not derived); O(1)
                 if not keys:
                     continue
-                panel.enter_window(keys)             # feed() ignores them from the first chunk
+                panel.enter_window(keys)             # feed() ignores them (re-stream feeds procs)
                 mp = max(400, int(panel.plot.width()) * 2)
                 for key in keys:
-                    self._query_window_curve(panel, key, t0, t1, mp)
+                    try:
+                        x, y = self.resolver.query(key, t0, t1, mp)
+                        panel.set_window_curve(key, x, y)
+                    except Exception:                # noqa: BLE001 — one bad curve ≠ blank chart
+                        logging.getLogger("ferrodac").debug(
+                            "window query failed for %s", key, exc_info=True)
             except Exception:                        # noqa: BLE001 — never break a park
                 logging.getLogger("ferrodac").debug("parked window draw failed", exc_info=True)
-
-    def _query_window_curve(self, panel, key, t0, t1, mp) -> None:
-        def draw(res):
-            tc = self.time_context
-            if tc is None or tc.following or (t0, t1) != tc.window:
-                return                               # window moved on → stale result, drop
-            panel.set_window_curve(key, res[0], res[1])
-        # per (panel, series) key so a newer park/scrub supersedes the in-flight query
-        self.reads.query(key, t0, t1, mp, key=("chart-win", id(panel), key), on_result=draw)
 
     def _on_chart_zoom(self, panel, t0, t1) -> None:
         """A manual pan/zoom settled on a parked chart → re-query the VISIBLE sub-window at
