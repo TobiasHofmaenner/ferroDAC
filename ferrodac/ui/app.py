@@ -1983,8 +1983,10 @@ class MainWindow(QMainWindow):
             },
         }
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
+        tmp = path + ".tmp"                        # atomic — this is the every-few-seconds
+        with open(tmp, "w", encoding="utf-8") as fh:   # working autosave; a crash mid-write
+            json.dump(data, fh, indent=2)              # must not truncate & lose the layout
+        os.replace(tmp, path)
 
     def save_session(self, path: str) -> None:
         self._write_session(path)

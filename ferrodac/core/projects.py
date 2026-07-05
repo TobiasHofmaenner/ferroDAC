@@ -134,8 +134,11 @@ class Project:
     def save(self) -> None:
         os.makedirs(self.path, exist_ok=True)
         self.meta["modified"] = _now()
-        with open(os.path.join(self.path, _META), "w", encoding="utf-8") as fh:
-            json.dump(self.meta, fh, indent=2)
+        path = os.path.join(self.path, _META)
+        tmp = path + ".tmp"                       # atomic write — a crash mid-write can't
+        with open(tmp, "w", encoding="utf-8") as fh:   # truncate project.json (matches
+            json.dump(self.meta, fh, indent=2)         # set_sources / global-tags siblings)
+        os.replace(tmp, path)
 
     def set_meta(self, **fields) -> None:
         self.meta.update(fields)
