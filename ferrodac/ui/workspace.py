@@ -230,6 +230,7 @@ class Dashboard(QObject):
         # a restored dual-dimension layout never silently drops a source. The app may override
         # to add a user notice.
         self._on_route_refused = self._migrate_refused_route
+        self._x_linking = False               # guard: a cross-panel X-link broadcast in flight
         # is_live() → are we following the live edge (vs a parked replay)? Heavy
         # processors run off the GUI thread while LIVE (so a slow analysis never
         # freezes acquisition); during a parked re-stream they run inline so the
@@ -357,6 +358,9 @@ class Dashboard(QObject):
             # routing menu (compatible_sinks) greys out dimensionally-incompatible sources.
             if hasattr(panel, "on_dim_changed"):
                 panel.on_dim_changed = lambda u, pid=pid: self._on_chart_dim(pid, u)
+            # Cross-panel X (time) link: a manual pan/zoom on one chart aligns the others.
+            if hasattr(panel, "on_x_range"):
+                panel.on_x_range = lambda t0, t1, p=panel: self._broadcast_x_range(p, t0, t1)
             if self.default_sink_id is None and kind == "chart":
                 self.default_sink_id = pid
 
@@ -1019,6 +1023,21 @@ class Dashboard(QObject):
         if sp is not None and sp.unit != unit:
             sp.unit = unit
             self.ports_changed.emit()
+
+    def _broadcast_x_range(self, source_panel, t0: float, t1: float) -> None:
+        """A chart's X (time) range changed → align every other time-chart to it, so a
+        pan/zoom on one moves them together (Option B correlation aid). Guarded so the
+        cascade of setXRange calls doesn't loop. Only panels with set_x_range (time charts)
+        participate — a spectrum's X is m/z, not time."""
+        if self._x_linking:
+            return
+        self._x_linking = True
+        try:
+            for panel in self._panels.values():
+                if panel is not source_panel and hasattr(panel, "set_x_range"):
+                    panel.set_x_range(t0, t1)
+        finally:
+            self._x_linking = False
 
     def _migrate_refused_route(self, source_key: str, sink_key: str) -> None:
         """A source was refused by a chart (different dimension). Spawn a NEW chart for it and

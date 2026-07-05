@@ -289,6 +289,11 @@ class ChartPanel(Panel):
         self._bands: dict = {}                # key -> (lo, hi, fill)
         self._bands_on = False
         self._k = 1.0
+        # Cross-panel X (time) link: broadcast a manual pan/zoom so sibling time-charts stay
+        # aligned — recovers correlation-across-charts after the one-axis-per-chart change
+        # (Option B). The Dashboard wires on_x_range and guards re-entrancy.
+        self.on_x_range = None                # callback(t0, t1) — set by the Dashboard
+        self._pi.vb.sigXRangeChanged.connect(self._emit_x_range)
 
     def config_fields(self):
         return super().config_fields() + [
@@ -707,6 +712,16 @@ class ChartPanel(Panel):
         self._sync_markers()                  # reposition tags at the new time base
         self.plot.enableAutoRange()           # a freshly-loaded slice auto-fits once;
         #                                       then the user's zoom/pan is respected
+
+    def _emit_x_range(self, _vb, rng):
+        """The X (time) range changed (a pan/zoom) → tell the Dashboard so it aligns the
+        sibling time-charts. Re-entrancy is guarded on the Dashboard side."""
+        if self.on_x_range is not None and rng is not None:
+            self.on_x_range(float(rng[0]), float(rng[1]))
+
+    def set_x_range(self, t0, t1):
+        """Adopt a sibling chart's X (time) range (cross-panel link) — exact, no padding."""
+        self.plot.setXRange(t0, t1, padding=0)
 
     def zoom_time(self, t0, t1):
         self.plot.setXRange(t0, t1, padding=0.05)     # time is the X axis here

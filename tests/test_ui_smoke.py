@@ -1075,6 +1075,24 @@ def test_route_to_chart_backfills_recorded_history(qapp):
 
 
 @pytest.mark.ui
+def test_charts_share_a_cross_panel_x_link(qapp):
+    """A manual pan/zoom on one time-chart aligns the others on the X (time) axis, so a
+    pressure chart and a temperature chart (split by the one-axis-per-chart rule) still
+    correlate over the same time — without looping."""
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        a, b = db.add_panel("chart"), db.add_panel("chart")
+        pa, pb = db.panel(a), db.panel(b)
+        pa.plot.setXRange(1000.0, 2000.0, padding=0)     # pan chart A
+        qapp.processEvents()
+        lo, hi = pb.plot.getViewBox().viewRange()[0]      # chart B follows
+        assert lo == pytest.approx(1000.0, abs=1) and hi == pytest.approx(2000.0, abs=1)
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_chart_dimensional_routing_gate_and_migration(qapp):
     """One dimension per chart (Option B): a pressure chart refuses a temperature source,
     the routing menu greys it out, and a refused route is MIGRATED to a new sibling chart so
