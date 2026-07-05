@@ -308,6 +308,23 @@ class ChartPanel(Panel):
         # (Option B). The Dashboard wires on_x_range and guards re-entrancy.
         self.on_x_range = None                # callback(t0, t1) — set by the Dashboard
         self._pi.vb.sigXRangeChanged.connect(self._emit_x_range)
+        # Zoom re-resolves detail (DESIGN §7.4, "Fix B"): a manual pan/zoom on a PARKED
+        # chart re-queries the visible sub-window at pixel resolution, so zooming in returns
+        # real store detail instead of magnifying the full-window envelope. Uses
+        # sigRangeChangedManually — fires ONLY on user interaction, never on programmatic
+        # setData / autorange / the sibling X-link — so it can't loop with them. Debounced so
+        # a drag re-queries once it settles.
+        self.on_zoom = None                   # callback(t0, t1) — set by the Dashboard
+        self._zoom_timer = QTimer(self)
+        self._zoom_timer.setSingleShot(True)
+        self._zoom_timer.setInterval(150)
+        self._zoom_timer.timeout.connect(self._fire_zoom)
+        self._pi.vb.sigRangeChangedManually.connect(lambda *_: self._zoom_timer.start())
+
+    def _fire_zoom(self):
+        if self.on_zoom is not None:
+            (t0, t1), _ = self._pi.vb.viewRange()
+            self.on_zoom(float(t0), float(t1))
 
     def config_fields(self):
         return super().config_fields() + [

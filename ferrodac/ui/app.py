@@ -203,6 +203,7 @@ class MainWindow(QMainWindow):
         self._sigma_refresh.start()
         self.dashboard.set_sigma_provider(self._chart_sigma)
         self.dashboard.set_gap_provider(self._chart_coverage)
+        self.dashboard.on_chart_zoom = self._on_chart_zoom   # zoom → re-query (Fix B)
 
         # recording lifecycle (start/stop span → auto-export, crash recovery) lives
         # in a Qt-free, testable controller; the shell supplies the collaborators.
@@ -2442,6 +2443,32 @@ class MainWindow(QMainWindow):
                 return                               # window moved on → stale result, drop
             panel.set_window_curve(key, res[0], res[1])
         # per (panel, series) key so a newer park/scrub supersedes the in-flight query
+        self.reads.query(key, t0, t1, mp, key=("chart-win", id(panel), key), on_result=draw)
+
+    def _on_chart_zoom(self, panel, t0, t1) -> None:
+        """A manual pan/zoom settled on a parked chart → re-query the VISIBLE sub-window at
+        pixel resolution so zooming in returns real store detail rather than magnifying the
+        full-window envelope (Fix B). The X-link moves every time-chart to this range, so
+        re-query them all for it. No-op live (the live tail is the buffer's job)."""
+        tc = self.time_context
+        if tc is None or tc.following or self.reads is None or self.resolver is None:
+            return
+        lo, hi = (t0, t1) if t0 <= t1 else (t1, t0)
+        if hi - lo <= 0:
+            return
+        for p in self.dashboard.panels():
+            wk = getattr(p, "_windowed", None)
+            if not wk:
+                continue                             # not a parked chart with windowed curves
+            mp = max(400, int(p.plot.width()) * 2)
+            for key in list(wk):
+                self._query_zoom_curve(p, key, lo, hi, mp)
+
+    def _query_zoom_curve(self, panel, key, t0, t1, mp) -> None:
+        def draw(res):
+            # still windowed (not gone live / re-parked) → paint the finer sub-window
+            if key in getattr(panel, "_windowed", ()):
+                panel.set_window_curve(key, res[0], res[1])
         self.reads.query(key, t0, t1, mp, key=("chart-win", id(panel), key), on_result=draw)
 
     def closeEvent(self, event):  # noqa: N802

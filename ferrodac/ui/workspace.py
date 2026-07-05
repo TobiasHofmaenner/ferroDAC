@@ -231,6 +231,7 @@ class Dashboard(QObject):
         # to add a user notice.
         self._on_route_refused = self._migrate_refused_route
         self._x_linking = False               # guard: a cross-panel X-link broadcast in flight
+        self.on_chart_zoom = None             # app hook(panel, t0, t1): re-query on manual zoom
         # is_live() → are we following the live edge (vs a parked replay)? Heavy
         # processors run off the GUI thread while LIVE (so a slow analysis never
         # freezes acquisition); during a parked re-stream they run inline so the
@@ -361,6 +362,11 @@ class Dashboard(QObject):
             # Cross-panel X (time) link: a manual pan/zoom on one chart aligns the others.
             if hasattr(panel, "on_x_range"):
                 panel.on_x_range = lambda t0, t1, p=panel: self._broadcast_x_range(p, t0, t1)
+            # Zoom re-resolves detail: a manual pan/zoom re-queries the visible sub-window
+            # at pixel resolution (the app owns the store read). The X-link moves the
+            # siblings to the same range, so the app re-queries every time-chart for it.
+            if hasattr(panel, "on_zoom"):
+                panel.on_zoom = lambda t0, t1, p=panel: self._chart_zoomed(p, t0, t1)
             if self.default_sink_id is None and kind == "chart":
                 self.default_sink_id = pid
 
@@ -1046,6 +1052,12 @@ class Dashboard(QObject):
                     panel.set_x_range(t0, t1)
         finally:
             self._x_linking = False
+
+    def _chart_zoomed(self, panel, t0: float, t1: float) -> None:
+        """A manual pan/zoom settled on a chart → hand the visible range to the app so it can
+        re-query the parked curves at pixel resolution (Fix B). No-op when unwired (live)."""
+        if self.on_chart_zoom is not None:
+            self.on_chart_zoom(panel, t0, t1)
 
     def _migrate_refused_route(self, source_key: str, sink_key: str) -> None:
         """A source was refused by a chart (different dimension). Spawn a NEW chart for it and

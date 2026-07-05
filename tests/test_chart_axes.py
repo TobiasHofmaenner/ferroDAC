@@ -221,6 +221,19 @@ def test_parked_curve_drawn_from_query_envelope_ignores_restream_feed(qapp):
     assert p._curves["g/p"].getData()[1][-1] == 7.0
 
 
+def test_manual_zoom_fires_on_zoom_with_the_view_range(qapp):
+    """Phase 3 (Fix B): a settled manual zoom reports the VISIBLE x-range via on_zoom, so
+    the app can re-query that sub-window at pixel resolution. (The debounce timer's timeout
+    calls _fire_zoom; we invoke it directly — the view range is what matters.)"""
+    p = _chart(qapp)
+    p.add_source("g/p", _src("P", "mbar"))
+    seen = []
+    p.on_zoom = lambda t0, t1: seen.append((t0, t1))
+    p.plot.setXRange(1000.0, 2000.0, padding=0)
+    p._fire_zoom()
+    assert seen and abs(seen[-1][0] - 1000.0) < 50 and abs(seen[-1][1] - 2000.0) < 50
+
+
 def test_band_uses_inline_sigma_from_reading(qapp):
     """A processor output that CREATES uncertainty carries σ inline on the Reading; the
     chart draws the band from it — no provider needed (that's the gas-fit path)."""
