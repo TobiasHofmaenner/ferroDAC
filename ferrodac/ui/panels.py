@@ -497,22 +497,6 @@ class ChartPanel(Panel):
             self._axes[dimkey] = slot
             self._apply_primary_label()
             return slot
-        # Re-purpose an EMPTY dimensionless PRIMARY (left) axis for this real dimension,
-        # rather than pushing real data onto a right axis and leaving the left blank —
-        # e.g. a source that bound with unit="" on reload then re-homed once its unit
-        # arrived (#11). Real data belongs on the left axis.
-        prim = next((s for s in self._axes.values() if s.primary), None)
-        if prim is not None and not prim.keys and prim.dimkey == self._dimkey(""):
-            del self._axes[prim.dimkey]
-            prim.dimkey, prim.display_unit = dimkey, display_unit
-            self._axes[dimkey] = prim
-            if not self._logy_explicit:
-                want = self._default_logy(unit)
-                if want != self._logy:
-                    self._logy = want
-                    self.plot.setLogMode(x=False, y=self._logy)
-            self._apply_primary_label()
-            return prim
         index = len(self._axes)               # 1 = built-in right axis, 2+ = new axes
         vb = pg.ViewBox()
         vb.setXLink(self._pi.vb)
@@ -659,23 +643,9 @@ class ChartPanel(Panel):
                 self._update_band(key)
 
     def add_source(self, key, source):
-        unit = getattr(source, "unit", "") or ""
         if key in self._curves:
-            # Already shown — but if the unit arrived LATE (on reload a historic port
-            # binds with unit="" before the device reconnects with the real unit), the
-            # curve is stuck on the wrong/dimensionless axis. Re-home it to the correct
-            # dimension's axis, preserving its buffered data (#11).
-            if self._dimkey(unit) != (self._meta.get(key) or ("",))[0]:
-                saved = self._buf.get(key)
-                self.remove_source(key)
-                self._install_source(key, source, unit)
-                if saved is not None and key in self._buf:
-                    self._buf[key] = saved
-                    self._set_curve_data(key)
             return
-        self._install_source(key, source, unit)
-
-    def _install_source(self, key, source, unit):
+        unit = getattr(source, "unit", "") or ""
         dimkey = self._dimkey(unit)
         slot = self._axes.get(dimkey)
         if slot is None:

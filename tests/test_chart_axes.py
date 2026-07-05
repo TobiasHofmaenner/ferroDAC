@@ -97,24 +97,6 @@ def test_temperature_defaults_to_linear_and_keeps_its_unit_label(qapp):
     assert p._logy is True                     # pressure keeps the log default
 
 
-def test_late_unit_rehomes_source_to_its_axis(qapp):
-    """On reload a source can bind with unit='' (a historic port before the device
-    reconnects) → the dimensionless axis; when the real unit arrives it must RE-HOME to
-    the correct axis instead of staying stuck (#11), preserving buffered data, and
-    re-purpose the now-empty dimensionless primary rather than leaving the left axis blank."""
-    p = _chart(qapp)
-    p.add_source("dev/t", _src("T", ""))          # unit unknown first
-    p.feed([types.SimpleNamespace(key="dev/t", value=22.0, status=0, t=1.0)])
-    p.add_source("dev/t", _src("T", "°C"))        # real unit arrives
-    assert len(p._axes) == 1
-    assert next(iter(p._axes.values())).display_unit == "°C"
-    assert p.plot.getAxis("left").labelText == "[°C]"
-    assert len(p._buf["dev/t"]) == 1              # buffered data survived the re-home
-    p.add_source("dev/p", _src("P", "mbar"))      # a second dimension still gets its own axis
-    assert len(p._axes) == 2
-    assert {s.display_unit for s in p._axes.values()} == {"°C", "mbar"}
-
-
 def test_explicit_log_choice_overrides_and_persists(qapp):
     """A user's explicit Log-Y toggle wins over the per-dimension default and is the
     only case a `logy` is saved (so a fresh auto chart restores to its default)."""
