@@ -76,6 +76,25 @@ def main() -> int:
     assert abs(np.nanmean(yb[xb > now - 300]) - 2.0) < 0.01
     print("✓ gap honored: NaN break in [-700,-300], v=1 before / v=2 after")
 
+    # series C — a device RECONNECT mid-session: two runs land in the SAME epoch with a
+    # big time gap between them (a reconnect does NOT roll an epoch). coverage() must
+    # SPLIT it (else the chart AND the Timeline preview draw a straight line across the
+    # outage), while read_raw stays FULL-RES and NaN-free (the physics invariant).
+    store.add_source("C")
+    tc1 = np.arange(now - 5000, now - 4700, 0.1)         # run 1
+    tc2 = np.arange(now - 1000, now - 700, 0.1)          # run 2, ~3700 s later
+    store.append("C", tc1, np.ones(len(tc1)), epoch="e0")
+    store.append("C", tc2, 2 * np.ones(len(tc2)), epoch="e0")   # SAME epoch, no roll
+    store.finalize_rollups("C")
+    covc = store.coverage("C")
+    assert len(covc) == 2, f"same-epoch gap not split: {covc}"
+    assert covc[0][1] < now - 4600 and covc[1][0] > now - 1100, covc
+    xc, yc = res.query("C", now - 5000, now - 700, max_points=2000)
+    assert np.isnan(yc).any(), "same-epoch reconnect gap not broken in query()"
+    tr, vr = store.read_raw("C", now - 5000, now - 700)    # physics: read_raw untouched
+    assert len(tr) == len(tc1) + len(tc2) and not np.isnan(vr).any(), "read_raw altered"
+    print("✓ same-epoch reconnect gap: coverage split in two, query breaks, read_raw intact")
+
     print("\nRESOLVER SELFTEST PASS")
     return 0
 

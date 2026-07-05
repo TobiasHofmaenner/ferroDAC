@@ -34,6 +34,37 @@ _TOP = 512           # build levels until the top tier has <= this many buckets
 # array creation, so this applies to new epochs; existing stores keep theirs.
 _CHUNK = 1 << 14     # raw array chunk (~16k samples)
 
+# Gap detection (DESIGN §7.4). There is no time-resolved "device online" record — a
+# reconnect appends into the SAME epoch, so a recording outage is just a large dt in an
+# otherwise dense series. coverage() splits an epoch into contiguous-recording intervals
+# at any dt FAR larger than the local cadence, so the chart AND the Timeline preview break
+# the line across a real gap instead of drawing across it. Scale-free (K·median) with a
+# floor so a fast source's sub-minute jitter never false-splits; per-source override via
+# the source group's `gap_k` attr.
+_GAP_K = 8.0         # a gap = a dt at least this many × the local median cadence …
+_GAP_MIN_S = 30.0    # … but never below this many seconds (ignore sub-30 s jitter)
+
+
+def _split_intervals(t, gap_k=_GAP_K):
+    """Split a monotonic timestamp array into contiguous-recording (start, end)
+    intervals at real gaps — a dt >> the local median cadence. Endpoints are the
+    true first/last samples; a gapless series returns a single interval."""
+    t = np.asarray(t, dtype="f8")
+    if t.size == 0:
+        return []
+    if t.size < 3:
+        return [(float(t[0]), float(t[-1]))]
+    d = np.diff(t)
+    pos = d[d > 0]
+    med = float(np.median(pos)) if pos.size else 0.0
+    thresh = max(_GAP_MIN_S, gap_k * med) if med > 0 else _GAP_MIN_S
+    cut = np.nonzero(d > thresh)[0]              # gap sits between t[i] and t[i+1]
+    if cut.size == 0:
+        return [(float(t[0]), float(t[-1]))]
+    starts = [float(t[0])] + [float(t[i + 1]) for i in cut]
+    ends = [float(t[i]) for i in cut] + [float(t[-1])]
+    return list(zip(starts, ends))
+
 
 def _locked(fn):
     """Serialize a public method behind the store's RLock (DESIGN §21.2): one
@@ -309,6 +340,7 @@ class ZarrStore:
         pyramid is a future optimisation, deliberately deferred (the freeze it
         would remove no longer exists)."""
         g = self._source(uuid)
+        gap_k = float(g.attrs.get("gap_k", _GAP_K))
         keys = [epoch] if epoch else list(g.attrs.get("epochs", []))
         for key in keys:
             eg = g[key]
@@ -323,6 +355,9 @@ class ZarrStore:
                 self._put(eg, f"r{lvl}_min", cmn)
                 self._put(eg, f"r{lvl}_max", cmx)
             eg.attrs["levels"] = lvl
+            # contiguous-recording intervals, computed here (worker thread, already an
+            # O(epoch) pass) and cached on the epoch so coverage() stays a cheap attr read
+            eg.attrs["intervals"] = [[s, e] for s, e in _split_intervals(t, gap_k)]
             eg.attrs["dirty"] = False
 
     def _put(self, g, name, arr):
@@ -336,15 +371,32 @@ class ZarrStore:
     # -- read (the resolver tier protocol) -----------------------------------
     @_locked
     def coverage(self, uuid) -> list:
+        """Contiguous-recording intervals per source (the tier protocol). One epoch
+        can yield SEVERAL intervals when a device went offline mid-session without
+        rolling an epoch (the split is cached in ``intervals`` at finalize). A legacy
+        epoch (finalized before gap-splitting existed) is migrated once, on demand."""
         try:
             g = self._source(uuid)
         except KeyError:                             # source not in this store yet
             return []
+        gap_k = float(g.attrs.get("gap_k", _GAP_K))
         out = []
         for key in g.attrs.get("epochs", []):
-            a = g[key].attrs
-            if a.get("n", 0):
-                out.append((float(a["t0"]), float(a["t1"])))
+            eg = g[key]
+            a = eg.attrs
+            if not a.get("n", 0):
+                continue
+            ivs = a.get("intervals")
+            if ivs is None:                          # not yet gap-split
+                if a.get("dirty", True):             # actively recording → don't scan;
+                    ivs = [(float(a["t0"]), float(a["t1"]))]   # splits on next rollup
+                else:                                # legacy finalized → migrate once
+                    ivs = _split_intervals(np.asarray(eg["t"][:]), gap_k)
+                    try:
+                        eg.attrs["intervals"] = [[s, e] for s, e in ivs]
+                    except Exception:                # read-only store → recompute next time
+                        pass
+            out.extend((float(s), float(e)) for s, e in ivs)
         return out
 
     @_locked
