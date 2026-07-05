@@ -68,13 +68,15 @@ def _split_intervals(t, gap_k=_GAP_K):
     pos = d[d > 0]
     med = float(np.median(pos)) if pos.size else 0.0
     thresh = max(_GAP_MIN_S, gap_k * med) if med > 0 else _GAP_MIN_S
-    eps = max(_GAP_EPS, 0.25 * med)              # << thresh, so widened points stay disjoint
     cut = np.nonzero(d > thresh)[0]              # gap sits between t[i] and t[i+1]
     if cut.size == 0:
-        return [_widen(float(t[0]), float(t[-1]), eps)]   # 3+ all-equal ts → widen (no drop)
+        return [_widen(float(t[0]), float(t[-1]), _GAP_EPS)]   # 3+ all-equal ts → widen (no drop)
     starts = [float(t[0])] + [float(t[i + 1]) for i in cut]
     ends = [float(t[i]) for i in cut] + [float(t[-1])]
-    return [_widen(s, e, eps) for s, e in zip(starts, ends)]
+    # _GAP_EPS (not a median-scaled pad): _partition only needs ANY positive width to own the
+    # sample, and a fixed 1 ms keeps a widened point from over-reporting coverage by up to
+    # 0.125·median past [t0,t1] for very sparse sources (still << any real gap, so still disjoint).
+    return [_widen(s, e, _GAP_EPS) for s, e in zip(starts, ends)]
 
 
 def _locked(fn):
