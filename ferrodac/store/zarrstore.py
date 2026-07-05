@@ -71,7 +71,7 @@ def _split_intervals(t, gap_k=_GAP_K):
     eps = max(_GAP_EPS, 0.25 * med)              # << thresh, so widened points stay disjoint
     cut = np.nonzero(d > thresh)[0]              # gap sits between t[i] and t[i+1]
     if cut.size == 0:
-        return [(float(t[0]), float(t[-1]))]
+        return [_widen(float(t[0]), float(t[-1]), eps)]   # 3+ all-equal ts → widen (no drop)
     starts = [float(t[0])] + [float(t[i + 1]) for i in cut]
     ends = [float(t[i]) for i in cut] + [float(t[-1])]
     return [_widen(s, e, eps) for s, e in zip(starts, ends)]
@@ -355,6 +355,9 @@ class ZarrStore:
         keys = [epoch] if epoch else list(g.attrs.get("epochs", []))
         for key in keys:
             eg = g[key]
+            if eg.attrs.get("modality") == "trace" or "v" not in eg:
+                continue                         # trace epoch (stores 'y', not 'v') → scalar
+            #                                      rollups/gap-split don't apply; never KeyError
             t = np.asarray(eg["t"][:]); v = np.asarray(eg["v"][:])
             if len(t) == 0:
                 continue
@@ -381,6 +384,16 @@ class ZarrStore:
 
     # -- read (the resolver tier protocol) -----------------------------------
     @_locked
+    def has(self, uuid) -> bool:
+        """Does this store hold any data for the source? Cheap presence test (epoch attrs
+        only, no sample read) for Resolver.knows — a stored-vs-derived filter."""
+        try:
+            g = self._source(uuid)
+        except KeyError:
+            return False
+        return any(g[k].attrs.get("n", 0) for k in g.attrs.get("epochs", []))
+
+    @_locked
     def coverage(self, uuid) -> list:
         """Contiguous-recording intervals per source (the tier protocol). One epoch
         can yield SEVERAL intervals when a device went offline mid-session without
@@ -400,10 +413,13 @@ class ZarrStore:
             # `intervals` is cached at finalize_rollups, but further append()s (dirty=True)
             # since the last rollup are NOT in it — trusting a stale `intervals` would under-
             # report the epoch and make resolver.read_raw DROP those on-disk samples from
-            # exports / the processor re-stream. So gate on `dirty` FIRST: while recording,
-            # report the fresh full extent (the correct gap-split lands at the next rollup).
+            # exports / the processor re-stream. So gate on `dirty` FIRST and re-split the live
+            # tail from its raw timestamps (bounded by the ~50k rollup interval). Splitting even
+            # while dirty (not just returning t0..t1) matters because a farther tier's union
+            # (_merge) would otherwise swallow a real gap in the recording tail — the live view
+            # would ramp across it until the next rollup (C2).
             if a.get("dirty", True):
-                ivs = [(float(a["t0"]), float(a["t1"]))]
+                ivs = _split_intervals(np.asarray(eg["t"][:]), gap_k)
             else:
                 ivs = a.get("intervals")
                 if ivs is None:                      # legacy finalized → migrate once

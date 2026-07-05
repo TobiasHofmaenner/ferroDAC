@@ -2430,7 +2430,7 @@ class MainWindow(QMainWindow):
             try:
                 keys = [k for k in panel.curve_keys()
                         if not self.replay.playback._is_trace(k)   # scalars only
-                        and self.resolver.coverage(k)]             # in the store (not derived)
+                        and self.resolver.knows(k)]                # in a tier (not derived); O(1)
                 if not keys:
                     continue
                 panel.enter_window(keys)             # feed() ignores them from the first chunk

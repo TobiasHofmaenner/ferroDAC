@@ -122,6 +122,35 @@ def main() -> int:
     assert len(xe) == len(te), f"isolated flap sample dropped: {len(xe)} != {len(te)}"
     print("✓ isolated flap sample: point interval widened, read_raw keeps it")
 
+    # series F — a DIRTY epoch (still recording, never finalized) with a real gap must be
+    # SPLIT in coverage too, else a farther tier's _merge(union) swallows the gap and the live
+    # view ramps across it (C2). read_raw must still keep every sample.
+    store.add_source("F")
+    tf1 = np.arange(now - 3000, now - 2900, 0.1)
+    tf2 = np.arange(now - 2000, now - 1900, 0.1)       # ~900s gap; NO finalize → epoch dirty
+    store.append("F", tf1, np.ones(len(tf1)), epoch="e0")
+    store.append("F", tf2, 2 * np.ones(len(tf2)), epoch="e0")
+    covf = store.coverage("F")
+    assert len(covf) == 2, f"dirty epoch gap not split: {covf}"
+    xf, _ = res.read_raw("F", now - 3000, now - 1900)
+    assert len(xf) == len(tf1) + len(tf2), f"dirty read_raw dropped: {len(xf)}"
+    print("✓ dirty epoch with a gap: coverage splits (no union-swallow), read_raw keeps all")
+
+    # series G/H — a zero-width degenerate coverage (a lone dirty sample, or 3+ all-equal
+    # timestamps) must NOT drop the sample from resolver.read_raw (C3 physics no-loss).
+    store.add_source("G")
+    store.append("G", np.array([now - 500.0]), np.array([1.0]), epoch="e0")     # ONE sample, dirty
+    covg = store.coverage("G")
+    assert covg and covg[0][1] > covg[0][0], f"zero-width interval not widened: {covg}"
+    xg, _ = res.read_raw("G", now - 600, now - 400)
+    assert len(xg) == 1, f"lone dirty sample dropped: {len(xg)}"
+    store.add_source("H")
+    store.append("H", np.full(20, now - 100.0), np.arange(20.0), epoch="e0")     # 20 all-equal ts
+    store.finalize_rollups("H", "e0")
+    xh, _ = res.read_raw("H", now - 200, now)
+    assert len(xh) == 20, f"all-equal finalized samples dropped: {len(xh)}"
+    print("✓ zero-width coverage widened: lone/all-equal samples survive read_raw")
+
     print("\nRESOLVER SELFTEST PASS")
     return 0
 

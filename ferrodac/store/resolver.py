@@ -35,6 +35,9 @@ class RamTier:
     def __init__(self, history):
         self.history = history
 
+    def has(self, series) -> bool:
+        return self.history.span(series) is not None
+
     def coverage(self, series):
         # Gap-aware: a plain (oldest, newest) span would advertise ONE continuous interval
         # over a 30 s–300 s outage that the store correctly split, and _merge would union the
@@ -93,6 +96,19 @@ class Resolver:
         for tier in list(self.tiers):
             ivs += list(tier.coverage(series))
         return _merge(ivs)
+
+    def knows(self, series) -> bool:
+        """Does ANY tier hold this series? An O(1) presence test (unlike coverage(), which now
+        materializes the RAM slice) for callers that only need a stored-vs-derived filter — a
+        near tier's cheap has() short-circuits before a remote tier's networked coverage()."""
+        for tier in list(self.tiers):
+            has = getattr(tier, "has", None)
+            if has is not None:
+                if has(series):
+                    return True
+            elif tier.coverage(series):          # tier without has() → fall back (e.g. hub)
+                return True
+        return False
 
     def query(self, series, t0, t1, max_points=2000):
         segs = self._partition(series, t0, t1)

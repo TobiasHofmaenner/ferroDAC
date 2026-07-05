@@ -41,6 +41,7 @@ class SyncEngine:
         remote = self.transport.state()              # {(source, epoch): n_remote}
         local = self.local.epoch_lengths()           # {(source, epoch): n_local}
         sent = 0
+        touched = set()
         for (source, epoch), n_local in local.items():
             n_remote = int(remote.get((source, epoch), 0))
             if n_remote >= n_local:                  # remote already has it (or ahead)
@@ -53,6 +54,19 @@ class SyncEngine:
                 self.transport.push(source, epoch, chunk)
                 sent += j - i
                 i = j
+            touched.add((source, epoch))
+        # A pushed epoch arrives via apply_chunk → append(), which leaves the RECEIVER epoch
+        # dirty with no rollup pyramid. Ask the transport to (re)build it: else a hub-served
+        # query runs the O(N) raw path forever, and the rollup-cached `intervals` never form
+        # (gap-splitting still works via coverage()'s dirty branch, but this makes it durable
+        # + fast). Best-effort + optional so a transport without finalize() still syncs data.
+        finalize = getattr(self.transport, "finalize", None)
+        if finalize is not None:
+            for source, epoch in touched:
+                try:
+                    finalize(source, epoch)
+                except Exception:                    # noqa: BLE001 — never fail a sync on this
+                    pass
         return sent
 
     def _row_step(self, source, epoch, i, n_local) -> int:
@@ -82,3 +96,8 @@ class LocalTransport:
 
     def push(self, source, epoch, chunk) -> None:
         self.target.apply_chunk(source, epoch, chunk)
+
+    def finalize(self, source, epoch) -> None:
+        """(Re)build the target's rollup pyramid + gap-split intervals for a just-synced
+        epoch (the gRPC transport sends a final flag on the last chunk to the same end)."""
+        self.target.finalize_rollups(source, epoch)
