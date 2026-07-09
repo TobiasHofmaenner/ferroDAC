@@ -1694,3 +1694,56 @@ returns a callable `Subscription` (back-compat: calling it unsubscribes).
   docstring: `Widget.feed` guaranteed GUI; `Processor.process` default worker with the
   `requires_gui` opt-out; driver `_read`/`_connect`/`_write` on the device's own
   threads. All Qt-free imports so a driver/processor-only plugin stays Qt-free.
+
+## 22. Display plane is PULL — state-driven rendering (decided 2026-07-09)
+
+The 2026-07 pipeline review's finding: §7.2/§7.4 decided one windowed query
+interface as "the only way panels read data", but the dashboard never adopted it —
+six independent write paths grew into the same per-curve buffer (live feed, full-res
+re-stream, route backfill, parked window draw, zoom re-query, grow-extend-back),
+arbitrated by ~8 cooperating guards spread over four files, with chart mode encoded
+implicitly as TimeContext booleans × `_windowed` membership × an `own` flag. Every
+replay/loading bug of 2026-06/07 was an interaction between two of those paths; the
+subsampling artifacts were five resampling stages with no shared NaN/budget/timing
+contract. Decision (option panel: keep-patching / two-plane / full-engine-rethink —
+two-plane chosen; measured foundations show no ceiling justifying a rethink):
+
+### 22.1 Invariants (normative)
+
+- **I-5 Push is for ingest only.** Device → bus → {RAM ring, StoreWriter} stays the
+  streaming plane (lossless, ordered, off-GUI — §21). Nothing display-shaped
+  subscribes to a bus for its *content*.
+- **I-6 Display pulls.** A chart's curve content is a **pure function of
+  (tiers, window, budget)**. One owner per dashboard (the ChartFeed) is the ONLY
+  writer of curve buffers; it reconciles on any (mode, window, sources) change via
+  `resolver.query` + gap-split. Park, zoom, route-add, scrub, grow-back are the
+  same code path: "spec changed → reconcile".
+- **I-7 Live is a query continuation.** Mode LIVE appends the engine tail through
+  the same owner — an *optimization* of "the query result grew", never a second
+  authority over the buffer.
+- **I-8 Mode is named.** One explicit LIVE | PARKED | PLAYING state derived from
+  TimeContext in exactly one place. No boolean archaeology, no per-key ownership
+  sets, no `own` flags.
+- **I-9 Replay serves analysis, not pixels.** The full-res re-stream exists to
+  re-drive PROCESSORS (store raw, recompute derived — §7.2); it never feeds panels.
+  The playback bus leaves the live path entirely.
+- **I-10 One decimation policy.** Envelope representation, NaN semantics
+  (write-boundary filtering: non-finite is never data; all-NaN bucket = break),
+  budget allocation (proportional by overlap), and bucket timing live in ONE shared
+  module used by the store pyramid, the RAM tier, and the buffer decimator.
+
+### 22.2 Migration (strangler order; each step ships green)
+
+1. Extract the single writer (ChartFeed) — mechanical move of the three query-draw
+   paths out of app.py; `feed`/`set_window_curve` become internal.
+2. Name the state + `reconcile()`; delete `_windowed`/`enter_window`/`exit_window`/
+   `own`/clear-on-Play.
+3. Re-point the live tail to the engine bus; playback bus stops feeding panels.
+4. Demote the re-stream to ProcessorReplay (on-demand, off-thread); PLAYING slides
+   the window through the owner.
+5. Unify interval/decimation algebra (`intervals.py` + shared decimation policy —
+   partially landed 2026-07-09: NaN-robust `_downsample`, dirty-tail top-up in
+   `_query_epoch`, proportional epoch budgets, writer non-finite filter, pinned-span
+   + anchored-gap `CurveBuffer._decimate`).
+6. `chartfeed_selftest`: scripted transition sequences encoding every 2026-06/07
+   regression as a named case.
