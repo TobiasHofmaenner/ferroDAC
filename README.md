@@ -14,8 +14,10 @@ monitor and a **Modbus RTU temperature** monitor — generalised into one platfo
 ## Status — v0.14 (early, but usable for real experiments)
 
 ```bash
-pip install -r requirements.txt
-python -m ferrodac
+# one-time: install uv (https://docs.astral.sh/uv/) — curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync                    # locked, reproducible env in .venv (installs Python too)
+uv run python -m ferrodac
+# (plain pip still works: `pip install .` — but uv.lock is what the lab actually tests)
 ```
 
 What works today:
@@ -50,8 +52,8 @@ GitHub Release. To build locally **on Windows** (PyInstaller can't
 cross-compile):
 
 ```bat
-pip install -r requirements.txt pyinstaller
-pyinstaller packaging/ferrodac.spec      :: -> dist\ferroDAC.exe
+uv sync --group package
+uv run pyinstaller packaging/ferrodac.spec      :: -> dist\ferroDAC.exe
 ```
 
 The camera-OCR feature additionally needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
@@ -131,7 +133,7 @@ ferrodac/
 `.github/workflows/tests.yml`):
 
 ```bash
-pip install pytest            # plus the runtime deps (requirements.txt)
+uv sync --group dev           # the same locked env CI uses
 make test                     # everything (offscreen Qt)
 make test-core                # fast gate: Qt-free data plane + in-process gRPC e2e
 make test-ui                  # PySide6 smoke tests only

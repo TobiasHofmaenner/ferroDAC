@@ -25,10 +25,9 @@ jobs:
         with:
           fetch-depth: 0       # full history + tags → git describe works for manual builds
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-          architecture: "x64"
+          enable-cache: true
 
       # The git tag is the single source of truth for the version: stamp it into
       # ferrodac/__init__.py's placeholder before freezing (no manual bump).
@@ -45,14 +44,11 @@ jobs:
           sed -i "s/__version__ = \"0.0.0+dev\"/__version__ = \"$V\"/" ferrodac/__init__.py
           grep '^__version__' ferrodac/__init__.py
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+      - name: Install locked environment (+ PyInstaller)
+        run: uv sync --group package
 
       - name: Build EXE
-        run: pyinstaller packaging/ferrodac.spec
+        run: uv run pyinstaller packaging/ferrodac.spec
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

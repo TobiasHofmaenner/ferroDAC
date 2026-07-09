@@ -1,3 +1,64 @@
+# ferroDAC — dependency + tool configuration. THE single source of truth for the
+# environment: dev boxes, CI (tests + Windows exe), and colleagues all install the
+# same locked set via `uv sync` (uv.lock is committed). Rationale (2026-07-09): the
+# app froze for minutes because a rolling distro swapped Qt underneath a system-
+# python install — a lab tool's environment must be pinned, portable, and boring.
+
+[project]
+name = "ferrodac"
+version = "0.0.0+dev"          # display version is stamped from the git tag by CI
+requires-python = ">=3.12"
+description = "Local-first lab data-acquisition, control & documentation platform"
+dependencies = [
+    # 6.10 color-management regression: QColorTrcLut rebuilds per paint ->
+    # minute-long GUI freezes (diagnosed live 2026-07-09, Kali Qt 6.10.2/6.10.3;
+    # 6.9.3 verified green). NB: PySide 6.8 breaks on HubController.connect
+    # name-shadowing; stay on 6.9.x until both are resolved.
+    "PySide6>=6.9,<6.10",
+    "qtpy>=2.4",
+    "pyqtgraph>=0.13",
+    "numpy>=1.24",
+    # Real device drivers (TPG-256A serial, …):
+    "pyserial>=3.5",
+    # Local data store — chunked arrays on disk (DESIGN §7.4). Same format the hub
+    # uses on S3, so the local/remote tiers share read code and sync is a chunk copy.
+    "zarr>=3.0",
+    "numcodecs>=0.13",
+    # Units & uncertainty as first-class value semantics (DESIGN §19). pint is the
+    # unit AUTHORITY (registry, dimensional algebra, affine temperature);
+    # `uncertainties` (ufloat/unumpy) is the on-demand exact σ-propagation engine.
+    "pint>=0.24",
+    "uncertainties>=3.2",
+    # Resource monitor in the Timeline perf HUD (CPU/RAM + playback-rate readout).
+    "psutil>=5.9",
+    # Hub networking — publish to / consume from a ferroDAC hub (agent + viewer).
+    # Optional at runtime (the app degrades via net.GRPC_AVAILABLE), but bundled so
+    # the feature works in the packaged client. The protobuf floor satisfies the
+    # generated contract stubs (gencode requires runtime >= 6.33.5).
+    "grpcio>=1.60",
+    "protobuf>=6.33.5",
+    # Computer-vision sources (camera OCR).
+    "opencv-python-headless>=4.8",
+    # The "General" OCR engine — a DNN (PP-OCR via ONNX Runtime). Optional: the
+    # detector falls back to Tesseract if it's absent. Tesseract itself is a
+    # separate native install (apt / installer); OCR degrades gracefully without.
+    "rapidocr-onnxruntime>=1.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+package = [
+    # Windows one-file exe (CI + local Windows builds): uv sync --group package
+    "pyinstaller>=6",
+]
+
+[tool.uv]
+# An APP run from source (python -m ferrodac), not an installable library:
+# uv manages the venv + deps but never builds/installs the project itself.
+package = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
