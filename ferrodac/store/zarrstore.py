@@ -102,20 +102,30 @@ class ZarrStore:
             g.attrs["config"] = []
         return g
 
-    @_locked
     def sources(self) -> list:
-        """All source keys. The group-name → key mapping is IMMUTABLE once a
-        group exists (the percent-encoded dir decodes to one key forever), so it
-        is cached per name — reading every group's attrs JSON on each call cost
-        ~2 ms/source, and the Timeline's 500 ms tick walks this catalog (GUI
-        watchdog stalls, 2026-07-09). New groups resolve once on first sight."""
+        """All source keys — deliberately LOCK-FREE. The Timeline's 500 ms tick
+        calls this on the GUI thread, and taking the store RLock queued the GUI
+        behind the writer/sync side's long holds (an O(epoch) rollup rebuild or
+        a sync sweep holds it for hundreds of ms — watchdog stalls, 2026-07-09).
+        Safe without the lock: group LISTING is directory metadata (none of the
+        array-resize hazard the lock exists for), and the name → key attr is
+        IMMUTABLE and read once per group ever (cached). A group racing its own
+        creation just resolves on the next tick; a transient listing failure
+        serves the last-known catalog."""
+        try:
+            names = list(self.root.group_keys())
+        except Exception:                        # noqa: BLE001 — mid-write listing race
+            return list(self._key_cache.values())
         out = []
-        for n in self.root.group_keys():
+        for n in names:
             if n == self._DEVICES:
                 continue
             k = self._key_cache.get(n)
             if k is None:
-                k = self.root[n].attrs.get("key", n)
+                try:
+                    k = self.root[n].attrs.get("key", n)
+                except Exception:                # noqa: BLE001 — group mid-creation
+                    continue                     # → picked up next tick
                 self._key_cache[n] = k
             out.append(k)
         return out

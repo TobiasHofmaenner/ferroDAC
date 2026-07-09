@@ -223,7 +223,12 @@ class MainWindow(QMainWindow):
         #                                     gap-breaks beat a network stall on the draw)
         self._sigma_refresh = QTimer(self)
         self._sigma_refresh.setInterval(2000)
-        self._sigma_refresh.timeout.connect(self._sigma_timelines.clear)
+        # retry only keys with NO model yet (the "model logged at the opening
+        # flush" case). A blind clear made every band redraw re-read the store —
+        # model_timeline takes the store lock, and the draw path must never queue
+        # behind a writer/sync hold (same class as the sources() stall). Resolved
+        # models are dropped on provenance_changed, the signal that changes them.
+        self._sigma_refresh.timeout.connect(self._retry_empty_sigma_timelines)
         self._sigma_refresh.timeout.connect(self._coverage_cache.clear)
         self._sigma_refresh.start()
         self.dashboard.set_sigma_provider(self._chart_sigma)
@@ -1513,6 +1518,13 @@ class MainWindow(QMainWindow):
                     rec[f"uncertainty:{s.id}"] = u.to_dict()
             recs[did] = rec
         self.store_writer.set_device_records(recs)
+
+    def _retry_empty_sigma_timelines(self) -> None:
+        """Evict only the σ-timeline entries that resolved EMPTY, so a model first
+        logged after the key was seen still shows up — without re-reading resolved
+        models from the store every 2 s on the draw path."""
+        for k in [k for k, v in self._sigma_timelines.items() if not v]:
+            self._sigma_timelines.pop(k, None)
 
     def _chart_sigma(self, key, times, values):
         """σ(key, times, values) for a chart's uncertainty band: reconstruct over the

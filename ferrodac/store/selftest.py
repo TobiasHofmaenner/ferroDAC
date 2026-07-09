@@ -153,6 +153,31 @@ def main() -> int:
             f"edge nibble at budget {mp}: [{qx[0] - qa:.2f}, {qx[-1] - qb:.2f}]"
     print("✓ query density tracks the budget smoothly (no F=16 pops); edges exact")
 
+    # --- sources() must be LOCK-FREE (regression 2026-07-09): the Timeline's
+    # 500 ms GUI tick lists the catalog while the writer/sync side holds the
+    # store RLock for hundreds of ms (rollup rebuild / sync sweep). The listing
+    # must never queue behind that lock.
+    import threading as _th
+    st.sources()                                     # warm the name→key cache
+    held, release = _th.Event(), _th.Event()
+
+    def _hold():
+        with st._lock:
+            held.set()
+            release.wait(5.0)
+
+    holder = _th.Thread(target=_hold, daemon=True)
+    holder.start()
+    assert held.wait(2.0)
+    t_lk = time.perf_counter()
+    n_src = len(st.sources())
+    dt_lk = time.perf_counter() - t_lk
+    release.set()
+    holder.join(2.0)
+    assert n_src >= 1 and dt_lk < 0.2, \
+        f"sources() blocked {dt_lk:.2f}s behind the store lock"
+    print(f"✓ sources() lock-free: {n_src} keys in {dt_lk * 1000:.1f} ms with the lock held")
+
     print("\nSTORE SELFTEST PASS")
     return 0
 
