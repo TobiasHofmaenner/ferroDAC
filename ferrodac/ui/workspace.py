@@ -280,10 +280,11 @@ class Dashboard(QObject):
         self._derived.connect(self._on_derived, Qt.QueuedConnection)
 
         self.area.on_configure = self._configure_panel
-        # analysis (§22 step 3): live raw arrives on the ENGINE bus; the playback
-        # (data) bus carries only the parked/playing re-stream + derived readings —
-        # both must reach the processors (they re-experience history AND run live).
-        engine.subscribe(self._on_data_batch)
+        # analysis (§22 steps 3+4): live raw arrives on the ENGINE bus but drives
+        # processors only while FOLLOWING (a parked/playing analysis re-experiences
+        # the historic slice — live data polluting it was the old _on_live's gate);
+        # the playback (data) bus carries the re-stream + derived chains.
+        engine.subscribe(self._on_live_data_batch)
         if self.data_bus is not self.engine:
             self.data_bus.subscribe(self._on_data_batch)
         engine.subscribe(self._on_control_batch)       # control: always live
@@ -292,9 +293,28 @@ class Dashboard(QObject):
 
     # -- introspection (replay / distribution read these) --------------------
     def source_keys(self) -> list:
-        """All known source keys (device + virtual), online or placeholder — the
-        replay controller re-streams these when the head is parked."""
+        """All known source keys (device + virtual), online or placeholder."""
         return list(self._sources)
+
+    def replay_source_keys(self) -> list:
+        """The sources the parked/playing re-stream must re-drive (§22 step 4 —
+        replay serves ANALYSIS, not pixels): all of them when any processor is
+        bound (the pipeline re-experiences history), else only TRACE sources
+        (waterfall/spectrum displays consume replayed scans). Scalar curves are
+        drawn from the store query by ChartFeed, so with no processors bound,
+        re-materializing millions of scalar Readings would serve nobody — skipping
+        them is what removes the park/scrub freeze."""
+        if self._processors:
+            return list(self._sources)
+        return [k for k, p in self._sources.items()
+                if getattr(p, "dtype", "") == "trace"]
+
+    def is_derived_key(self, key: str) -> bool:
+        """True for a processor OUTPUT source — transient readings that ride the
+        playback bus (never the engine, never the store). ChartFeed's playback
+        forward delivers only these (+ traces) to panels."""
+        p = self._sources.get(key)
+        return bool(p is not None and getattr(p, "proc_id", ""))
 
     def source_names(self) -> dict:
         """key -> device-qualified display name, so the Timeline shows the same
@@ -1077,12 +1097,18 @@ class Dashboard(QObject):
         QTimer.singleShot(0, spawn)
 
     # -- data flow -----------------------------------------------------------
+    def _on_live_data_batch(self, batch):
+        """Engine sink: live raw drives processors only while FOLLOWING — while
+        parked/playing, the analysis pipeline re-experiences the historic slice
+        (playback bus) and live data must not pollute it (§22 step 4)."""
+        if self._is_live():
+            self._on_data_batch(batch)
+
     def _on_data_batch(self, batch):
-        """Data-bus sink (replayable): feed each complete reading to any processor
-        bound to it. Sees live readings (pass-through) or, when parked, the
-        re-streamed historic slice — so the analysis pipeline re-experiences old
-        data. Scalars/bools dispatch too (a float/bool processor is a first-class
-        plugin), not only traces — routing already gates input datatypes."""
+        """Playback-bus sink (replayable): feed each complete reading to any
+        processor bound to it — the re-streamed historic slice, and derived
+        readings for processor CHAINS. Scalars/bools dispatch too (a float/bool
+        processor is a first-class plugin) — routing already gates datatypes."""
         for r in batch:
             if not getattr(r, "partial", False):     # skip trace preview frames
                 self._run_processors(r)

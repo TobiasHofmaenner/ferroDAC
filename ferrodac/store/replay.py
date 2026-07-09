@@ -269,7 +269,8 @@ class ReplayController:
     optimisation, signalled by the realtime-rate readout)."""
 
     def __init__(self, engine, store, time_context, sources=None, on_reset=None,
-                 on_progress=None, reader=None, runner=None, gui_pump=None):
+                 on_progress=None, reader=None, runner=None, gui_pump=None,
+                 on_advance=None):
         self.store = store
         self.tc = time_context
         self.bus = Bus()                             # what the dashboard subscribes to
@@ -280,6 +281,11 @@ class ReplayController:
         self._sources = sources or store.sources     # callable → [source keys]
         self.on_reset = on_reset
         self.on_progress = on_progress               # frac 0..1 during a load; None=done
+        self.on_advance = on_advance                 # (seg0, seg1): a play-step entered
+        #                                              this slice — the display owner
+        #                                              (ChartFeed) appends it to charts,
+        #                                              since the re-stream no longer
+        #                                              feeds panels (§22 step 4)
         # Off-GUI park/scrub (DESIGN §21.3): with a `runner` (a TaskRunner) the
         # full-res re-stream runs on a worker thread and `gui_pump(fn)` marshals
         # each chunk's bus drain onto the GUI thread, blocking the worker until it
@@ -335,8 +341,10 @@ class ReplayController:
         if prev is not None and prev[1] <= t1 and t0 <= t1 and prev[1] >= t0 - 1e-9:
             seg0, seg1 = prev[1], t1                 # continuous forward advance
             if seg1 > seg0:
-                # small slice → stream inline (no task, no clear); the panel buffers
-                # append it and the play tick trims the back edge (like live).
+                if self.on_advance is not None:      # charts append the slice through
+                    self.on_advance(seg0, seg1)      # the owner (§22 step 4)
+                # small slice → stream inline (no task, no clear) for PROCESSORS and
+                # trace displays; the play tick trims the back edge (like live).
                 self.playback.stream(list(self._sources()), seg0, seg1)
         else:
             self._render(t0, t1)                     # discontinuous → re-render fresh

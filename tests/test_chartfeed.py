@@ -174,13 +174,57 @@ def test_live_tail_reaches_panels_from_engine_exactly_once():
     assert ctl.bus.drain() == []                # playback bus never saw raw live
 
 
-def test_restream_reaches_panels_via_playback_bus_exactly_once():
+def test_raw_restream_never_reaches_panels_but_drives_processors():
+    """§22 step 4 (I-9): replay serves analysis, not pixels. The parked re-stream's
+    raw scalars reach playback-bus subscribers (processors) but are filtered out of
+    the panel forward — parked curves are query-drawn by reconcile instead."""
     engine_bus, tc, ctl, panel, cf, Reading = _stream_rig()
+    processed = []
+    ctl.bus.subscribe(lambda b: processed.extend(b))   # the processor-side sink
     tc.park(BASE + 50)                          # scrub → controller re-streams the
     #                                             window synchronously (no runner)
-    assert len(panel.fed) > 100                 # historic slice arrived at the panel
-    seen = [r.t for r in panel.fed]
-    assert len(seen) == len(set(seen))          # each historic reading exactly once
+    assert len(processed) > 100                 # analysis re-experienced the slice
+    assert panel.fed == []                      # pixels never saw raw historic data
+
+
+def test_live_is_gated_out_of_parked_panels():
+    """While parked/playing, live acquisition continues on the engine bus but must
+    not pollute the historic view (the gate the old _on_live provided)."""
+    engine_bus, tc, ctl, panel, cf, Reading = _stream_rig()
+    tc.park(BASE + 50)
+    panel.fed.clear()
+    engine_bus.publish(Reading("dev", "a", BASE + 300, 42.0))
+    engine_bus.drain()
+    assert panel.fed == []                      # parked chart ignored the live tick
+    tc.follow_now()
+    engine_bus.publish(Reading("dev", "a", BASE + 301, 43.0))
+    engine_bus.drain()
+    assert [r.value for r in panel.fed if r.value == 43.0] == [43.0]   # live again
+
+
+def test_derived_readings_forward_from_playback_bus_in_any_mode():
+    from ferrodac.core.bus import Bus
+    from ferrodac.core.reading import Reading
+    engine_bus, playback = Bus(), Bus()
+    panel = _FeedPanel()
+    cf = ChartFeed(panels=lambda: [panel], resolver=lambda: None,
+                   reads=lambda: None, time_context=lambda: None,
+                   replay=lambda: None)
+    cf.attach(engine_bus, playback, is_derived=lambda k: k == "proc/out")
+    playback.publish(Reading("proc", "out", BASE, 1.5))       # derived → forwarded
+    playback.publish(Reading("dev", "a", BASE, 9.9))          # raw → filtered out
+    playback.drain()
+    assert [r.value for r in panel.fed] == [1.5]
+
+
+def test_advance_appends_playing_slice_through_the_owner():
+    """PLAYING: the newly-entered slice reaches chart curves via ChartFeed.advance
+    (synthetic readings through feed), not the re-stream."""
+    engine_bus, tc, ctl, panel, cf, Reading = _stream_rig()
+    cf.advance(BASE + 10, BASE + 12)            # a 2 s play-step slice
+    got = [r for r in panel.fed if BASE + 10 <= r.t <= BASE + 12]
+    assert 15 <= len(got) <= 25                 # 10 Hz data → ~20 samples
+    assert [r.t for r in got] == sorted(r.t for r in got)
 
 
 def test_degraded_mode_single_bus_no_double_feed():

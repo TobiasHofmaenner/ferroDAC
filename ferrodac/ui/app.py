@@ -156,12 +156,17 @@ class MainWindow(QMainWindow):
             self.time_context.anchor = self.time_context.head
             self.replay = ReplayController(
                 engine, store, self.time_context,
-                sources=lambda: self.dashboard.source_keys(),
+                # §22 step 4: the re-stream serves ANALYSIS — all sources when
+                # processors are bound, else only traces (scalar curves are
+                # query-drawn); with neither, park/scrub re-streams nothing.
+                sources=lambda: self.dashboard.replay_source_keys(),
                 on_reset=self._replay_reset,
                 on_progress=self._replay_progress,
                 reader=self.resolver,        # replay full-res via RAM+store+hub tier
                 runner=self._tasks,          # park/scrub off the GUI thread (§21.3)
                 gui_pump=self._gui_bridge.post_and_wait,
+                # a play-step's newly-entered slice reaches charts via the owner
+                on_advance=lambda a, b: self.chart_feed.advance(a, b),
             )
         except Exception as exc:                       # noqa: BLE001
             logging.getLogger("ferrodac").warning("durable store disabled: %s", exc)
@@ -189,11 +194,12 @@ class MainWindow(QMainWindow):
             # heavy processors run off-GUI while live, inline while parked (§21.3)
             is_live=(lambda: self.time_context.following)
             if self.time_context is not None else None)
-        # §22 step 3: panels are fed through ChartFeed's single forwarding point —
-        # raw live tail from the ENGINE bus, re-stream + derived from the playback
-        # bus (which no longer mirrors live data; the nested drain is gone).
+        # §22 steps 3+4: panels are fed through ChartFeed's single forwarding point —
+        # raw live tail from the ENGINE bus (LIVE mode only), derived readings and
+        # traces from the playback bus. Raw historic scalars never reach a panel.
         self.chart_feed.attach(engine,
-                               self.replay.bus if self.replay is not None else None)
+                               self.replay.bus if self.replay is not None else None,
+                               is_derived=lambda k: self.dashboard.is_derived_key(k))
         self.dashboard.add_panel("chart")
         # Uncertainty bands (DESIGN §19.0): charts get a σ provider — reconstruct over the
         # window, with the per-source model timeline CACHED so a live redraw is pure numpy

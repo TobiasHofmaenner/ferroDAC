@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 
 from ..core.reading import Reading
+from ..core.trace import Trace
 from ..store.replay import Mode
 
 _BACKFILL_POINTS = 4000
@@ -33,20 +34,40 @@ class ChartFeed:
         self._tc = time_context         # () -> TimeContext | None
         self._replay = replay           # () -> ReplayController | None
         self._last_mode: Mode | None = None
+        self._is_derived = lambda key: False         # set by attach()
 
-    # -- feed streams (DESIGN §22 step 3) ----------------------------------------
-    def attach(self, live_bus, playback_bus=None) -> None:
-        """Wire the two feed streams through this single forwarding point (I-6/I-7):
-        the raw LIVE tail arrives on the engine bus; the playback bus carries only
-        the historic re-stream and derived (processor) readings — it never sees raw
-        live data anymore, so the old engine→playback republish (a nested drain
-        inside every engine drain) is gone. In degraded mode (no durable store)
-        there is no playback bus and the engine feeds everything, exactly as before."""
-        live_bus.subscribe(self._forward)
+    # -- feed streams (DESIGN §22 steps 3+4) ---------------------------------------
+    def attach(self, live_bus, playback_bus=None, is_derived=None) -> None:
+        """Wire the two feed streams through this single forwarding point (I-6/I-7/I-9):
+
+        - ENGINE bus → panels, only while mode is LIVE (the live tail is a LIVE-mode
+          optimization; a parked/playing chart shows its historic window and live
+          acquisition must not pollute it — the gate the old _on_live provided).
+        - Playback bus → panels, filtered to DERIVED readings and TRACES. Raw
+          historic scalars never reach a panel: parked curves are query-drawn,
+          playing curves append via advance() — the re-stream serves PROCESSORS
+          (I-9) and waterfall/spectrum trace displays.
+
+        In degraded mode (no durable store) there is no playback bus, no
+        TimeContext, and the engine feeds everything, exactly as before."""
+        self._is_derived = is_derived or (lambda key: False)
+        live_bus.subscribe(self._forward_live)
         if playback_bus is not None and playback_bus is not live_bus:
-            playback_bus.subscribe(self._forward)
+            playback_bus.subscribe(self._forward_playback)
 
-    def _forward(self, batch) -> None:
+    def _forward_live(self, batch) -> None:
+        tc = self._tc()
+        if tc is not None and not tc.following:
+            return                                   # parked/playing: live stays out
+        self._deliver(batch)
+
+    def _forward_playback(self, batch) -> None:
+        filt = [r for r in batch
+                if isinstance(r.value, Trace) or self._is_derived(r.key)]
+        if filt:
+            self._deliver(filt)
+
+    def _deliver(self, batch) -> None:
         """Fan a batch to every display panel's feed — the same per-sink isolation
         the Bus gives inline subscribers (one bad panel never starves the rest)."""
         for panel in self._panels():
@@ -57,6 +78,36 @@ class ChartFeed:
                 feed(batch)
             except Exception:                        # noqa: BLE001 — panels isolated
                 log.debug("panel feed failed", exc_info=True)
+
+    def advance(self, seg0: float, seg1: float) -> None:
+        """PLAYING: the playhead walked prev→new front — append the newly-entered
+        slice to each chart's stored scalar curves through the owner (§22 step 4:
+        raw re-stream data no longer reaches panels; this is the ONE raw path into
+        a playing chart). Slices are ≤ speed×tick wide, so a handful of samples;
+        the resolver serves them from the RAM ring when playing near now. Synthetic
+        Readings go through feed() so conversion, σ lanes, and the monotonic guard
+        apply unchanged."""
+        resolver, replay = self._resolver(), self._replay()
+        if resolver is None or replay is None or seg1 <= seg0:
+            return
+        for panel in self._panels():
+            if not hasattr(panel, "set_window_curve"):
+                continue                             # not a scalar chart
+            feed = getattr(panel, "feed", None)
+            if feed is None:
+                continue
+            for key in panel.curve_keys():
+                if replay.playback._is_trace(key) or not resolver.knows(key):
+                    continue                         # traces ride the re-stream
+                try:
+                    t, v = resolver.read_raw(key, seg0, seg1)
+                except Exception:                    # noqa: BLE001 — one bad curve
+                    continue
+                if not len(t):
+                    continue
+                dev, _, src = key.rpartition("/")
+                feed([Reading(dev, src, float(t[i]), float(v[i]))
+                      for i in range(len(t))])
 
     # -- route backfill (#8) ---------------------------------------------------
     def backfill_route(self, source_key: str, panel) -> None:
