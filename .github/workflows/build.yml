@@ -101,6 +101,8 @@ jobs:
         run: uv sync --group package
 
       - name: Build binary
+        env:
+          QT_QPA_PLATFORM: offscreen   # analysis children import Qt-touching modules
         run: |
           uv run pyinstaller packaging/ferrodac.spec
           mv dist/ferroDAC dist/ferroDAC-linux-x64

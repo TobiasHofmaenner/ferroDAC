@@ -43,9 +43,15 @@ hiddenimports += [f"ferrodac.devices.{m}"
 # ^ keep this list in sync with ferrodac/devices/ — the Linux smoke build
 #   (2026-07-09) showed shelly_cloud silently missing from the frozen app.
 # pyqtgraph loads a lot lazily; include its submodules but skip the optional 3D
-# OpenGL package (needs PyOpenGL, which we don't use).
+# OpenGL package (needs PyOpenGL, which we don't use) — and the examples/jupyter/
+# canvas trees, whose IMPORT during collection initializes Qt and kills the
+# analysis child on a headless CI runner ("no Qt platform plugin", exit -6).
 hiddenimports += collect_submodules(
-    "pyqtgraph", filter=lambda name: not name.startswith("pyqtgraph.opengl")
+    "pyqtgraph",
+    filter=lambda name: not name.startswith(
+        ("pyqtgraph.opengl", "pyqtgraph.examples", "pyqtgraph.jupyter",
+         "pyqtgraph.canvas")
+    ),
 )
 # pyserial picks its port-enumeration backend at runtime by platform, so the
 # Windows one (serial.tools.list_ports_windows) is invisible to static analysis;

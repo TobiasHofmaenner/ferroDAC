@@ -836,6 +836,28 @@ is **staged**: snapshots + recorded clips first, live WebRTC later. Because medi
 is timestamped against the run clock, scrubbing the chart can surface
 time-correlated photos/frames.
 
+### 9.1 Compression policy — pixels can be data (decided 2026-07-09)
+
+This is a lab, not a video call: a camera feed may be a **scientific image whose
+pixel values are measurements**. The media plane must never silently degrade them.
+
+- **Stills are LOSSLESS, always.** A snapshot persists the frame Reading's image
+  **bit-exact as captured** — PNG for today's 8-bit RGB path; PNG-16/TIFF when a
+  driver delivers deeper/mono frames. Lossy stills do not exist in ferroDAC.
+  (Honesty note: the current Qt-Multimedia UVC path normalises frames to RGB888
+  at ingest — that is the camera path's fidelity ceiling, and the snapshot must
+  add zero loss on top. A future scientific-camera driver that emits 12/16-bit
+  frames rides the same rule: persist exactly what the Reading carried.)
+- **Clips have two DISTINCT intents, never conflated.**
+  *Documentation clips* ("what did the bench look like") may compress (H.264),
+  and are labelled as documentation in their media tag. *Pixel-critical
+  continuous imaging is NOT media at all* — it is the §11 block/data modality:
+  frames recorded as data (per-frame lossless, exact timestamps, replayable and
+  analyzable like any other source). If a lossless video container is ever
+  wanted for convenience, it is FFV1/MKV — never a lossy codec relabelled.
+- **Rule of thumb:** if anyone might ever put a cursor on a pixel and read a
+  number, it goes through the data plane; the media plane is for human context.
+
 ---
 
 ## 10. Documentation / ELN behaviours
