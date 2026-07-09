@@ -39,6 +39,29 @@ def _wf_cmap():
 from ..store.decimate import envelope_midline as _envelope_midline  # noqa: E402
 
 
+def _alive(widget) -> bool:
+    """False once a widget's underlying C++ object is gone. Async ReadService
+    results deliver on the GUI thread but AFTER an arbitrary delay — the Timeline
+    may have been torn down or its rows rebuilt meanwhile, and touching a dead
+    QGraphics object raises 'Internal C++ object already deleted'. Every async
+    callback here must check its target first and drop stale deliveries."""
+    if widget is None:
+        return False
+    try:
+        from shiboken6 import isValid                # PySide6
+        return bool(isValid(widget))
+    except ImportError:
+        pass
+    for mod in ("PyQt6.sip", "PyQt5.sip", "sip"):    # PyQt variants
+        try:
+            import importlib
+            sip = importlib.import_module(mod)
+            return not sip.isdeleted(widget)
+        except Exception:                            # noqa: BLE001
+            continue
+    return True                                      # unknown binding → assume alive
+
+
 class CpuBars(QtWidgets.QWidget):
     """One mini bar per logical core (green/amber/red by load)."""
 
@@ -476,11 +499,11 @@ class TimelineWindow(QtWidgets.QMainWindow):
         """Pick up sources that appeared since the last tick (e.g. a device joined
         the hub) and fold them into the list, ribbon tracks and coverage — so the
         open Timeline updates without a close/reopen."""
-        keys, _ = self._available()
+        keys, names = self._available()          # once — this walks the catalog
         if set(keys) != set(self._sources):
             self._rebuild_sources()
         else:
-            self._names = self._available()[1]   # names may have resolved late
+            self._names = names                  # names may have resolved late
 
     def _rebuild_sources(self):
         """Rebuild the source list + ribbon from the (lens-filtered) current set,
@@ -689,6 +712,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         srcs = list(self._sources)
 
         def apply(cov):
+            if not _alive(self.ribbon):              # delivered after teardown → drop
+                return
             cov = {k: cov[k] for k in srcs if k in cov}
             if cov != self._cover:                    # redraw bars only when changed
                 self._cover = cov
@@ -874,8 +899,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
 
         def draw(res):
             p2 = self._charts.get(key)
-            if p2 is None or (t0, t1) != (self.t0, self.t1):
-                return                               # window moved on → stale result
+            if p2 is None or not _alive(p2) or (t0, t1) != (self.t0, self.t1):
+                return                               # stale result / dead widget → drop
             x, y = _envelope_midline(*res)           # clean line, not a zigzag band
             p2._curve.setData(x, y)
             p2.setXRange(t0, t1, padding=0)
@@ -895,8 +920,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
 
         def render(blocks):
             p2 = self._charts.get(key)
-            if p2 is None or (t0, t1) != (self.t0, self.t1):
-                return                               # window moved on → stale
+            if p2 is None or not _alive(p2) or (t0, t1) != (self.t0, self.t1):
+                return                               # stale result / dead widget → drop
             self._draw_waterfall(p2, t0, t1, [b for b in blocks if len(b[0])])
 
         if self._reads is not None:

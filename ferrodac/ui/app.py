@@ -208,6 +208,12 @@ class MainWindow(QMainWindow):
         # first logged at the opening flush shows up without a manual refresh).
         self._sigma_timelines: dict = {}
         manager.provenance_changed.connect(self._sigma_timelines.clear)
+        # historic-catalog resolve cache: resolve_source() reads the device
+        # provenance record from zarr — the Timeline's 500 ms tick calling it per
+        # source stalled the GUI >600 ms (watchdog, 2026-07-09). Records change
+        # only on a provenance edit, so cache per key and clear on that signal.
+        self._srcinfo_cache: dict = {}
+        manager.provenance_changed.connect(self._srcinfo_cache.clear)
         # Gap breaks (DESIGN §7.4): charts break the drawn curve at a recorded-data gap
         # via a coverage provider. resolver.coverage takes the store lock, and this is
         # consulted on the per-batch draw path, so cache it — invalidated on the same
@@ -2354,7 +2360,10 @@ class MainWindow(QMainWindow):
         if self.store_writer is not None:
             st = self.store_writer.store
             for key in st.sources():
-                info = resolve_source(key, store=st)
+                info = self._srcinfo_cache.get(key)
+                if info is None:                    # new key → one small zarr read;
+                    info = resolve_source(key, store=st)   # cache cleared on
+                    self._srcinfo_cache[key] = info        # provenance_changed
                 out[key] = (info.channel_name, info.device_name, info.unit, info.dtype)
         if getattr(self, "hub", None) is not None:
             for key, name, unit, dtype in self.hub.hub_sources():

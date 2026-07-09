@@ -68,6 +68,7 @@ class ZarrStore:
     def __init__(self, root, mode: str = "a"):
         self.root = zarr.open_group(store=str(root), mode=mode)
         self._lock = threading.RLock()   # see _locked — cross-thread store access
+        self._key_cache: dict = {}       # group name -> source key (immutable mapping)
         # Stamp the version on a NEW (empty) store. An existing store with no stamp is
         # pre-versioning → reads back as 0 (legacy); we don't mislabel it as v1.
         if mode != "r" and "schema_version" not in self.root.attrs \
@@ -103,8 +104,21 @@ class ZarrStore:
 
     @_locked
     def sources(self) -> list:
-        return [self.root[n].attrs.get("key", n)
-                for n in self.root.group_keys() if n != self._DEVICES]
+        """All source keys. The group-name → key mapping is IMMUTABLE once a
+        group exists (the percent-encoded dir decodes to one key forever), so it
+        is cached per name — reading every group's attrs JSON on each call cost
+        ~2 ms/source, and the Timeline's 500 ms tick walks this catalog (GUI
+        watchdog stalls, 2026-07-09). New groups resolve once on first sight."""
+        out = []
+        for n in self.root.group_keys():
+            if n == self._DEVICES:
+                continue
+            k = self._key_cache.get(n)
+            if k is None:
+                k = self.root[n].attrs.get("key", n)
+                self._key_cache[n] = k
+            out.append(k)
+        return out
 
     @_locked
     def source_dtype(self, uuid) -> str:
