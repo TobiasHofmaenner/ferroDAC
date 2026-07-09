@@ -132,13 +132,31 @@ class ChartFeed:
         try:
             if replay.playback._is_trace(source_key):
                 readings = replay.playback.read_window([source_key], t0, t1)
-            else:
-                from .timeline import _envelope_midline
+                if readings:
+                    panel.feed(readings)
+                return
+            if hasattr(panel, "set_window_curve"):
+                # ONE envelope representation end-to-end (§22 I-10): draw the same
+                # min/max polyline the parked/zoom paths use. The old midline
+                # collapse halved every spike, so the identical data showed a
+                # different amplitude depending on which path drew it. Ownership
+                # follows the mode, exactly like reconcile: PARKED → the query owns
+                # the new curve (feed skips it); LIVE/PLAYING → un-owned, and the
+                # tail / play slices append on top past the envelope's end.
                 x, y = resolver.query(source_key, t0, t1, max_points=_BACKFILL_POINTS)
-                x, y = _envelope_midline(x, y)       # min/max envelope → one clean line
-                dev, _, src = source_key.rpartition("/")
-                readings = [Reading(dev, src, float(x[i]), float(y[i]))
-                            for i in range(len(x)) if x[i] == x[i]]   # drop NaN gap markers
+                if len(x) == 0:
+                    return
+                if tc.mode is Mode.PARKED:
+                    panel.set_query_owned(panel._query_owned | {source_key})
+                panel.set_window_curve(source_key, x, y)
+                return
+            # non-chart value displays (7-seg, bars): churn to the latest value
+            from ..store.decimate import envelope_midline
+            x, y = resolver.query(source_key, t0, t1, max_points=_BACKFILL_POINTS)
+            x, y = envelope_midline(x, y)
+            dev, _, src = source_key.rpartition("/")
+            readings = [Reading(dev, src, float(x[i]), float(y[i]))
+                        for i in range(len(x)) if x[i] == x[i]]   # drop NaN gap markers
         except Exception as exc:                    # noqa: BLE001 — never break a route
             log.debug("route backfill failed for %s: %s", source_key, exc)
             return

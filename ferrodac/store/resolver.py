@@ -16,17 +16,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from .zarrstore import _downsample, _interleave, _split_intervals
-
-
-def _merge(intervals):
-    out = []
-    for a, b in sorted(intervals):
-        if out and a <= out[-1][1]:
-            out[-1] = (out[-1][0], max(out[-1][1], b))
-        else:
-            out.append((a, b))
-    return out
+from .decimate import downsample as _downsample
+from .decimate import interleave as _interleave
+from .intervals import GAP_JOIN_EPS
+from .intervals import merge as _merge
+from .intervals import split_intervals as _split_intervals
 
 
 class RamTier:
@@ -122,7 +116,7 @@ class Resolver:
             qx, qy = tier.query(series, a, b, budget)
             if len(qx) == 0:
                 continue
-            if prev_b is not None and a > prev_b + 1e-9:  # a real gap was skipped
+            if prev_b is not None and a > prev_b + GAP_JOIN_EPS:  # a real gap was skipped
                 xs.append(np.array([np.nan])); ys.append(np.array([np.nan]))
             xs.append(np.asarray(qx)); ys.append(np.asarray(qy))
             prev_b = b

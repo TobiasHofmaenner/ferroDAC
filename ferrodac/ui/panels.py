@@ -596,9 +596,10 @@ class ChartPanel(Panel):
             return (x, *ys)
         if not cov or len(cov) < 2:
             return (x, *ys)
+        from ..store.intervals import GAP_JOIN_EPS     # the ONE gap-join test (§22 I-10)
         mids, prev_b = [], cov[0][1]
         for a, b in cov[1:]:
-            if a > prev_b + 1e-9:                      # a genuine gap (same test query() uses)
+            if a > prev_b + GAP_JOIN_EPS:              # a genuine gap (same test query() uses)
                 mids.append(0.5 * (prev_b + a))
             prev_b = max(prev_b, b)
         if not mids:

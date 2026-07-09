@@ -34,24 +34,9 @@ def _wf_cmap():
                        [(12, 10, 40), (190, 50, 90), (255, 235, 130)])
 
 
-def _envelope_midline(x, y):
-    """The resolver returns a min/max envelope as duplicate-x pairs; drawn as a
-    connected line that's a messy zigzag for noisy data. For the navigation
-    preview, collapse each pair to its mid value → one clean line. Singletons
-    (already-raw) and NaN gap-markers pass through unchanged."""
-    x = np.asarray(x, float)
-    y = np.asarray(y, float)
-    n = len(x)
-    if n < 2:
-        return x, y
-    out_x, out_y = [], []
-    i = 0
-    while i < n:
-        if i + 1 < n and not np.isnan(x[i]) and x[i] == x[i + 1]:
-            out_x.append(x[i]); out_y.append(0.5 * (y[i] + y[i + 1])); i += 2
-        else:
-            out_x.append(x[i]); out_y.append(y[i]); i += 1
-    return np.asarray(out_x), np.asarray(out_y)
+# the ~30 px navigation ribbon is the ONE legitimate midline consumer — see the
+# shared decimation policy (store/decimate.py, §22 I-10) for why charts never use it
+from ..store.decimate import envelope_midline as _envelope_midline  # noqa: E402
 
 
 class CpuBars(QtWidgets.QWidget):

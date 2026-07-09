@@ -34,49 +34,12 @@ _TOP = 512           # build levels until the top tier has <= this many buckets
 # array creation, so this applies to new epochs; existing stores keep theirs.
 _CHUNK = 1 << 14     # raw array chunk (~16k samples)
 
-# Gap detection (DESIGN §7.4). There is no time-resolved "device online" record — a
-# reconnect appends into the SAME epoch, so a recording outage is just a large dt in an
-# otherwise dense series. coverage() splits an epoch into contiguous-recording intervals
-# at any dt FAR larger than the local cadence, so the chart AND the Timeline preview break
-# the line across a real gap instead of drawing across it. Scale-free (K·median) with a
-# floor so a fast source's sub-minute jitter never false-splits; per-source override via
-# the source group's `gap_k` attr.
-_GAP_K = 8.0         # a gap = a dt at least this many × the local median cadence …
-_GAP_MIN_S = 30.0    # … but never below this many seconds (ignore sub-30 s jitter)
-_GAP_EPS = 1e-3      # min half-width for a point interval so _partition can own its sample
-
-
-def _widen(s, e, eps):
-    """A coverage interval MUST have real width, or resolver._partition (which assigns an
-    owner by testing a segment's MIDPOINT against lo<=mid<=hi) can never own a zero-width
-    (t,t) interval → its lone sample is dropped from read_raw/query. Pad an isolated sample
-    (a flap between two gaps, or a 1-sample epoch) to a tiny real span; eps << any real gap."""
-    return (s - 0.5 * eps, e + 0.5 * eps) if e - s < eps else (s, e)
-
-
-def _split_intervals(t, gap_k=_GAP_K):
-    """Split a monotonic timestamp array into contiguous-recording (start, end)
-    intervals at real gaps — a dt >> the local median cadence. Endpoints are the
-    true first/last samples; a gapless series returns a single interval. A degenerate
-    (isolated-sample) interval is widened so the resolver never drops its sample."""
-    t = np.asarray(t, dtype="f8")
-    if t.size == 0:
-        return []
-    if t.size < 3:
-        return [_widen(float(t[0]), float(t[-1]), _GAP_EPS)]
-    d = np.diff(t)
-    pos = d[d > 0]
-    med = float(np.median(pos)) if pos.size else 0.0
-    thresh = max(_GAP_MIN_S, gap_k * med) if med > 0 else _GAP_MIN_S
-    cut = np.nonzero(d > thresh)[0]              # gap sits between t[i] and t[i+1]
-    if cut.size == 0:
-        return [_widen(float(t[0]), float(t[-1]), _GAP_EPS)]   # 3+ all-equal ts → widen (no drop)
-    starts = [float(t[0])] + [float(t[i + 1]) for i in cut]
-    ends = [float(t[i]) for i in cut] + [float(t[-1])]
-    # _GAP_EPS (not a median-scaled pad): _partition only needs ANY positive width to own the
-    # sample, and a fixed 1 ms keeps a widened point from over-reporting coverage by up to
-    # 0.125·median past [t0,t1] for very sparse sources (still << any real gap, so still disjoint).
-    return [_widen(s, e, _GAP_EPS) for s, e in zip(starts, ends)]
+# Gap/coverage algebra + display decimation live in the shared policy modules
+# (DESIGN §22 I-10) — one implementation for the store, RAM tier, and resolver.
+from .decimate import downsample as _downsample
+from .decimate import interleave as _interleave
+from .intervals import GAP_K as _GAP_K
+from .intervals import split_intervals as _split_intervals
 
 
 def _locked(fn):
@@ -90,34 +53,6 @@ def _locked(fn):
         with self._lock:
             return fn(self, *a, **k)
     return wrapper
-
-
-def _downsample(t, mn, mx, factor):
-    """One pyramid level: min/max over groups of `factor`, bucket time = mean.
-
-    NaN-robust: a bucket keeps the extrema of its FINITE members — plain min/max
-    would let one NaN (legacy stores hold NaN for failed reads; the writer now
-    filters them) poison its bucket at every level, so a single bad sample grew
-    into a 16^L-wide hole at wide zooms. Only an all-NaN bucket stays NaN (a
-    real break — never fabricate data)."""
-    n = len(mn)
-    nb = math.ceil(n / factor)
-    pad = nb * factor - n
-    if pad:
-        t = np.concatenate([t, np.full(pad, t[-1])])
-        mn = np.concatenate([mn, np.full(pad, mn[-1])])
-        mx = np.concatenate([mx, np.full(pad, mx[-1])])
-    t = t.reshape(nb, factor).mean(axis=1)
-    mnb = mn.reshape(nb, factor)
-    mxb = mx.reshape(nb, factor)
-    mask = np.isnan(mnb)
-    mn_out = np.where(mask, np.inf, mnb).min(axis=1)
-    mx_out = np.where(np.isnan(mxb), -np.inf, mxb).max(axis=1)
-    all_nan = mask.all(axis=1)
-    if all_nan.any():
-        mn_out[all_nan] = np.nan
-        mx_out[all_nan] = np.nan
-    return t, mn_out, mx_out
 
 
 class ZarrStore:
@@ -598,21 +533,54 @@ class ZarrStore:
         # finest level that still fits the budget: buckets = wc / F^L <= budget
         # ⟺ L >= log_F(factor) ⟹ ceil; clamp to what the pyramid actually has.
         lvl = 0 if factor <= 1 else min(levels, math.ceil(math.log(factor) / math.log(_F)))
+
+        def _slice(L):
+            """The level-L min/max lanes over [a,b]. Raw (L=0) slices exactly; a
+            pyramid level pads ONE bucket each side then clips its times into the
+            window — bucket times are member MEANS, so a plain searchsorted clip
+            shaved up to half a coarse bucket off each edge (the visible span
+            shifted with every level switch)."""
+            if L <= 0:
+                t = np.asarray(eg["t"][:])
+                j0 = int(np.searchsorted(t, a, side="left"))
+                j1 = int(np.searchsorted(t, b, side="right"))
+                v = np.asarray(eg["v"][j0:j1])
+                return t[j0:j1], v, v
+            rt = np.asarray(eg[f"r{L}_t"][:])
+            j0, j1 = np.searchsorted(rt, [a, b])
+            j0 = max(0, int(j0) - 1)
+            j1 = min(len(rt), int(j1) + 1)
+            return (np.clip(rt[j0:j1], a, b),
+                    np.asarray(eg[f"r{L}_min"][j0:j1]),
+                    np.asarray(eg[f"r{L}_max"][j0:j1]))
+
         if lvl <= 0 or (dirty and rolled is None):
             # raw: window small enough — or a legacy dirty epoch with no pyramid
             # watermark, where raw is the only correct answer (heals at next finalize)
-            t = np.asarray(eg["t"][:])
-            i0 = int(np.searchsorted(t, a, side="left"))
-            i1 = int(np.searchsorted(t, b, side="right"))
-            tx, vy = t[i0:i1], np.asarray(eg["v"][i0:i1])
+            tx, mn, mx = _slice(0)
             if len(tx) > budget * 2:                  # raw denser than asked → bucket
-                txd, mn, mx = _downsample(tx, vy, vy, max(2, len(tx) // budget))
+                txd, mn, mx = _downsample(tx, mn, mx, max(2, len(tx) // budget))
                 return _interleave(txd, mn, mx)
-            return tx, vy
-        rt = np.asarray(eg[f"r{lvl}_t"][:])
-        i0, i1 = np.searchsorted(rt, [a, b])
-        px, py = _interleave(rt[i0:i1], np.asarray(eg[f"r{lvl}_min"][i0:i1]),
-                             np.asarray(eg[f"r{lvl}_max"][i0:i1]))
+            return tx, mn
+        ct, cmn, cmx = _slice(lvl)
+        # Smooth the F=16 level ladder: the "finest level that fits" can land as low
+        # as budget/16 output buckets — a visible texture pop whenever a zoom crosses
+        # a level threshold. If the chosen level is much coarser than the budget,
+        # read one level finer (bounded: ≤ ~16×budget buckets) and fold it down to
+        # ~budget (min/max of min/max composes) so density tracks budget smoothly.
+        if len(ct) * 2 < budget and lvl >= 1:
+            ct, cmn, cmx = _slice(lvl - 1)
+        # whether the slice reached the window edges (the clip anchored it there) —
+        # folding averages bucket times and would pull the endpoints back inside
+        touch_a = len(ct) > 0 and ct[0] <= a + 1e-12
+        touch_b = len(ct) > 0 and ct[-1] >= b - 1e-12
+        if len(ct) > budget:
+            ct, cmn, cmx = _downsample(ct, cmn, cmx, max(2, -(-len(ct) // budget)))
+            if touch_a:
+                ct[0] = a                            # re-anchor the window edges
+            if touch_b:
+                ct[-1] = b
+        px, py = _interleave(ct, cmn, cmx)
         rolled = int(rolled)
         if dirty and rolled < n:
             # the pyramid ends at the last finalize; top up the appended-since tail
@@ -632,11 +600,3 @@ class ZarrStore:
         return px, py
 
 
-def _interleave(t, mn, mx):
-    """A min/max envelope as a single polyline: (t,min),(t,max) per bucket."""
-    if len(t) == 0:
-        return np.array([]), np.array([])
-    x = np.repeat(t, 2)
-    y = np.empty(len(t) * 2)
-    y[0::2], y[1::2] = mn, mx
-    return x, y

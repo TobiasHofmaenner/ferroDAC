@@ -133,6 +133,26 @@ def main() -> int:
     assert on_main > 1500, f"stubs stole the long epoch's budget ({on_main} pts)"
     print(f"✓ proportional budgets: long epoch kept {on_main} of 2000 pts despite 4 stubs")
 
+    # --- level-pop smoothness + edge coverage (regression 2026-07-09, artifact F):
+    # the F=16 level ladder used to hand back as few as budget/16 buckets — a 16×
+    # texture pop whenever a zoom crossed a level threshold — and bucket-MEAN times
+    # clipped by a plain searchsorted shaved up to half a coarse bucket off each
+    # window edge. Output density must now track the budget smoothly, and a coarse
+    # query must reach both window edges exactly.
+    sk = "smooth/gauge"
+    st.add_source(sk, name="smooth")
+    smt = dt0 + np.arange(500_000) * 0.1
+    st.append(sk, smt, np.sin(smt * 0.001), epoch="s0")
+    st.finalize_rollups(sk, "s0")
+    qa, qb = dt0 + 12_500, dt0 + 37_500              # interior window (padding applies)
+    for mp in (200, 400, 800, 1600, 3200):
+        qx, _ = st.query(sk, qa, qb, max_points=mp)
+        assert 0.8 * mp <= len(qx) <= 2.2 * mp, \
+            f"budget {mp} → {len(qx)} pts (level pop)"
+        assert abs(qx[0] - qa) < 1e-6 and abs(qx[-1] - qb) < 1e-6, \
+            f"edge nibble at budget {mp}: [{qx[0] - qa:.2f}, {qx[-1] - qb:.2f}]"
+    print("✓ query density tracks the budget smoothly (no F=16 pops); edges exact")
+
     print("\nSTORE SELFTEST PASS")
     return 0
 

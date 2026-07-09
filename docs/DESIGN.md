@@ -1734,16 +1734,27 @@ two-plane chosen; measured foundations show no ceiling justifying a rethink):
 
 ### 22.2 Migration (strangler order; each step ships green)
 
-1. Extract the single writer (ChartFeed) — mechanical move of the three query-draw
-   paths out of app.py; `feed`/`set_window_curve` become internal.
-2. Name the state + `reconcile()`; delete `_windowed`/`enter_window`/`exit_window`/
-   `own`/clear-on-Play.
-3. Re-point the live tail to the engine bus; playback bus stops feeding panels.
-4. Demote the re-stream to ProcessorReplay (on-demand, off-thread); PLAYING slides
-   the window through the owner.
-5. Unify interval/decimation algebra (`intervals.py` + shared decimation policy —
-   partially landed 2026-07-09: NaN-robust `_downsample`, dirty-tail top-up in
-   `_query_epoch`, proportional epoch budgets, writer non-finite filter, pinned-span
-   + anchored-gap `CurveBuffer._decimate`).
+1. DONE 2026-07-09 — Extract the single writer (ChartFeed): mechanical move of the
+   three query-draw paths out of app.py; `set_window_curve` is ChartFeed-only.
+2. DONE 2026-07-09 — Name the state + `reconcile()`: `TimeContext.mode` is the one
+   LIVE|PARKED|PLAYING derivation; deleted `enter_window`/`exit_window`/`own`/
+   clear-on-Play; ownership (`_query_owned`) written only by ChartFeed.
+3. DONE 2026-07-09 — Live tail re-pointed to the engine bus via ChartFeed._forward;
+   `_on_live` (the live mirror / nested drain) deleted; playback bus = re-stream +
+   derived only, one pump.
+4. DONE 2026-07-09 — Replay serves analysis: raw historic scalars never reach
+   panels (forward filters derived+traces; engine forward gated to LIVE); the
+   re-stream is demand-driven (`replay_source_keys`: processors → all, waterfalls →
+   traces, else nothing — park on 1M samples: 635 ms → ~0 ms + 11 ms query);
+   PLAYING appends via `on_advance` → `ChartFeed.advance()`.
+5. DONE 2026-07-09 — One interval/decimation algebra: `store/intervals.py`
+   (split/widen/merge + gap-join epsilon) for store, RAM tier, resolver, and chart
+   gap-breaks; `store/decimate.py` (NaN-robust downsample, interleave, midline —
+   Timeline-ribbon-only; charts draw the envelope everywhere incl. route backfill,
+   fixing the halved-spike inconsistency). Query density tracks the budget smoothly
+   across the F=16 ladder (read one level finer + fold); window edges padded +
+   clipped exact. Earlier same day: dirty-tail top-up, proportional epoch budgets,
+   writer non-finite filter, pinned-span + anchored-gap `CurveBuffer._decimate`.
 6. `chartfeed_selftest`: scripted transition sequences encoding every 2026-06/07
-   regression as a named case.
+   regression as a named case (seeded in tests/test_chartfeed.py — grow to the
+   full transition matrix).

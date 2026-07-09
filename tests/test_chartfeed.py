@@ -30,6 +30,7 @@ class _FakePanel:
         self._query_owned = set()
         self.plot = _FakePlot()
         self.drawn = {}
+        self.drawn_y = {}
         self.cleared = []
 
     def curve_keys(self):
@@ -43,6 +44,7 @@ class _FakePanel:
 
     def set_window_curve(self, key, x, y):
         self.drawn[key] = len(x)
+        self.drawn_y[key] = np.asarray(y, dtype="f8")
 
 
 class _FakePlayback:
@@ -262,3 +264,38 @@ def test_forward_isolates_a_broken_panel():
     bus.publish(Reading("dev", "a", BASE, 5.0))
     bus.drain()
     assert len(good.fed) == 1                   # the broken sibling didn't block it
+
+
+# -- §22 step 5: one envelope representation end-to-end (I-10) -------------------
+
+def test_backfill_draws_the_envelope_not_a_halved_midline():
+    """Regression (artifact E): the route backfill used to collapse the min/max
+    envelope to its midline, HALVING every spike — the same recorded spike showed
+    full height parked but half height when backfilled. A chart backfill now draws
+    the same envelope polyline every other query path uses, owned iff PARKED."""
+    st = ZarrStore(os.path.join(tempfile.mkdtemp(), "s"))
+    st.add_source("dev/a", name="a")
+    t = BASE + np.arange(100_000) * 0.1
+    v = np.ones(100_000)
+    v[50_000] = 42.0                              # one lone spike on a flat baseline
+    st.append("dev/a", t, v, epoch="e0")
+    st.finalize_rollups("dev/a")
+    tc = TimeContext(width=t[-1] - BASE + 10, now_fn=lambda: t[-1] + 1)
+    panel = _FeedPanel()
+    cf = ChartFeed(panels=lambda: [panel], resolver=lambda: Resolver([st]),
+                   reads=lambda: None, time_context=lambda: tc,
+                   replay=lambda: _FakeReplay())
+    tc.park(BASE + 5000)
+    cf.backfill_route("dev/a", panel)
+    assert panel.drawn_y["dev/a"].max() == 42.0   # midline would have shown 21.5
+    assert "dev/a" in panel._query_owned          # parked → the query owns it
+    assert panel.fed == []                        # drawn, not fed
+
+    panel2 = _FeedPanel()
+    cf2 = ChartFeed(panels=lambda: [panel2], resolver=lambda: Resolver([st]),
+                    reads=lambda: None, time_context=lambda: tc,
+                    replay=lambda: _FakeReplay())
+    tc.follow_now()
+    cf2.backfill_route("dev/a", panel2)
+    assert panel2.drawn_y["dev/a"].max() == 42.0
+    assert "dev/a" not in panel2._query_owned     # live → un-owned, tail appends
