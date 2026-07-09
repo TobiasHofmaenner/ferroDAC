@@ -60,6 +60,14 @@ package = [
 # An APP run from source (python -m ferrodac), not an installable library:
 # uv manages the venv + deps but never builds/installs the project itself.
 package = false
+override-dependencies = [
+    # rapidocr pulls FULL opencv-python, whose wheel ships its own Qt tree
+    # (cv2/qt/plugins) that hijacked Qt plugin resolution in the frozen app
+    # (xcb smoke: "Could not load ... in .../cv2/qt/plugins" → abort). We
+    # render with PySide6's Qt only; opencv-python-headless satisfies every
+    # cv2 consumer. The impossible marker removes the full wheel everywhere.
+    "opencv-python ; sys_platform == 'never'",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

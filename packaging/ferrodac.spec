@@ -178,6 +178,12 @@ _NEVER_BUNDLE = ("libGL.so", "libGLX", "libEGL.so", "libGLdispatch",
                  "libxcb")
 a.binaries = [(name, path, kind) for (name, path, kind) in a.binaries
               if not os.path.basename(name).startswith(_NEVER_BUNDLE)]
+# Belt for the same class: opencv wheels ship their own Qt tree (cv2/qt) that
+# hijacks plugin resolution in the frozen app. The env bans full opencv-python
+# (uv override), but strip any cv2/qt remnant so a transitive reintroduction
+# can never break the platform plugin again.
+a.binaries = [b for b in a.binaries if "cv2/qt" not in b[0].replace("\\", "/")]
+a.datas = [d for d in a.datas if "cv2/qt" not in d[0].replace("\\", "/")]
 
 pyz = PYZ(a.pure)
 
