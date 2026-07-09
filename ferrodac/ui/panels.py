@@ -828,6 +828,7 @@ class ChartPanel(Panel):
 
     def set_window_curve(self, key, x, y, own=True):
         """Draw a curve from a pre-reduced store-query envelope (min/max polyline, pixel-budgeted).
+        Called ONLY by ChartFeed (DESIGN §22 I-6) — never wire another writer to this.
         Fed through the (now non-decimating) buffer so conversion, the σ band, and the coverage
         gap-break all apply unchanged — the buffer just holds the ~2·width envelope points without
         ever hitting its cap. The resolver's own NaN gap markers are stripped here; _set_curve_data

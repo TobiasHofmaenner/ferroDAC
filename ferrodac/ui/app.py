@@ -35,7 +35,6 @@ from ..core.history import HistoryBuffer
 from ..core.manager import DeviceManager
 from ..core.markers import RECORDING
 from ..core.projects import ProjectManager
-from ..core.reading import Reading
 from ..core.registry import load_builtin_drivers
 from ._common import color_for, fmt
 from .hubclient import ConnectHubDialog, HubController
@@ -81,11 +80,6 @@ def _editor_args(command: str, path: str) -> list:
     if "{file}" in command or "{path}" in command:
         return [a.replace("{file}", path).replace("{path}", path) for a in parts]
     return parts + [path]
-
-
-# display-resolution point budget for the route-in history backfill (#8): more than
-# any screen width, so the chart shows full detail without reading full-res raw
-_BACKFILL_POINTS = 4000
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +166,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:                       # noqa: BLE001
             logging.getLogger("ferrodac").warning("durable store disabled: %s", exc)
 
+        # the single owner of chart curve-buffer writes (DESIGN §22 I-6, step 1):
+        # every store-query draw goes through it. Accessors late-bind because the
+        # dashboard is constructed just below and the data plane may be degraded.
+        from .chartfeed import ChartFeed
+        self.chart_feed = ChartFeed(
+            panels=lambda: self.dashboard.panels(),
+            resolver=lambda: self.resolver,
+            reads=lambda: self.reads,
+            time_context=lambda: self.time_context,
+            replay=lambda: self.replay,
+        )
+
         # the dashboard renders through the replay playback bus when available,
         # else straight off the engine (data plane disabled) — identical live.
         data_bus = self.replay.bus if self.replay is not None else engine
@@ -179,7 +185,7 @@ class MainWindow(QMainWindow):
             self.workspace, engine, manager, data_bus=data_bus,
             historic_sources=self._historic_sources,
             # a source routed onto a chart backfills from its recorded history (#8)
-            on_display=self._backfill_route,
+            on_display=self.chart_feed.backfill_route,
             # heavy processors run off-GUI while live, inline while parked (§21.3)
             is_live=(lambda: self.time_context.following)
             if self.time_context is not None else None)
@@ -203,7 +209,7 @@ class MainWindow(QMainWindow):
         self._sigma_refresh.start()
         self.dashboard.set_sigma_provider(self._chart_sigma)
         self.dashboard.set_gap_provider(self._chart_coverage)
-        self.dashboard.on_chart_zoom = self._on_chart_zoom   # zoom → re-query (Fix B)
+        self.dashboard.on_chart_zoom = self.chart_feed.on_chart_zoom   # zoom → re-query (Fix B)
 
         # recording lifecycle (start/stop span → auto-export, crash recovery) lives
         # in a Qt-free, testable controller; the shell supplies the collaborators.
@@ -2294,41 +2300,6 @@ class MainWindow(QMainWindow):
         bar.setValue(max(0, min(100, int(frac * 100))))
         QApplication.processEvents()
 
-    def _backfill_route(self, source_key: str, panel) -> None:
-        """A source was just routed onto a chart → backfill it from its recorded history
-        over the CURRENT window, so the chart shows the existing data instead of starting
-        live from the click moment (#8). Fed DIRECTLY to that panel (not the shared replay
-        bus) so panels already showing this source aren't double-fed.
-
-        Scalars come from a BOUNDED, DOWNSAMPLED query (the display only needs ~pixels of
-        detail): rollup-backed, so it's ~10 ms even over a whole-session grow window and
-        returns ~display-resolution points — NOT the full-res `read_raw`, which read
-        millions of samples on the GUI thread (measured multi-second freezes on long
-        sessions) only for the chart buffer to decimate them away. Because the query is
-        cheap it stays SYNCHRONOUS on the GUI thread, so no live tick interleaves older
-        history behind newer points. Traces (low volume) keep their full read. No-op with
-        no store / no feed target."""
-        if (self.replay is None or self.resolver is None
-                or self.time_context is None or not hasattr(panel, "feed")):
-            return
-        t0, t1 = self.time_context.window
-        try:
-            if self.replay.playback._is_trace(source_key):
-                readings = self.replay.playback.read_window([source_key], t0, t1)
-            else:
-                from .timeline import _envelope_midline
-                x, y = self.resolver.query(source_key, t0, t1, max_points=_BACKFILL_POINTS)
-                x, y = _envelope_midline(x, y)       # min/max envelope → one clean line
-                dev, _, src = source_key.rpartition("/")
-                readings = [Reading(dev, src, float(x[i]), float(y[i]))
-                            for i in range(len(x)) if x[i] == x[i]]   # drop NaN gap markers
-        except Exception as exc:                    # noqa: BLE001 — never break a route
-            logging.getLogger("ferrodac").debug("route backfill failed for %s: %s",
-                                                 source_key, exc)
-            return
-        if readings:
-            panel.feed(readings)
-
     def _source_label(self, key: str) -> str:
         """A human, device-qualified label for a source key ('temp · Sim Thermometer 2
         (durga)') — live first, then the store's historic provenance; the bare key if
@@ -2410,77 +2381,7 @@ class MainWindow(QMainWindow):
         self._coverage_cache.clear()                 # re-read gaps for the new slice
         if self.time_context is not None:           # re-bin waterfalls to the new window
             self.dashboard.set_time_window(*self.time_context.window)
-        self._draw_parked_windows()                  # parked scalars ← pixel-budgeted query
-
-    def _draw_parked_windows(self) -> None:
-        """Parked/historic: draw each chart's stored SCALAR curves from a pixel-budgeted store
-        query (a min/max envelope) rather than the full-res re-stream fanned into the CurveBuffer
-        — one uniform reduction, no old→new fidelity gradient, and zoom re-resolves (Phase 3). The
-        re-stream still runs for PROCESSORS; derived / trace / not-yet-recorded curves stay on the
-        feed path. No-op while following the live edge (the live tail is the buffer's job).
-
-        The query is SYNCHRONOUS here on purpose: this runs from on_reset, which fires BEFORE the
-        re-stream (_load) starts, so the bounded rollup query (~10 ms even over millions of samples)
-        never contends with the re-stream for the store lock — the chart updates immediately on a
-        select. An async read would be starved behind a huge re-stream and the chart wouldn't
-        update until it finished. Zoom stays async (it can fire while a re-stream is in flight).
-
-        Runs for LIVE too: dragging the tail back in grow mode extends the window into history while
-        still following the live front. There the historic envelope is drawn UN-OWNED so feed()
-        keeps appending the live tail — the historic part is the query, the tail is live, and the
-        feed guard keeps them monotonic. Only a genuinely PARKED window is owned (feed skips it)."""
-        tc = self.time_context
-        if tc is None or self.resolver is None or self.replay is None:
-            return
-        following = tc.following
-        t0, t1 = tc.window
-        for panel in self.dashboard.panels():
-            if not hasattr(panel, "set_window_curve"):
-                continue                             # not a chart
-            try:
-                keys = [k for k in panel.curve_keys()
-                        if not self.replay.playback._is_trace(k)   # scalars only
-                        and self.resolver.knows(k)]                # in a tier (not derived); O(1)
-                if not keys:
-                    continue
-                if not following:
-                    panel.enter_window(keys)         # parked → feed skips the re-stream entirely
-                mp = max(400, int(panel.plot.width()) * 2)
-                for key in keys:
-                    try:
-                        x, y = self.resolver.query(key, t0, t1, mp)
-                        panel.set_window_curve(key, x, y, own=not following)
-                    except Exception:                # noqa: BLE001 — one bad curve ≠ blank chart
-                        logging.getLogger("ferrodac").debug(
-                            "window query failed for %s", key, exc_info=True)
-            except Exception:                        # noqa: BLE001 — never break a park
-                logging.getLogger("ferrodac").debug("parked window draw failed", exc_info=True)
-
-    def _on_chart_zoom(self, panel, t0, t1) -> None:
-        """A manual pan/zoom settled on a parked chart → re-query the VISIBLE sub-window at
-        pixel resolution so zooming in returns real store detail rather than magnifying the
-        full-window envelope (Fix B). The X-link moves every time-chart to this range, so
-        re-query them all for it. No-op live (the live tail is the buffer's job)."""
-        tc = self.time_context
-        if tc is None or tc.following or self.reads is None or self.resolver is None:
-            return
-        lo, hi = (t0, t1) if t0 <= t1 else (t1, t0)
-        if hi - lo <= 0:
-            return
-        for p in self.dashboard.panels():
-            wk = getattr(p, "_windowed", None)
-            if not wk:
-                continue                             # not a parked chart with windowed curves
-            mp = max(400, int(p.plot.width()) * 2)
-            for key in list(wk):
-                self._query_zoom_curve(p, key, lo, hi, mp)
-
-    def _query_zoom_curve(self, panel, key, t0, t1, mp) -> None:
-        def draw(res):
-            # still windowed (not gone live / re-parked) → paint the finer sub-window
-            if key in getattr(panel, "_windowed", ()):
-                panel.set_window_curve(key, res[0], res[1])
-        self.reads.query(key, t0, t1, mp, key=("chart-win", id(panel), key), on_result=draw)
+        self.chart_feed.draw_parked_windows()        # parked scalars ← pixel-budgeted query
 
     def closeEvent(self, event):  # noqa: N802
         if getattr(self, "_recording", None) is not None:
