@@ -213,6 +213,9 @@ class MainWindow(QMainWindow):
         # consulted on the per-batch draw path, so cache it — invalidated on the same
         # slow tick as σ (coverage grows as data records) and on every park/scrub reset.
         self._coverage_cache: dict = {}
+        self._coverage_stale: dict = {}     # last-known coverage per key — served while a
+        #                                     miss refreshes async (never cleared: stale
+        #                                     gap-breaks beat a network stall on the draw)
         self._sigma_refresh = QTimer(self)
         self._sigma_refresh.setInterval(2000)
         self._sigma_refresh.timeout.connect(self._sigma_timelines.clear)
@@ -1523,20 +1526,36 @@ class MainWindow(QMainWindow):
         return reconstruct(store, key, times, values, timeline=tl)
 
     def _chart_coverage(self, key):
-        """coverage(key) → merged [(t0,t1), …] for a chart's gap breaks, CACHED (cleared
-        on a slow tick + every park/scrub reset) so the per-batch draw path never blocks
-        on the store lock. A source the resolver doesn't know → [] (no break)."""
+        """coverage(key) → merged [(t0,t1), …] for a chart's gap breaks — and the
+        draw path must NEVER block: with a hub attached, resolver.coverage()
+        reaches the remote tier's GetCoverage (a gRPC with a 4 s timeout), and the
+        2 s cache clear made every live batch draw eligible for a network stall
+        (watchdog: >700 ms on the GUI thread). Stale-while-revalidate: a cache
+        miss returns the LAST KNOWN intervals immediately and refreshes through
+        ReadService (worker pool + its own TTL); gap breaks change on ≥30 s
+        scales, so one draw of staleness is invisible. Headless (no ReadService):
+        LOCAL tiers synchronously — never the network."""
         resolver = getattr(self, "resolver", None)
         if resolver is None:
             return []
         cov = self._coverage_cache.get(key)
-        if cov is None:
+        if cov is not None:
+            return cov
+        reads = getattr(self, "reads", None)
+        if reads is None:                      # headless/tests: local tiers only
             try:
-                cov = list(resolver.coverage(key))
+                cov = list(resolver.coverage(key, local_only=True))
             except Exception:                  # noqa: BLE001 — never break a draw
                 cov = []
             self._coverage_cache[key] = cov
-        return cov
+            return cov
+
+        def _store(res):
+            got = list(res.get(key, ()))
+            self._coverage_cache[key] = got
+            self._coverage_stale[key] = got
+        reads.coverage_many([key], key=("chart-cov", key), on_result=_store)
+        return self._coverage_stale.get(key, [])
 
     # -- device journal / notes editor ---------------------------------------
     def _open_device_meta(self, instance_id: str, focus_notes: bool = False):

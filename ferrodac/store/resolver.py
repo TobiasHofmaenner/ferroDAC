@@ -85,17 +85,26 @@ class Resolver:
             self.tiers = [t for t in self.tiers if t is not self._remote]
         self._remote = None
 
-    def coverage(self, series):
+    def _tiers(self, local_only: bool = False) -> list:
+        """Atomic tier snapshot; local_only drops the remote (hub) tier — for
+        callers on the GUI thread or on a per-tick cadence, where a networked
+        coverage/read (4 s timeout) must never be reachable."""
+        tiers = list(self.tiers)
+        if local_only and self._remote is not None:
+            tiers = [t for t in tiers if t is not self._remote]
+        return tiers
+
+    def coverage(self, series, local_only: bool = False):
         ivs = []
-        for tier in list(self.tiers):
+        for tier in self._tiers(local_only):
             ivs += list(tier.coverage(series))
         return _merge(ivs)
 
-    def knows(self, series) -> bool:
+    def knows(self, series, local_only: bool = False) -> bool:
         """Does ANY tier hold this series? An O(1) presence test (unlike coverage(), which now
         materializes the RAM slice) for callers that only need a stored-vs-derived filter — a
         near tier's cheap has() short-circuits before a remote tier's networked coverage()."""
-        for tier in list(self.tiers):
+        for tier in self._tiers(local_only):
             has = getattr(tier, "has", None)
             if has is not None:
                 if has(series):
@@ -124,10 +133,11 @@ class Resolver:
             return np.array([]), np.array([])
         return np.concatenate(xs), np.concatenate(ys)
 
-    def read_raw(self, series, t0, t1):
+    def read_raw(self, series, t0, t1, local_only: bool = False):
         """FULL-RES scalar samples stitched across tiers (nearest-wins per
         sub-range), no decimation — the replay/analysis/EXPORT read. Tiers without
-        a read_raw (or with no data) are skipped; the hub fills what's only remote.
+        a read_raw (or with no data) are skipped; the hub fills what's only remote
+        (unless local_only — the per-tick play path must never wait on a socket).
 
         Segment reads are HALF-OPEN at interior handoffs: partition edges are
         coverage endpoints, i.e. real sample times, and every tier's read is
@@ -137,7 +147,7 @@ class Resolver:
         {t: v} dict masked it). The boundary sample belongs to the segment that
         STARTS there — unless the next segment is an unowned gap, where this
         interval's true last sample must stay."""
-        segs = self._partition(series, t0, t1)
+        segs = self._partition(series, t0, t1, local_only=local_only)
         ts, vs = [], []
         for i, (a, b, tier) in enumerate(segs):
             rr = getattr(tier, "read_raw", None) if tier is not None else None
@@ -196,10 +206,10 @@ class Resolver:
                 return dt
         return "scalar"
 
-    def _partition(self, series, t0, t1):
+    def _partition(self, series, t0, t1, local_only: bool = False):
         """Tile [t0,t1] into (a, b, tier|None) segments — nearest covering tier
         wins each segment; None = a true gap (no tier has it)."""
-        tiers = list(self.tiers)                         # atomic snapshot (§21.2)
+        tiers = self._tiers(local_only)                  # atomic snapshot (§21.2)
         covs = [list(tier.coverage(series)) for tier in tiers]
         edges = {t0, t1}
         for cov in covs:

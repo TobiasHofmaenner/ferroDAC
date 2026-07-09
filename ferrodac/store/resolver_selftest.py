@@ -151,6 +151,35 @@ def main() -> int:
     assert len(xh) == 20, f"all-equal finalized samples dropped: {len(xh)}"
     print("✓ zero-width coverage widened: lone/all-equal samples survive read_raw")
 
+    # --- local_only: the remote tier must be UNREACHABLE (regression 2026-07-09:
+    # the chart gap-break provider and the per-play-tick advance path reached the
+    # hub tier's networked GetCoverage synchronously on the GUI thread — watchdog
+    # stalls >700 ms). knows/coverage/read_raw with local_only=True must never
+    # touch the remote; without it, the hub still fills remote-only history.
+    class _CountingRemote:
+        def __init__(self):
+            self.calls = 0
+
+        def coverage(self, series):
+            self.calls += 1
+            return [(now - 10.0, now - 9.0)]
+
+        def read_raw(self, series, a, b):
+            self.calls += 1
+            return np.array([now - 9.5]), np.array([42.0])
+
+    remote = _CountingRemote()
+    r2 = Resolver([store])
+    r2.set_remote(remote)
+    r2.coverage("hub-only/x", local_only=True)
+    assert not r2.knows("hub-only/x", local_only=True)
+    r2.read_raw("hub-only/x", now - 20, now, local_only=True)
+    assert remote.calls == 0, f"local_only leaked {remote.calls} remote calls"
+    assert r2.knows("hub-only/x")        # the full resolver still reaches the hub
+    t_h, v_h = r2.read_raw("hub-only/x", now - 20, now)
+    assert remote.calls >= 2 and list(v_h) == [42.0]
+    print("✓ local_only shields the remote tier; full reads still reach it")
+
     print("\nRESOLVER SELFTEST PASS")
     return 0
 

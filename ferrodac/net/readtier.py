@@ -14,6 +14,7 @@ Qt-free; degrades to a no-op import if grpcio is missing.
 from __future__ import annotations
 
 import logging
+import time
 
 import numpy as np
 
@@ -31,22 +32,41 @@ _TIMEOUT = 4.0          # seconds; a read tier must never hang the GUI thread
 class HubReadTier:
     """Resolver tier backed by the hub's Store service (read side)."""
 
-    def __init__(self, channel, token: str = "", timeout: float = _TIMEOUT):
+    def __init__(self, channel, token: str = "", timeout: float = _TIMEOUT,
+                 coverage_ttl: float = 3.0):
         self.stub = rpc.StoreStub(channel)
         self.token = token
         self.timeout = timeout
         self._dtypes = None                          # cached {key: dtype} catalog
+        self._cov_ttl = coverage_ttl
+        self._cov_cache: dict = {}                   # series -> (monotonic_ts, intervals)
 
     # -- tier protocol (same shape as RamTier / ZarrStore) -------------------
     def coverage(self, series) -> list:
+        """Remote coverage with a short TTL cache + stale-on-error. The resolver
+        consults EVERY tier's coverage when it partitions a window (query,
+        read_raw, knows) — often several times per user action — and each uncached
+        call here is a network round-trip with a multi-second worst case. Remote
+        coverage moves slowly (it grows as the hub ingests), so a few seconds of
+        staleness is invisible; a hub hiccup serves the last known intervals
+        instead of stalling the caller for the timeout again."""
+        ent = self._cov_cache.get(series)
+        now = time.monotonic()
+        if ent is not None and now - ent[0] < self._cov_ttl:
+            return ent[1]
         try:
             resp = self.stub.GetCoverage(
                 pb.CoverageRequest(source=str(series), token=self.token),
                 timeout=self.timeout)
-            return [(iv.t0, iv.t1) for iv in resp.intervals]
+            cov = [(iv.t0, iv.t1) for iv in resp.intervals]
+            self._cov_cache[series] = (now, cov)
+            return cov
         except Exception as exc:                     # noqa: BLE001 (hub down → no cov)
             log.debug("hub coverage(%s) failed: %s", series, exc)
-            return []
+            # stale beats a repeat multi-second stall; negative-cache an outage too
+            cov = ent[1] if ent is not None else []
+            self._cov_cache[series] = (now, cov)
+            return cov
 
     def query(self, series, t0, t1, max_points=2000):
         try:

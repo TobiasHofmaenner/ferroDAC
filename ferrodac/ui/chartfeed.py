@@ -97,10 +97,15 @@ class ChartFeed:
             if feed is None:
                 continue
             for key in panel.curve_keys():
-                if replay.playback._is_trace(key) or not resolver.knows(key):
+                # LOCAL tiers only: this runs per play tick (20 Hz) — the hub
+                # tier's networked coverage/read (4 s timeout) must be
+                # unreachable from here. A hub-only curve simply doesn't
+                # advance point-by-point; the next park/render draws it whole.
+                if replay.playback._is_trace(key) \
+                        or not resolver.knows(key, local_only=True):
                     continue                         # traces ride the re-stream
                 try:
-                    t, v = resolver.read_raw(key, seg0, seg1)
+                    t, v = resolver.read_raw(key, seg0, seg1, local_only=True)
                 except Exception:                    # noqa: BLE001 — one bad curve
                     continue
                 if not len(t):
