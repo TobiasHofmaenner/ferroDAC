@@ -86,7 +86,10 @@ def main() -> int:
     assert tgot[0].value.y.shape == (64,) and tgot[0].key == "rga/spec"
     print(f"✓ PlaybackSource: replayed {nt} TRACE scans full-res as Trace readings")
 
-    # ReplayController: one playback bus, fed by live or historic per the head
+    # ReplayController: one playback bus carrying ONLY the historic re-stream —
+    # raw live data rides the engine bus straight to its consumers (§22 step 3);
+    # the controller never mirrors it (the old mirror was a nested drain inside
+    # every engine drain).
     from ..core.reading import Reading
     from . import ReplayController
 
@@ -104,12 +107,11 @@ def main() -> int:
     ctl.bus.subscribe(lambda b: out.extend(b))
 
     eng.pub([Reading("dev", "a", base + 300, 1.0)])
-    assert any(r.value == 1.0 for r in out)                   # following → live on bus
-    out.clear()
+    assert not out, "raw live must NOT be mirrored onto the playback bus (§22 step 3)"
     tc.park(base + 100)                                       # scrub → render the window
     assert resets[0] >= 1 and len(out) > 0                    # cleared + historic replay
     eng.pub([Reading("dev", "a", base + 300, 99.0)])
-    assert not any(r.value == 99.0 for r in out)              # parked blocks live
+    assert not any(r.value == 99.0 for r in out)              # live never lands here
     # PAUSE while parked = freeze, no re-render
     r0 = resets[0]
     tc.pause()
@@ -118,18 +120,19 @@ def main() -> int:
     out.clear()
     tc.park(base + 80)
     assert resets[0] == r0 + 1 and len(out) > 0
-    # return to live renders the live window, then live resumes on top
+    # return to live renders the live window once (the historic backfill for
+    # processors); live data itself then flows on the ENGINE bus, not here
     out.clear(); r1 = resets[0]
     tc.follow_now()
     assert resets[0] == r1 + 1
     eng.pub([Reading("dev", "a", base + 300, 2.0)])
-    assert tc.following and any(r.value == 2.0 for r in out)
+    assert tc.following and not any(r.value == 2.0 for r in out)
     # a plain live tick (no navigation) must NOT re-render
     r2 = resets[0]
     tc.tick_live()
     assert resets[0] == r2, "live tick must not re-render"
     print("✓ ReplayController (simple+correct): scrub/go-live render the exact "
-          "window; pause & live-tick don't")
+          "window; pause & live-tick don't; playback bus never carries raw live")
 
     print("\nREPLAY SELFTEST PASS")
     return 0

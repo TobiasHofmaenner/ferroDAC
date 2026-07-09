@@ -130,3 +130,91 @@ def test_golive_draws_historic_envelope_unowned():
     assert tc.mode is Mode.LIVE
     assert panel._query_owned == set()
     assert panel.drawn.get("dev/a", 0) > 0     # history under the live tail
+
+
+# -- §22 step 3: the two feed streams through one forwarding point ---------------
+
+class _FeedPanel(_FakePanel):
+    def __init__(self):
+        super().__init__()
+        self.fed = []
+
+    def feed(self, batch):
+        self.fed.extend(batch)
+
+
+def _stream_rig():
+    from ferrodac.core.bus import Bus
+    from ferrodac.core.reading import Reading
+    from ferrodac.store import ReplayController
+    st = ZarrStore(os.path.join(tempfile.mkdtemp(), "s"))
+    st.add_source("dev/a", name="a")
+    t = BASE + np.arange(1000) * 0.1
+    st.append("dev/a", t, np.sin(t), epoch="e0")
+    st.finalize_rollups("dev/a")
+    engine_bus = Bus()
+    tc = TimeContext(width=100.0, now_fn=lambda: BASE + 300)
+    ctl = ReplayController(engine_bus, st, tc, sources=lambda: ["dev/a"])
+    panel = _FeedPanel()
+    cf = ChartFeed(panels=lambda: [panel], resolver=lambda: Resolver([st]),
+                   reads=lambda: None, time_context=lambda: tc,
+                   replay=lambda: ctl)
+    cf.attach(engine_bus, ctl.bus)
+    return engine_bus, tc, ctl, panel, cf, Reading
+
+
+def test_live_tail_reaches_panels_from_engine_exactly_once():
+    """LIVE raw rides the engine bus straight to panels via ChartFeed._forward;
+    the playback bus stays idle (the old mirror was a nested drain per tick)."""
+    engine_bus, tc, ctl, panel, cf, Reading = _stream_rig()
+    engine_bus.publish(Reading("dev", "a", BASE + 300, 42.0))
+    engine_bus.drain()
+    hits = [r for r in panel.fed if r.value == 42.0]
+    assert len(hits) == 1                       # exactly once — no double-feed
+    assert ctl.bus.drain() == []                # playback bus never saw raw live
+
+
+def test_restream_reaches_panels_via_playback_bus_exactly_once():
+    engine_bus, tc, ctl, panel, cf, Reading = _stream_rig()
+    tc.park(BASE + 50)                          # scrub → controller re-streams the
+    #                                             window synchronously (no runner)
+    assert len(panel.fed) > 100                 # historic slice arrived at the panel
+    seen = [r.t for r in panel.fed]
+    assert len(seen) == len(set(seen))          # each historic reading exactly once
+
+
+def test_degraded_mode_single_bus_no_double_feed():
+    """No durable store → no playback bus: attach(engine, None) must deliver
+    exactly once (guard against a future double-subscription regression)."""
+    from ferrodac.core.bus import Bus
+    from ferrodac.core.reading import Reading
+    bus = Bus()
+    panel = _FeedPanel()
+    cf = ChartFeed(panels=lambda: [panel], resolver=lambda: None,
+                   reads=lambda: None, time_context=lambda: None,
+                   replay=lambda: None)
+    cf.attach(bus, None)
+    bus.publish(Reading("dev", "a", BASE, 7.0))
+    bus.drain()
+    assert len([r for r in panel.fed if r.value == 7.0]) == 1
+
+
+def test_forward_isolates_a_broken_panel():
+    """One raising panel must not starve the others — same isolation the Bus
+    gives its inline sinks."""
+    from ferrodac.core.bus import Bus
+    from ferrodac.core.reading import Reading
+
+    class _Broken:
+        def feed(self, batch):
+            raise RuntimeError("boom")
+
+    bus = Bus()
+    good = _FeedPanel()
+    cf = ChartFeed(panels=lambda: [_Broken(), good], resolver=lambda: None,
+                   reads=lambda: None, time_context=lambda: None,
+                   replay=lambda: None)
+    cf.attach(bus, None)
+    bus.publish(Reading("dev", "a", BASE, 5.0))
+    bus.drain()
+    assert len(good.fed) == 1                   # the broken sibling didn't block it

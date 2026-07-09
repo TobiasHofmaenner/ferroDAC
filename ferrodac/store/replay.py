@@ -256,10 +256,12 @@ class PlaybackSource:
 
 
 class ReplayController:
-    """The L3 spine: one **playback Bus** the whole app subscribes to, fed either
-    by the live engine (following now) or by re-streaming the historic slice
-    (parked). "Live is just the head at now." Driven by a shared `TimeContext`;
-    calls `on_reset` when the view jumps (so consumers clear stale data).
+    """The L3 spine: one **playback Bus** carrying the HISTORIC re-stream and
+    derived (processor) readings — never raw live data (DESIGN §22 step 3: the
+    live tail rides the engine bus straight to its consumers; mirroring it here
+    produced a nested drain inside every engine drain). Driven by a shared
+    `TimeContext`; calls `on_reset` when the view jumps (so consumers clear
+    stale data). This controller owns the bus's one pump.
 
     Source selection is a callable (the routed sources, from the Dashboard).
     Qt-free; the engine it subscribes to may be the Qt Engine — only `subscribe`
@@ -291,15 +293,10 @@ class ReplayController:
         self._last_nav = time_context.nav            # to detect navigation vs transport
         self._last_window = None                     # last window we rendered (skip if same)
         self._busy = False                           # re-entrancy guard (processEvents)
-        self._live_unsub = engine.subscribe(self._on_live)
+        # NB: `engine` is deliberately unused since §22 step 3 — the controller no
+        # longer mirrors live batches onto the playback bus (ChartFeed forwards the
+        # engine tail to panels directly). Parameter kept for call-site stability.
         self._ctx_unsub = time_context.subscribe(self._on_context)
-
-    def _on_live(self, batch) -> None:
-        if self.tc.following:                        # live → straight to the playback bus
-            for r in batch:
-                self.bus.publish(r)
-            while self.bus.drain():                  # loop: flush derived a processor
-                pass                                 # emits back onto the bus mid-drain
 
     def _on_context(self) -> None:
         """Correctness-first (inefficient is fine): the window's data is whatever the
@@ -314,7 +311,8 @@ class ReplayController:
         self._last_nav = self.tc.nav
         if self.tc.following:
             # entering live, or the window changed by navigation (tail-drag) while live
-            # → render the window once; a plain live tick just appends via _on_live.
+            # → render the window once; a plain live tick appends on the ENGINE bus
+            # (§22 step 3 — the playback bus stays idle while following).
             need = (not self._was_following) or navigated
             self._was_following = True               # set BEFORE render: if a render
             if need:                                 # raises, we must NOT re-fire it
@@ -408,5 +406,4 @@ class ReplayController:
 
     def stop(self) -> None:
         self._generation += 1                        # cancel any in-flight load
-        self._live_unsub()
         self._ctx_unsub()

@@ -280,7 +280,12 @@ class Dashboard(QObject):
         self._derived.connect(self._on_derived, Qt.QueuedConnection)
 
         self.area.on_configure = self._configure_panel
-        self.data_bus.subscribe(self._on_data_batch)   # analysis: replayable
+        # analysis (§22 step 3): live raw arrives on the ENGINE bus; the playback
+        # (data) bus carries only the parked/playing re-stream + derived readings —
+        # both must reach the processors (they re-experience history AND run live).
+        engine.subscribe(self._on_data_batch)
+        if self.data_bus is not self.engine:
+            self.data_bus.subscribe(self._on_data_batch)
         engine.subscribe(self._on_control_batch)       # control: always live
         manager.active_changed.connect(self._rebuild_device_ports)
         self._rebuild_device_ports()
@@ -349,7 +354,8 @@ class Dashboard(QObject):
             )
             panel.emitted.connect(lambda val, key=key: self._on_virtual_emit(key, val))
         else:
-            panel._unsub = self.data_bus.subscribe(panel.feed)
+            # display panels are fed by ChartFeed._forward (§22 step 3) — the single
+            # forwarding point for the live tail + re-stream; no bus subscription here
             self._sinks[pid] = SinkPort(
                 pid, panel.title, "numeric", "", "display", "display",
                 accepts=getattr(cls, "accepts", frozenset({"float", "bool"})),
@@ -466,8 +472,6 @@ class Dashboard(QObject):
             self._routes.pop(key, None)
         else:
             self._sinks.pop(pid, None)
-            if panel._unsub:
-                panel._unsub()
             for targets in self._routes.values():
                 targets.discard(pid)
             for det in self.detectors_for(pid):     # drop detectors on this viewer
@@ -1167,11 +1171,12 @@ class Dashboard(QObject):
             self._schedule_bus_flush()               # deliver to panels (see below)
 
     def _schedule_bus_flush(self) -> None:
-        """A derived reading published off the live-drain path needs draining so the
-        panels (inline data-bus sinks) render it. The replay bus is drained by the
-        controller on live ticks / re-stream chunks, but an async derived output can
-        land between those — a deferred GUI-thread drain covers that. No-op when the
-        data bus IS the engine (the engine drains itself; we must not steal from it)."""
+        """A derived reading needs draining so panels (via ChartFeed's forward) render
+        it. The playback bus is drained by the controller on re-stream chunks only
+        (§22 step 3 — it no longer sees live ticks), so EVERY derived output while
+        live lands between drains — this deferred GUI-thread drain delivers them.
+        No-op when the data bus IS the engine (degraded mode: the engine drains
+        itself; we must not steal from it)."""
         if self.data_bus is not self.engine:
             QTimer.singleShot(0, self._flush_data_bus)
 

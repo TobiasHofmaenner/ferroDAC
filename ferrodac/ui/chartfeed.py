@@ -34,6 +34,30 @@ class ChartFeed:
         self._replay = replay           # () -> ReplayController | None
         self._last_mode: Mode | None = None
 
+    # -- feed streams (DESIGN §22 step 3) ----------------------------------------
+    def attach(self, live_bus, playback_bus=None) -> None:
+        """Wire the two feed streams through this single forwarding point (I-6/I-7):
+        the raw LIVE tail arrives on the engine bus; the playback bus carries only
+        the historic re-stream and derived (processor) readings — it never sees raw
+        live data anymore, so the old engine→playback republish (a nested drain
+        inside every engine drain) is gone. In degraded mode (no durable store)
+        there is no playback bus and the engine feeds everything, exactly as before."""
+        live_bus.subscribe(self._forward)
+        if playback_bus is not None and playback_bus is not live_bus:
+            playback_bus.subscribe(self._forward)
+
+    def _forward(self, batch) -> None:
+        """Fan a batch to every display panel's feed — the same per-sink isolation
+        the Bus gives inline subscribers (one bad panel never starves the rest)."""
+        for panel in self._panels():
+            feed = getattr(panel, "feed", None)
+            if feed is None:
+                continue                             # input widgets have no feed
+            try:
+                feed(batch)
+            except Exception:                        # noqa: BLE001 — panels isolated
+                log.debug("panel feed failed", exc_info=True)
+
     # -- route backfill (#8) ---------------------------------------------------
     def backfill_route(self, source_key: str, panel) -> None:
         """A source was just routed onto a chart → backfill it from its recorded history

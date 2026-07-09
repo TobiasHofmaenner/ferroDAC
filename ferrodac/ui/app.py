@@ -189,6 +189,11 @@ class MainWindow(QMainWindow):
             # heavy processors run off-GUI while live, inline while parked (§21.3)
             is_live=(lambda: self.time_context.following)
             if self.time_context is not None else None)
+        # §22 step 3: panels are fed through ChartFeed's single forwarding point —
+        # raw live tail from the ENGINE bus, re-stream + derived from the playback
+        # bus (which no longer mirrors live data; the nested drain is gone).
+        self.chart_feed.attach(engine,
+                               self.replay.bus if self.replay is not None else None)
         self.dashboard.add_panel("chart")
         # Uncertainty bands (DESIGN §19.0): charts get a σ provider — reconstruct over the
         # window, with the per-source model timeline CACHED so a live redraw is pure numpy
