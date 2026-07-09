@@ -299,3 +299,88 @@ def test_backfill_draws_the_envelope_not_a_halved_midline():
     cf2.backfill_route("dev/a", panel2)
     assert panel2.drawn_y["dev/a"].max() == 42.0
     assert "dev/a" not in panel2._query_owned     # live → un-owned, tail appends
+
+
+# -- §22 step 6: the full transition matrix + zoom supersession ------------------
+
+class _FakeReads:
+    """Mimics ReadService.query's signature: async, coalesced by ticket key —
+    the test fires results by hand to model in-flight/stale deliveries."""
+
+    def __init__(self):
+        self.pending = []                       # (series, t0, t1, mp, on_result)
+
+    def query(self, series, t0, t1, mp, key=None, on_result=None):
+        self.pending.append((series, t0, t1, mp, on_result))
+
+
+def test_zoom_requeries_owned_curves_and_discards_stale_results():
+    """Fix B + the stale-zoom class (commits 558a488, 1303e36): a settled zoom on
+    a parked chart re-queries the visible sub-window at pixel budget; a result
+    landing AFTER go-live released ownership must be discarded, never painted."""
+    st = ZarrStore(os.path.join(tempfile.mkdtemp(), "s"))
+    st.add_source("dev/a", name="a")
+    t = BASE + np.arange(3000) * 0.1
+    st.append("dev/a", t, np.sin(t), epoch="e0")
+    st.finalize_rollups("dev/a")
+    tc = TimeContext(width=100.0, now_fn=lambda: BASE + 300)
+    reads = _FakeReads()
+    panel = _FeedPanel()
+    cf = ChartFeed(panels=lambda: [panel], resolver=lambda: Resolver([st]),
+                   reads=lambda: reads, time_context=lambda: tc,
+                   replay=lambda: _FakeReplay())
+    cf.on_chart_zoom(panel, BASE + 10, BASE + 20)
+    assert reads.pending == []                  # LIVE → zoom is a no-op
+
+    tc.park(BASE + 150)
+    cf.reconcile(force=True)                    # parked → dev/a owned + drawn
+    full = panel.drawn["dev/a"]
+    cf.on_chart_zoom(panel, BASE + 100, BASE + 110)
+    assert len(reads.pending) == 1              # one owned curve → one re-query
+    series, q0, q1, mp, deliver = reads.pending[0]
+    assert series == "dev/a" and (q0, q1) == (BASE + 100, BASE + 110)
+    deliver(Resolver([st]).query(series, q0, q1, mp))
+    assert panel.drawn["dev/a"] != full         # finer sub-window painted
+
+    cf.on_chart_zoom(panel, BASE + 120, BASE + 130)      # stale-delivery case:
+    _, _, _, _, stale = reads.pending[1]
+    tc.follow_now()
+    cf.reconcile(force=True)                    # go-live releases ownership...
+    before = dict(panel.drawn)
+    stale(Resolver([st]).query("dev/a", BASE + 120, BASE + 130, 100))
+    assert panel.drawn == before                # ...so the stale result is dropped
+
+
+def test_full_transition_matrix_invariants():
+    """The scripted walk (§22 step 6): every mode transition of the display state
+    machine, with the two structural invariants checked after each step —
+    (a) ownership == stored scalars iff PARKED, (b) live engine data reaches
+    panels iff LIVE. Each leg encodes a 2026-06/07 regression class."""
+    from ferrodac.core.reading import Reading
+    engine_bus, tc, ctl, panel, cf, _ = _stream_rig()
+    ctl.on_reset = lambda: cf.reconcile(force=True)      # what app._replay_reset does
+    live_t = [BASE + 300]
+
+    def check(step, mode):
+        cf.reconcile()                          # what the transport ticks do
+        assert tc.mode is mode, step
+        want = {"dev/a"} if mode is Mode.PARKED else set()
+        assert panel._query_owned == want, f"{step}: owned={panel._query_owned}"
+        n0 = len(panel.fed)
+        live_t[0] += 1.0
+        engine_bus.publish(Reading("dev", "a", live_t[0], 1.23))
+        engine_bus.drain()
+        grew = len(panel.fed) > n0
+        assert grew == (mode is Mode.LIVE), f"{step}: live leak/starve (grew={grew})"
+
+    check("startup", Mode.LIVE)
+    tc.park(BASE + 50);        check("scrub", Mode.PARKED)          # d23e1ff
+    tc.play();                 check("play", Mode.PLAYING)          # 2b500ca
+    tc.pause();                check("pause", Mode.PARKED)
+    tc.park(BASE + 20);        check("re-scrub", Mode.PARKED)       # 7d56ea7 era
+    tc.play();                 check("re-play", Mode.PLAYING)
+    while tc.playing:                                                # catch up to now
+        tc.tick_play(1e6)
+    check("caught-up-to-live", Mode.LIVE)                           # 1303e36
+    tc.park(BASE + 80);        check("park-again", Mode.PARKED)
+    tc.follow_now();           check("go-live", Mode.LIVE)          # 0dd6072

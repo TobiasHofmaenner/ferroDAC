@@ -1755,6 +1755,13 @@ two-plane chosen; measured foundations show no ceiling justifying a rethink):
    across the F=16 ladder (read one level finer + fold); window edges padded +
    clipped exact. Earlier same day: dirty-tail top-up, proportional epoch budgets,
    writer non-finite filter, pinned-span + anchored-gap `CurveBuffer._decimate`.
-6. `chartfeed_selftest`: scripted transition sequences encoding every 2026-06/07
-   regression as a named case (seeded in tests/test_chartfeed.py — grow to the
-   full transition matrix).
+6. DONE 2026-07-09 — tests/test_chartfeed.py is the transition harness: the full
+   mode-transition matrix walked with structural invariants checked per step
+   (ownership == stored scalars iff PARKED; live reaches panels iff LIVE), plus
+   zoom re-query + stale-delivery discard, exactly-once topology cases, and the
+   envelope-backfill amplitude regression. Every 2026-06/07 whack-a-mole commit
+   maps to a named case.
+
+§22.2 is COMPLETE (all six steps landed 2026-07-09). The §22.1 invariants are now
+structural: hold them in review, and grow the transition matrix with every new
+display feature.
