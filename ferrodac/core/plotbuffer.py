@@ -97,14 +97,23 @@ class CurveBuffer:
 
     def _decimate(self) -> None:
         """Halve the stored points with a min/max **envelope**, keeping the full
-        span. Each group of 4 consecutive samples collapses to its two extrema
-        (the argmin and argmax of y, emitted in time order) — so a lone spike is
-        never dropped the way plain stride-2 would drop it, and it composes
-        losslessly with pyqtgraph's ``mode="peak"`` (min/max of min/max = min/max).
-        Coarsens the *display* only; the store keeps full resolution for the
-        Timeline/analysis. NaN-aware: any bucket holding a NaN emits a break, so a
-        buffered offline-gap marker survives decimation (a straight line must never
-        be drawn across a real gap)."""
+        span. Each group of 4 consecutive samples collapses to two of its own
+        samples (normally the argmin and argmax of y, in time order) — so a lone
+        spike is never dropped the way plain stride-2 would drop it, and it
+        composes with pyqtgraph's ``mode="peak"``. Coarsens the *display* only;
+        the store keeps full resolution. Three hard invariants (2026-07-09):
+
+        - **The span is pinned.** Bucket 0 always keeps sample 0 (and the last
+          bucket its final sample when no verbatim tail follows). Extrema-only
+          selection silently eroded the left edge geometrically — a week of
+          50 Hz grow-mode lost over half its span.
+        - **A gap stays anchored.** A bucket holding a NaN emits that NaN *at
+          the NaN sample's own x* (the old whole-bucket wipe re-stamped the
+          break at extrema x's, so the marker migrated arbitrarily far from
+          the real gap as it re-decimated). The other slot keeps the bucket's
+          strongest finite extremum, so data beside a gap survives.
+        - **x stays non-decreasing** (both emitted points are real samples in
+          index order) — decimation can never cause a backward diagonal."""
         n = self._n
         if n < 4:                              # too small to envelope → stride halve
             h = (n + 1) // 2
@@ -112,32 +121,62 @@ class CurveBuffer:
                 a[:h] = a[:n:2]
             self._n = h
             return
-        B = 4                                  # 4 samples → 2 extrema = 2:1, like stride
+        B = 4                                  # 4 samples → 2 kept = 2:1, like stride
         full = n // B
         used = full * B
         tail = n - used                        # 0..3 newest points, kept exact
         m = 2 * full
         rows = np.arange(full)
         yb = self._y[:used].reshape(full, B)
-        nan_bucket = np.isnan(yb).any(axis=1)
-        imin = np.where(np.isnan(yb), np.inf, yb).argmin(axis=1)
-        imax = np.where(np.isnan(yb), -np.inf, yb).argmax(axis=1)
-        lo_i = np.minimum(imin, imax)          # earlier-in-time extremum first
-        hi_i = np.maximum(imin, imax)
+        isn = np.isnan(yb)
+        imin = np.where(isn, np.inf, yb).argmin(axis=1)
+        imax = np.where(isn, -np.inf, yb).argmax(axis=1)
+        slot_a = np.minimum(imin, imax)        # earlier-in-time sample first
+        slot_b = np.maximum(imin, imax)
+        nan_bucket = isn.any(axis=1)
+        if nan_bucket.any():
+            nb = np.flatnonzero(nan_bucket)
+            sub = np.arange(len(nb))
+            first_nan = isn[nb].argmax(axis=1)         # the anchored break sample
+            all_nan = isn[nb].all(axis=1)
+            ybn = yb[nb]
+            cnt = np.maximum(1, (~isn[nb]).sum(axis=1))
+            mean = np.where(all_nan, 0.0, np.nansum(np.where(isn[nb], 0.0, ybn),
+                                                    axis=1) / cnt)
+            v_min = ybn[sub, imin[nb]]
+            v_max = ybn[sub, imax[nb]]
+            keep = np.where(np.abs(v_max - mean) >= np.abs(v_min - mean),
+                            imax[nb], imin[nb])        # the stronger finite extremum
+            keep = np.where(all_nan, first_nan, keep)
+            slot_a[nb] = np.minimum(keep, first_nan)
+            slot_b[nb] = np.maximum(keep, first_nan)
+        # Pin the LEFT edge: bucket 0 must keep sample 0 or the span erodes into a
+        # ring. The surviving second slot keeps bucket 0's break (NaN bucket) or its
+        # stronger extremum — never index order, which could evict a spike. The right
+        # edge needs no pin: live appends extend it again within a batch, and parked
+        # buffers hold sub-cap envelopes that never decimate.
+        if nan_bucket[0]:
+            slot_b[0] = int(isn[0].argmax())
+        elif slot_a[0] != 0:                   # sample 0 not already kept → choose
+            y0 = yb[0]                         #   which extremum the pin displaces
+            mean0 = float(y0.mean())
+            strong, other = ((imax[0], imin[0])
+                             if abs(y0[imax[0]] - mean0) >= abs(y0[imin[0]] - mean0)
+                             else (imin[0], imax[0]))
+            slot_b[0] = int(strong) if strong != 0 else int(other)
+        slot_a[0] = 0
 
         def _fold(a):
             ab = a[:used].reshape(full, B)
             out = np.empty(m + tail, dtype="f8")
-            out[0:m:2] = ab[rows, lo_i]
-            out[1:m:2] = ab[rows, hi_i]
+            out[0:m:2] = ab[rows, slot_a]
+            out[1:m:2] = ab[rows, slot_b]
             if tail:
                 out[m:] = a[used:n]            # newest tail verbatim (live cursor)
             return out
 
         nx, ny, nlo, nhi = (_fold(self._x), _fold(self._y),
                             _fold(self._slo), _fold(self._shi))
-        if nan_bucket.any():                   # force a break where the gap lives
-            ny[:m].reshape(full, 2)[nan_bucket] = np.nan
         self._x[:m + tail] = nx
         self._y[:m + tail] = ny
         self._slo[:m + tail] = nlo

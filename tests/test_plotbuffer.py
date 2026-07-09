@@ -169,3 +169,48 @@ def test_decimation_preserves_a_buffered_nan_gap_marker():
     _feed_in_chunks(b, xs, ys)
     assert len(b) <= 1000
     assert np.isnan(b.y).any()                 # the break survived decimation
+
+
+def test_decimation_pins_the_left_edge():
+    """Regression (2026-07-09): extrema-only bucket selection dropped sample 0
+    whenever it wasn't a bucket extremum, so the left edge eroded geometrically —
+    a week of 50 Hz grow-mode silently lost over half its span. Bucket 0 must
+    always keep sample 0: the buffer is a coarsening SPAN, not a ring."""
+    b = CurveBuffer(cap=256)
+    rng = np.random.default_rng(0)
+    for gen in range(1_500):                   # many decimation generations
+        xs = np.arange(gen * 128, (gen + 1) * 128, dtype="f8")
+        b.append(xs, np.sin(xs * 0.01) + 0.1 * rng.standard_normal(128))
+    assert b.x[0] == 0.0                       # left edge never moved
+    assert list(b.x) == sorted(b.x)
+
+
+def test_nan_gap_marker_stays_anchored():
+    """Regression (2026-07-09): the whole-bucket NaN wipe re-stamped the break at
+    the bucket's extrema x's, so the marker MIGRATED forward every decimation —
+    a dropout fed at t=1000 ended up drawn ~200000 s later, breaking the curve
+    where there is no gap. The break must keep the NaN sample's own x forever."""
+    b = CurveBuffer(cap=4096)
+    for gen in range(1_500):
+        xs = np.arange(gen * 128, (gen + 1) * 128, dtype="f8")
+        ys = np.sin(xs * 0.01)
+        if gen == 7:                           # covers t=1000
+            ys = ys.copy()
+            ys[1000 - gen * 128] = np.nan
+        b.append(xs, ys)
+    nan_x = b.x[np.isnan(b.y)]
+    assert len(nan_x) >= 1 and set(nan_x) == {1000.0}, nan_x
+
+
+def test_gap_bucket_keeps_a_finite_neighbor():
+    """Regression (2026-07-09): the old wipe turned BOTH emitted points of a
+    NaN-holding bucket to NaN, eating up to 3 finite samples per bucket — a spike
+    right next to a dropout vanished. The bucket must keep its strongest finite
+    extremum alongside the anchored break."""
+    b = CurveBuffer(cap=8)
+    #                 bucket 0: pin+ordinary   bucket 1: spike AND a dropout
+    b.append(np.arange(8, dtype="f8"), [1.0, 1.0, 1.0, 1.0, 1.0, 42.0, np.nan, 1.0])
+    b.append([8.0, 9.0], [1.0, 1.0])           # overflow → decimate once
+    assert 42.0 in b.y                         # the spike beside the gap survived
+    assert np.isnan(b.y).any()                 # and so did the break
+    assert b.x[np.isnan(b.y)][0] == 6.0        # anchored at the NaN sample's own x
