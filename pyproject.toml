@@ -9,6 +9,8 @@ name = "ferrodac"
 version = "0.0.0+dev"          # display version is stamped from the git tag by CI
 requires-python = ">=3.12"
 description = "Local-first lab data-acquisition, control & documentation platform"
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
 dependencies = [
     # 6.10 color-management regression: QColorTrcLut rebuilds per paint ->
     # minute-long GUI freezes (diagnosed live 2026-07-09, Kali Qt 6.10.2/6.10.3;

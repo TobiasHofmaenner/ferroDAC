@@ -46,9 +46,9 @@ What works today:
 
 ### Building a Windows executable
 
-CI builds a one-file Windows `.exe` on every tag push (`v*`) via
-[GitHub Actions](.github/workflows/build-windows.yml) and attaches it to the
-GitHub Release. To build locally **on Windows** (PyInstaller can't
+CI builds one-file binaries — a Windows `.exe` and a Linux x86-64 binary —
+on every tag push (`v*`) via [GitHub Actions](.github/workflows/build.yml) and
+attaches both to the GitHub Release (a `-rc` tag marks it as a prerelease). To build locally **on Windows** (PyInstaller can't
 cross-compile):
 
 ```bat
@@ -155,4 +155,4 @@ make test-ui                  # PySide6 smoke tests only
 
 ## License
 
-TBD.
+GPL-2.0-only — see [LICENSE](LICENSE).
