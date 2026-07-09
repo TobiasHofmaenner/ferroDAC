@@ -170,7 +170,12 @@ a = Analysis(
 # 2026-07-09) — the canonical frozen-Qt-on-Linux failure.
 _NEVER_BUNDLE = ("libGL.so", "libGLX", "libEGL.so", "libGLdispatch",
                  "libOpenGL.so", "libgbm", "libdrm", "libglapi",
-                 "libstdc++", "libgcc_s")
+                 "libstdc++", "libgcc_s",
+                 # the xcb family too: bundling the builder's libxcb.so.1 while
+                 # Qt dlopens the TARGET's libxcb-cursor.so.0 mixes two xcb
+                 # stacks — the xcb smoke caught the plugin refusing to load.
+                 # X protocol bindings are stable ABI on every Linux desktop.
+                 "libxcb")
 a.binaries = [(name, path, kind) for (name, path, kind) in a.binaries
               if not os.path.basename(name).startswith(_NEVER_BUNDLE)]
 
