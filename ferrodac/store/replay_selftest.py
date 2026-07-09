@@ -46,6 +46,15 @@ def main() -> int:
     assert fired[0] >= 2
     print("✓ TimeContext: window, park/follow, observer fires")
 
+    # the named display mode (DESIGN §22 I-8) — the ONE derivation from transport
+    from . import Mode
+    assert tc.mode is Mode.LIVE                      # following
+    tc.park(base + 100); assert tc.mode is Mode.PARKED
+    tc.play();           assert tc.mode is Mode.PLAYING
+    tc.pause();          assert tc.mode is Mode.PARKED
+    tc.follow_now();     assert tc.mode is Mode.LIVE
+    print("✓ TimeContext.mode: LIVE/PARKED/PLAYING named, derived in one place")
+
     # PlaybackSource: stream the whole window through a Bus → a sink
     bus = Bus()
     got: list = []

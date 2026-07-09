@@ -296,10 +296,12 @@ class ChartPanel(Panel):
         # min/max envelope — the same reduction the Timeline preview uses), NOT from the
         # full-res re-stream fanned into the CurveBuffer. That removes the second, fixed-cap
         # decimation (the old→new fidelity gradient + zoom starvation) from the parked path;
-        # the buffer/peak path stays for the LIVE tail. A `_windowed` key is owned by the
-        # query draw, so feed() ignores the re-stream for it (the re-stream still feeds
-        # PROCESSORS — only the chart's own curve changes source). DESIGN §7.4 / §11.
-        self._windowed: set = set()           # keys drawn from a window query (not feed)
+        # the buffer/peak path stays for the LIVE tail. A `_query_owned` key is owned by
+        # the query draw, so feed() ignores the re-stream for it (the re-stream still feeds
+        # PROCESSORS — only the chart's own curve changes source). Ownership is assigned
+        # ONLY by ChartFeed.reconcile (DESIGN §22 I-6/I-8) via set_query_owned — the chart
+        # never decides it. DESIGN §7.4 / §11 / §22.
+        self._query_owned: set = set()        # keys drawn from a window query (not feed)
         self._bands: dict = {}                # key -> (lo, hi, fill)
         self._bands_on = False
         self._k = 1.0
@@ -739,7 +741,7 @@ class ChartPanel(Panel):
         self._conv_of.pop(key, None)
         self._unit_of.pop(key, None)
         self._buf.pop(key, None)
-        self._windowed.discard(key)               # else a re-route while parked stays blank
+        self._query_owned.discard(key)            # else a re-route while parked stays blank
         #                                           (feed() would keep ignoring the stale key)
         if curve is None:
             return
@@ -761,7 +763,7 @@ class ChartPanel(Panel):
         # the buffer decimates in place at its cap.
         touched: dict = {}
         for r in batch:
-            if (r.key not in self._buf or r.key in self._windowed
+            if (r.key not in self._buf or r.key in self._query_owned
                     or not isinstance(r.value, (int, float))):
                 continue                          # windowed → the query draw owns this curve
             # log Y needs strictly-positive values; a linear axis accepts any finite one
@@ -804,29 +806,28 @@ class ChartPanel(Panel):
         stored one for the parked window draw."""
         return list(self._curves)
 
-    def enter_window(self, keys):
-        """Mark these keys as owned by the window (query) draw BEFORE the async result
-        arrives, so the parked re-stream's feed() ignores them from the first chunk (no
-        gradient-decimated flash before the clean envelope lands). Non-curve keys ignored."""
-        self._windowed = {k for k in keys if k in self._curves}
+    def set_query_owned(self, keys) -> None:
+        """Assign which curves the window QUERY owns — called ONLY by ChartFeed.reconcile
+        (DESIGN §22 I-6/I-8); the chart never decides ownership itself. feed() skips owned
+        keys, so the re-stream / live tail can't fight the envelope draw. Set BEFORE the
+        query draws land (no gradient-decimated flash before the clean envelope).
 
-    def exit_window(self):
-        """Release window (query) ownership when Play walks the head forward, so feed() drives
-        the curves again. CLEAR the released buffers: the query envelope spans the whole parked
-        window, and the re-stream that resumes re-experiences that span from its start — appending
-        those points onto the envelope would make the buffer go BACKWARD in time (connect='finite'
-        then draws a diagonal to the out-of-order point). Clearing lets feed rebuild monotonically;
-        the curve refills within a frame or two of play. Only fires on the transition (the set is
-        non-empty just once), so it does not wipe the buffer every play tick."""
-        for key in self._windowed:
+        Keys LEAVING the set are CLEARED (the old clear-on-Play, now a transition): the
+        query envelope spans the whole parked window, and the feed that resumes
+        re-experiences that span from its start — appending onto the envelope would make
+        the buffer go BACKWARD in time (connect='finite' then draws a diagonal to the
+        out-of-order point). Clearing lets feed rebuild monotonically; the curve refills
+        within a frame or two. Non-curve keys are ignored."""
+        new = {k for k in keys if k in self._curves}
+        for key in self._query_owned - new:        # released → clear for the feed
             buf = self._buf.get(key)
             if buf is not None:
                 buf.clear()
             if key in self._curves:
                 self._curves[key].setData([], [])
-        self._windowed = set()
+        self._query_owned = new
 
-    def set_window_curve(self, key, x, y, own=True):
+    def set_window_curve(self, key, x, y):
         """Draw a curve from a pre-reduced store-query envelope (min/max polyline, pixel-budgeted).
         Called ONLY by ChartFeed (DESIGN §22 I-6) — never wire another writer to this.
         Fed through the (now non-decimating) buffer so conversion, the σ band, and the coverage
@@ -834,10 +835,11 @@ class ChartPanel(Panel):
         ever hitting its cap. The resolver's own NaN gap markers are stripped here; _set_curve_data
         re-inserts breaks from live coverage.
 
-        own=True (a PARKED window): the query owns the curve — feed() ignores the re-stream for it.
-        own=False (grow-mode extended-back-while-LIVE): draw the historic envelope but leave the key
-        un-owned so feed() keeps appending the live tail — the feed monotonicity guard drops the
-        redundant older re-stream (≤ the envelope's last time) and keeps the forward live points."""
+        Draws only — ownership is assigned separately by set_query_owned. A PARKED chart
+        owns its stored curves (feed skips them); the grow-mode extended-back-while-LIVE
+        envelope is drawn with the key simply NOT in the owned set, so feed() keeps
+        appending the live tail — the feed monotonicity guard drops the redundant older
+        re-stream (≤ the envelope's last time) and keeps the forward live points."""
         buf = self._buf.get(key)
         if buf is None:
             return
@@ -846,8 +848,6 @@ class ChartPanel(Panel):
         finite = np.isfinite(x)                    # drop resolver gap markers (gap_split re-adds)
         buf.clear()
         buf.append(x[finite], y[finite])
-        if own:
-            self._windowed.add(key)
         self._set_curve_data(key)
 
     def clear_history(self):
@@ -855,7 +855,7 @@ class ChartPanel(Panel):
         self._last_zoom_x = None                  #   window (else it fires _fire_zoom on the
         #                                           stale viewRange and paints the wrong slice,
         #                                           and its shared key kills the fresh park query)
-        self._windowed = set()                    # go-live / new window → feed drives again
+        self._query_owned = set()                 # go-live / new window → feed drives again
         for key, buf in self._buf.items():
             buf.clear()
             self._curves[key].setData([], [])

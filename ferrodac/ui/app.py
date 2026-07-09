@@ -2353,10 +2353,12 @@ class MainWindow(QMainWindow):
         if tc is None or not tc.playing:
             self._play_wall = None
             return
-        for panel in self.dashboard.panels():        # Play walks the head forward WITHOUT a
-            if hasattr(panel, "exit_window"):        # reset → release parked-window ownership
-                panel.exit_window()                  # so the incremental re-stream drives the
-        #                                              curves again (else stored curves freeze)
+        self.chart_feed.reconcile()                  # Play walks the head forward WITHOUT a
+        #                                              reset → the PARKED→PLAYING transition
+        #                                              releases query ownership (clearing the
+        #                                              released envelopes) so the incremental
+        #                                              re-stream drives the curves again;
+        #                                              no-op on every later tick (§22 I-8)
         now = time.perf_counter()
         wall = (now - self._play_wall) if self._play_wall else 0.05
         self._play_wall = now
@@ -2381,7 +2383,8 @@ class MainWindow(QMainWindow):
         self._coverage_cache.clear()                 # re-read gaps for the new slice
         if self.time_context is not None:           # re-bin waterfalls to the new window
             self.dashboard.set_time_window(*self.time_context.window)
-        self.chart_feed.draw_parked_windows()        # parked scalars ← pixel-budgeted query
+        self.chart_feed.reconcile(force=True)        # navigation → re-derive mode, redraw
+        #                                              owned envelopes / go-live history
 
     def closeEvent(self, event):  # noqa: N802
         if getattr(self, "_recording", None) is not None:

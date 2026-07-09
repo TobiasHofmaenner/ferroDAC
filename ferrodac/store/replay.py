@@ -11,11 +11,21 @@ context (not the live inbox). Qt-free.
 
 from __future__ import annotations
 
+import enum
 import time as _time
 
 from ..core.bus import Bus
 from ..core.reading import Reading
 from ..core.trace import Trace
+
+
+class Mode(enum.Enum):
+    """The display plane's named state (DESIGN §22 I-8) — derived from the
+    transport in exactly ONE place, `TimeContext.mode`, never reconstructed
+    from boolean combinations at call sites."""
+    LIVE = "live"          # head follows now; the feed owns every curve
+    PARKED = "parked"      # head fixed; the window query owns stored scalar curves
+    PLAYING = "playing"    # head walks forward; the feed owns every curve again
 
 
 class TimeContext:
@@ -42,6 +52,13 @@ class TimeContext:
         if self.grow and self.anchor is not None:    # anchored back, growing front
             return (min(self.anchor, self.head), self.head)
         return (self.head - self.width, self.head)   # fixed-width sliding
+
+    @property
+    def mode(self) -> Mode:
+        """The named display state (DESIGN §22 I-8). The one derivation."""
+        if self.following:
+            return Mode.LIVE
+        return Mode.PLAYING if self.playing else Mode.PARKED
 
     def subscribe(self, cb):
         self._subs.append(cb)
