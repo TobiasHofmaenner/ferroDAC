@@ -563,11 +563,14 @@ class Dashboard(QObject):
     def export_sources(self) -> dict:
         """ALL data-bearing sources (scalar + trace), routed or not — live,
         historic-local and hub — for a full-window export / recording bundle.
-        {key: {name, unit, dtype}}."""
+        {key: {name, unit, dtype}}. Names are the device-QUALIFIED labels (the
+        same the chart legend shows): the bare name gave two same-model gauges
+        identical CSV columns, and matching the wrong column against a curve
+        read as corrupted data."""
         out = {}
         for key, sp in self._sources.items():
             if sp.dtype in ("float", "bool", "trace"):
-                out[key] = {"name": sp.name, "unit": sp.unit, "dtype": sp.dtype}
+                out[key] = {"name": sp.label, "unit": sp.unit, "dtype": sp.dtype}
         return out
 
     def detectors_for(self, sink_key: str) -> list:

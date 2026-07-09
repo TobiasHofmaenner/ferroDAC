@@ -126,14 +126,27 @@ class Resolver:
 
     def read_raw(self, series, t0, t1):
         """FULL-RES scalar samples stitched across tiers (nearest-wins per
-        sub-range), no decimation — the replay/analysis read. Tiers without a
-        read_raw (or with no data) are skipped; the hub fills what's only remote."""
+        sub-range), no decimation — the replay/analysis/EXPORT read. Tiers without
+        a read_raw (or with no data) are skipped; the hub fills what's only remote.
+
+        Segment reads are HALF-OPEN at interior handoffs: partition edges are
+        coverage endpoints, i.e. real sample times, and every tier's read is
+        inclusive at both ends — so a sample sitting exactly on a tier boundary
+        was returned by BOTH tiers, duplicating one measurement per seam
+        (invisible on a chart, a corrupt row in a CSV; the old exporter's
+        {t: v} dict masked it). The boundary sample belongs to the segment that
+        STARTS there — unless the next segment is an unowned gap, where this
+        interval's true last sample must stay."""
+        segs = self._partition(series, t0, t1)
         ts, vs = [], []
-        for a, b, tier in self._partition(series, t0, t1):
+        for i, (a, b, tier) in enumerate(segs):
             rr = getattr(tier, "read_raw", None) if tier is not None else None
             if rr is None:
                 continue
             t, v = rr(series, a, b)
+            if len(t) and i + 1 < len(segs) and segs[i + 1][2] is not None:
+                keep = np.asarray(t, dtype="f8") < b     # half-open: next owner serves b
+                t, v = np.asarray(t)[keep], np.asarray(v)[keep]
             if len(t):
                 ts.append(np.asarray(t, dtype="f8")); vs.append(np.asarray(v, dtype="f8"))
         if not ts:
@@ -144,12 +157,20 @@ class Resolver:
 
     def read_raw_trace(self, series, t0, t1) -> list:
         """FULL-RES trace blocks stitched across tiers that hold traces (local
-        store / hub). list of (times[k], Y[k, m], x[m])."""
+        store / hub). list of (times[k], Y[k, m], x[m]). Same half-open seam rule
+        as read_raw: a scan exactly on a tier boundary must not appear twice."""
+        segs = self._partition(series, t0, t1)
         out = []
-        for a, b, tier in self._partition(series, t0, t1):
+        for i, (a, b, tier) in enumerate(segs):
             rr = getattr(tier, "read_raw_trace", None) if tier is not None else None
-            if rr is not None:
-                out.extend(rr(series, a, b))
+            if rr is None:
+                continue
+            for (bt, by, bx) in rr(series, a, b):
+                if len(bt) and i + 1 < len(segs) and segs[i + 1][2] is not None:
+                    keep = np.asarray(bt, dtype="f8") < b
+                    bt, by = np.asarray(bt)[keep], np.asarray(by)[keep]
+                if len(bt):
+                    out.append((bt, by, bx))
         return out
 
     def query_trace(self, series, t0, t1, max_scans=400) -> list:

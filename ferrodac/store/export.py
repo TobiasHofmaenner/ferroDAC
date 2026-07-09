@@ -31,7 +31,10 @@ import numpy as np
 from ..core.sourceid import uncertainty_at
 from .uncertainty import reconstruct
 
-EXPORT_VERSION = 1
+EXPORT_VERSION = 2   # v2 (2026-07-09): time_iso is LOCAL time with UTC offset (matches
+#                      the chart's clock axis — a UTC column read against a local-time
+#                      graph looked like the data "didn't match"); duplicate source
+#                      names are disambiguated; duplicate timestamps are never collapsed
 
 
 def _safe(name: str) -> str:
@@ -39,7 +42,10 @@ def _safe(name: str) -> str:
 
 
 def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+    """ISO 8601 in LOCAL time with an explicit UTC offset — the same wall clock the
+    chart's time axis shows, so a human can line a CSV row up with the graph. The
+    time_epoch_s column stays the timezone-free machine truth."""
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone().isoformat()
 
 
 def _num(v) -> str:
@@ -72,16 +78,30 @@ def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = Fal
         "ferrodac_export": EXPORT_VERSION,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "t0": t0, "t1": t1,
-        "time_columns": ["time_iso", "time_epoch_s"],   # UTC ISO + epoch seconds
+        "time_columns": ["time_iso", "time_epoch_s"],
+        "time_iso_zone": "local with UTC offset (matches the chart axis); "
+                         "time_epoch_s is UTC epoch seconds",
+        "values": "raw as stored, in each column's stated unit — a chart may "
+                  "display the same data converted to its axis unit",
         "fill": "forward" if fill else "none",
         "sources": [],
     }
     scalars: list = []          # (header, t_array, v_array)
     used_files: set = set()
+    used_names: set = set()
     for key, meta in sources.items():
         dtype = meta.get("dtype", "scalar")
         name = meta.get("name") or key.rsplit("/", 1)[-1]
         unit = meta.get("unit", "")
+        # Two sources may carry the SAME display name + unit (two gauges of one
+        # model). Identical CSV headers are a data-trust hazard — a reader matching
+        # a column to a curve can silently pick the wrong channel — so disambiguate
+        # deterministically; the manifest maps each key to its exact column.
+        base_name, n = name, 1
+        while (name, unit) in used_names:
+            n += 1
+            name = f"{base_name} ({n})"
+        used_names.add((name, unit))
         if dtype == "trace":
             blocks = [b for b in reader.read_raw_trace(key, t0, t1) if len(b[0])]
             for i, (times, Y, x) in enumerate(blocks):     # one file per epoch
@@ -142,20 +162,32 @@ def _write_scalars(path: str, cols: list, fill: bool) -> None:
     """cols = [(header, t_array, v_array)] → wide CSV on the UNION of timestamps,
     absolute time. A cell is blank where that source has no sample at that instant
     (honest); forward-filled only if `fill`. Channels from one device share a
-    timestamp (one engine cycle) so they line up on a row."""
+    timestamp (one engine cycle) so they line up on a row.
+
+    A k-way merge over per-source cursors — NEVER a ``{t: v}`` dict, which
+    silently collapsed two samples sharing a timestamp into one (sample loss in
+    a data export). Each row consumes at most ONE sample per source, so a
+    duplicate timestamp within a source yields two rows, both values kept."""
     headers = [c[0] for c in cols]
-    maps = [dict(zip(t.tolist(), v.tolist())) for _h, t, v in cols]
-    all_ts = sorted(set().union(*(set(t.tolist()) for _h, t, _v in cols))) if cols else []
-    last = [None] * len(cols)
+    ts_arrs = [np.asarray(t, dtype="f8") for _h, t, _v in cols]
+    vs_arrs = [np.asarray(v, dtype="f8") for _h, _t, v in cols]
+    k = len(cols)
+    idx = [0] * k
+    last = [None] * k
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["time_iso", "time_epoch_s"] + headers)
-        for ts in all_ts:
+        while True:
+            heads = [ts_arrs[i][idx[i]] for i in range(k) if idx[i] < len(ts_arrs[i])]
+            if not heads:
+                break
+            ts = min(heads)
             cells = []
-            for i, mp in enumerate(maps):
-                if ts in mp:
-                    last[i] = mp[ts]
-                    cells.append(_num(mp[ts]))
+            for i in range(k):
+                if idx[i] < len(ts_arrs[i]) and ts_arrs[i][idx[i]] == ts:
+                    last[i] = vs_arrs[i][idx[i]]
+                    idx[i] += 1                      # consume ONE sample per row
+                    cells.append(_num(last[i]))
                 elif fill and last[i] is not None:
                     cells.append(_num(last[i]))
                 else:
