@@ -52,6 +52,8 @@ they ship with the app. `net_e2e.py` runs them against an in-process hub.
 ```sh
 cd server
 docker compose up --build            # hub on :50051
+docker compose --profile gitea up -d --build   # …hub + the bundled Gitea (:3000);
+                                     # NB --profile goes BEFORE `up`, not after
 docker compose run --rm hub python tests/e2e.py    # end-to-end test
 ```
 

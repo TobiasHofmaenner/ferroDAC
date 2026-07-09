@@ -41,8 +41,11 @@ services:
       - "host.docker.internal:host-gateway"   # so GITEA_URL can be a Gitea on the host
     restart: unless-stopped
 
-  # OPTIONAL bundled Gitea — only starts with `--profile gitea`. If you already run
-  # your own Gitea, DON'T use this (point GITEA_URL at yours); your token is for it.
+  # OPTIONAL bundled Gitea — only starts when the profile is enabled:
+  #     docker compose --profile gitea up -d
+  # (--profile belongs to `docker compose` itself, BEFORE `up` — after `up` it
+  # fails with "unknown flag"; COMPOSE_PROFILES=gitea works too.) If you already
+  # run your own Gitea, DON'T use this (point GITEA_URL at yours); your token is for it.
   gitea:
     image: gitea/gitea:1.22
     container_name: ferrodac-gitea
