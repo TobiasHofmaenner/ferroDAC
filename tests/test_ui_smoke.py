@@ -2123,3 +2123,46 @@ def test_backup_project_action(qapp, tmp_path, monkeypatch):
             assert any(n.endswith("overview.json") for n in z.namelist())
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_mainwindow_constructs_over_an_existing_store(qapp):
+    """The SECOND-launch scenario: the app dir already holds a store with sources
+    and device provenance. Regression (2026-07-09): startup crashed with
+    AttributeError because the Dashboard's constructor walks _historic_sources()
+    (per-source provenance resolution) before later init blocks ran — an empty
+    fresh store never exercised that path, so the plain constructor test missed
+    it. Every startup code path must survive pre-existing data."""
+    import tempfile
+
+    import os
+
+    import numpy as np
+
+    from ferrodac.core.engine import Engine
+    from ferrodac.core.manager import DeviceManager
+    from ferrodac.core.registry import load_builtin_drivers
+    from ferrodac.store import ZarrStore
+    from ferrodac.ui.app import MainWindow
+
+    d = tempfile.mkdtemp()
+    st = ZarrStore(os.path.join(d, "store.zarr"))    # what a prior session left
+    for i in range(3):
+        st.add_source(f"dev{i}/ch", name=f"ch{i}", unit="mbar")
+        st.append(f"dev{i}/ch", 1e6 + np.arange(50) * 0.1, np.ones(50), epoch="e0")
+        st.put_device(f"dev{i}", {"name": f"Device {i}"})
+    st.finalize_rollups("dev0/ch")
+    del st                                           # release before the app reopens it
+
+    MainWindow._app_dir = lambda self, _d=d: _d
+    engine = Engine()
+    manager = DeviceManager(load_builtin_drivers(), engine=engine, registry=None)
+    w = MainWindow(manager, engine)
+    try:
+        # the historic catalog resolved through the cache, with device names
+        hist = {k: (ch, dev) for k, ch, dev, _u, _dt in w._historic_sources()}
+        assert "dev0/ch" in hist and hist["dev0/ch"][1] == "Device 0"
+    finally:
+        _wait_tasks(w, qapp)
+        w.close()
+        qapp.processEvents()

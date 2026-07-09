@@ -124,6 +124,11 @@ class MainWindow(QMainWindow):
         self.reads = None                  # async resolver facade (§21.3)
         self.time_context = None
         self.replay = None
+        # historic-catalog resolve cache — must exist BEFORE the Dashboard is
+        # constructed (its _rebuild_device_ports walks _historic_sources on a
+        # store that already holds sources). Cleared on provenance edits.
+        self._srcinfo_cache: dict = {}
+        manager.provenance_changed.connect(self._srcinfo_cache.clear)
         try:
             from ..store import (RamTier, ReadService, ReplayController,
                                  Resolver, StoreWriter, TimeContext, ZarrStore)
@@ -208,12 +213,6 @@ class MainWindow(QMainWindow):
         # first logged at the opening flush shows up without a manual refresh).
         self._sigma_timelines: dict = {}
         manager.provenance_changed.connect(self._sigma_timelines.clear)
-        # historic-catalog resolve cache: resolve_source() reads the device
-        # provenance record from zarr — the Timeline's 500 ms tick calling it per
-        # source stalled the GUI >600 ms (watchdog, 2026-07-09). Records change
-        # only on a provenance edit, so cache per key and clear on that signal.
-        self._srcinfo_cache: dict = {}
-        manager.provenance_changed.connect(self._srcinfo_cache.clear)
         # Gap breaks (DESIGN §7.4): charts break the drawn curve at a recorded-data gap
         # via a coverage provider. resolver.coverage takes the store lock, and this is
         # consulted on the per-batch draw path, so cache it — invalidated on the same
