@@ -49,10 +49,13 @@ def main() -> int:
     assert np.isnan(y).any(), "epochs not separated"
     print(f"✓ wide query: {len(x)} pts (budget-bounded), spike survived, epoch gap present")
 
+    # NB: point count vs budget is a STEP function (F=16 between pyramid levels),
+    # so the budget pair must straddle a level boundary — 1000→4000 stopped doing
+    # that when budgets became proportional-by-overlap (both land on level 2).
     counts = [len(st.query(uid, t0 - 10, tb[-1] + 10, max_points=mp)[0])
-              for mp in (1000, 4000)]
+              for mp in (1000, 16000)]
     assert counts[1] > counts[0], counts
-    print(f"✓ resolution scales with budget: {counts} pts for max_points 1000/4000")
+    print(f"✓ resolution scales with budget: {counts} pts for max_points 1000/16000")
 
     xa, _ = st.query(uid, t0 + 100, t0 + 110, max_points=1000)
     assert 90 <= len(xa) <= 120, len(xa)
@@ -81,6 +84,54 @@ def main() -> int:
     assert len(rt) == 200 and len(st.query(ck, ct[0] - 1, ct[-1] + 1)[0]) > 0
     assert st.read_raw("absent:dev/x", 0, 1)[0].size == 0   # missing → empty, no raise
     print(f"✓ Windows-safe group names: ':' key → dir '{gdir}', read_raw round-trips")
+
+    # --- dirty-tail top-up (regression 2026-07-09): the pyramid is rebuilt only
+    # every ~50k samples, so a wide (coarse-level) query used to end at the last
+    # finalize — a right-edge hole that vanished on zoom-in while coverage()
+    # (dirty-aware) still reported the span. query() must top up from raw.
+    dk = "dirty/gauge"
+    st.add_source(dk, name="dirty")
+    dt0 = time.time() - 40_000
+    dta = dt0 + np.arange(200_000) * 0.1
+    st.append(dk, dta, np.sin(dta * 0.01), epoch="d0")
+    st.finalize_rollups(dk, "d0")
+    dtb = dta[-1] + 0.1 + np.arange(5_000) * 0.1      # appended, NOT finalized
+    st.append(dk, dtb, np.cos(dtb * 0.01), epoch="d0")
+    qx, qy = st.query(dk, dt0, dtb[-1] + 1, max_points=800)
+    fx = qx[np.isfinite(qx)]
+    assert fx.max() >= dtb[-1] - 1.0, f"dirty tail missing ({dtb[-1] - fx.max():.0f}s hole)"
+    assert (np.diff(fx) >= 0).all(), "pyramid→tail seam out of order"
+    print(f"✓ dirty tail served at coarse zoom: query reaches {dtb[-1] - fx.max():.1f}s of tail end")
+
+    # --- NaN-robust rollups (regression 2026-07-09): legacy stores hold NaN for
+    # failed reads; plain min/max poisoned the bucket at every level, so one bad
+    # sample grew into a 16^L-wide hole at wide zoom. Finite extrema must win.
+    nk = "legacy/nan"
+    st.add_source(nk, name="nan")
+    nt = dt0 + np.arange(100_000) * 0.1
+    nv = np.ones(100_000)
+    nv[50_000] = np.nan                                # one legacy bad sample
+    st.append(nk, nt, nv, epoch="n0")
+    st.finalize_rollups(nk, "n0")
+    qx, qy = st.query(nk, dt0, nt[-1] + 1, max_points=400)
+    assert not np.isnan(qy[np.isfinite(qx)]).any(), "one NaN poisoned its rollup bucket"
+    print("✓ NaN-robust rollups: a lone legacy NaN no longer poisons coarse levels")
+
+    # --- proportional epoch budgets (regression 2026-07-09): an even per-epoch
+    # split let restart stubs steal a long epoch's resolution the moment they
+    # entered the window; budget must follow each epoch's overlap share.
+    pk = "prop/gauge"
+    st.add_source(pk, name="prop")
+    pt = dt0 + np.arange(500_000) * 0.1
+    st.append(pk, pt, np.sin(pt * 0.001), epoch="p0")
+    for i in range(4):                                 # four 10-sample restart stubs
+        ps = pt[-1] + 100 + i * 200 + np.arange(10) * 0.1
+        st.append(pk, ps, np.ones(10), epoch=f"pstub{i}")
+    st.finalize_rollups(pk)
+    qx, qy = st.query(pk, dt0, pt[-1] + 1000, max_points=2000)
+    on_main = (np.isfinite(qx) & (qx <= pt[-1])).sum()
+    assert on_main > 1500, f"stubs stole the long epoch's budget ({on_main} pts)"
+    print(f"✓ proportional budgets: long epoch kept {on_main} of 2000 pts despite 4 stubs")
 
     print("\nSTORE SELFTEST PASS")
     return 0

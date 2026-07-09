@@ -93,7 +93,13 @@ def _locked(fn):
 
 
 def _downsample(t, mn, mx, factor):
-    """One pyramid level: min/max over groups of `factor`, bucket time = mean."""
+    """One pyramid level: min/max over groups of `factor`, bucket time = mean.
+
+    NaN-robust: a bucket keeps the extrema of its FINITE members — plain min/max
+    would let one NaN (legacy stores hold NaN for failed reads; the writer now
+    filters them) poison its bucket at every level, so a single bad sample grew
+    into a 16^L-wide hole at wide zooms. Only an all-NaN bucket stays NaN (a
+    real break — never fabricate data)."""
     n = len(mn)
     nb = math.ceil(n / factor)
     pad = nb * factor - n
@@ -102,7 +108,16 @@ def _downsample(t, mn, mx, factor):
         mn = np.concatenate([mn, np.full(pad, mn[-1])])
         mx = np.concatenate([mx, np.full(pad, mx[-1])])
     t = t.reshape(nb, factor).mean(axis=1)
-    return t, mn.reshape(nb, factor).min(axis=1), mx.reshape(nb, factor).max(axis=1)
+    mnb = mn.reshape(nb, factor)
+    mxb = mx.reshape(nb, factor)
+    mask = np.isnan(mnb)
+    mn_out = np.where(mask, np.inf, mnb).min(axis=1)
+    mx_out = np.where(np.isnan(mxb), -np.inf, mxb).max(axis=1)
+    all_nan = mask.all(axis=1)
+    if all_nan.any():
+        mn_out[all_nan] = np.nan
+        mx_out[all_nan] = np.nan
+    return t, mn_out, mx_out
 
 
 class ZarrStore:
@@ -374,6 +389,10 @@ class ZarrStore:
             # contiguous-recording intervals, computed here (worker thread, already an
             # O(epoch) pass) and cached on the epoch so coverage() stays a cheap attr read
             eg.attrs["intervals"] = [[s, e] for s, e in _split_intervals(t, gap_k)]
+            eg.attrs["rolled_n"] = int(len(t))   # pyramid watermark: raw samples rolled —
+            #                                      _query_epoch tops up the dirty tail past
+            #                                      it from raw (coverage() is dirty-aware;
+            #                                      query() must be too)
             eg.attrs["dirty"] = False
 
     def _put(self, g, name, arr):
@@ -549,9 +568,15 @@ class ZarrStore:
                   and g[k].attrs["t1"] >= t0 and g[k].attrs["t0"] <= t1]
         if not epochs:
             return np.array([]), np.array([])
-        budget = max(50, max_points // len(epochs))
+        # budget ∝ each epoch's overlap with the window (same rule as the resolver's
+        # tier split) — an even per-epoch split let a handful of restart-stub epochs
+        # steal a long epoch's resolution the moment they entered the window
+        overlap = {k: max(0.0, min(t1, g[k].attrs["t1"]) - max(t0, g[k].attrs["t0"]))
+                   for k in epochs}
+        total = sum(overlap.values()) or 1.0
         xs, ys = [], []
         for key in epochs:
+            budget = max(50, int(max_points * overlap[key] / total))
             ex, ey = self._query_epoch(g[key], max(t0, g[key].attrs["t0"]),
                                        min(t1, g[key].attrs["t1"]), budget)
             if len(ex):
@@ -567,11 +592,15 @@ class ZarrStore:
         span = max(1e-12, eg.attrs["t1"] - eg.attrs["t0"])
         wc = max(1.0, n * (b - a) / span)            # ~raw samples in the window
         levels = int(eg.attrs.get("levels", 0))
+        dirty = bool(eg.attrs.get("dirty", False))
+        rolled = eg.attrs.get("rolled_n") if dirty else n
         factor = wc / budget
         # finest level that still fits the budget: buckets = wc / F^L <= budget
         # ⟺ L >= log_F(factor) ⟹ ceil; clamp to what the pyramid actually has.
         lvl = 0 if factor <= 1 else min(levels, math.ceil(math.log(factor) / math.log(_F)))
-        if lvl <= 0:                                  # raw (window is small enough)
+        if lvl <= 0 or (dirty and rolled is None):
+            # raw: window small enough — or a legacy dirty epoch with no pyramid
+            # watermark, where raw is the only correct answer (heals at next finalize)
             t = np.asarray(eg["t"][:])
             i0 = int(np.searchsorted(t, a, side="left"))
             i1 = int(np.searchsorted(t, b, side="right"))
@@ -582,8 +611,25 @@ class ZarrStore:
             return tx, vy
         rt = np.asarray(eg[f"r{lvl}_t"][:])
         i0, i1 = np.searchsorted(rt, [a, b])
-        return _interleave(rt[i0:i1], np.asarray(eg[f"r{lvl}_min"][i0:i1]),
-                           np.asarray(eg[f"r{lvl}_max"][i0:i1]))
+        px, py = _interleave(rt[i0:i1], np.asarray(eg[f"r{lvl}_min"][i0:i1]),
+                             np.asarray(eg[f"r{lvl}_max"][i0:i1]))
+        rolled = int(rolled)
+        if dirty and rolled < n:
+            # the pyramid ends at the last finalize; top up the appended-since tail
+            # from raw (a chunk-bounded partial read) — otherwise a parked window
+            # ending "now" shows a right-edge hole that vanishes on zoom-in, while
+            # coverage() (dirty-aware) still reports the span as present
+            tt = np.asarray(eg["t"][rolled:])
+            j0 = int(np.searchsorted(tt, a, side="left"))
+            j1 = int(np.searchsorted(tt, b, side="right"))
+            tx, vy = tt[j0:j1], np.asarray(eg["v"][rolled + j0:rolled + j1])
+            if len(tx):
+                if len(tx) > budget * 2:
+                    txd, mn, mx = _downsample(tx, vy, vy, max(2, len(tx) // budget))
+                    tx, vy = _interleave(txd, mn, mx)
+                px = np.concatenate([px, tx]) if len(px) else tx
+                py = np.concatenate([py, vy]) if len(py) else vy
+        return px, py
 
 
 def _interleave(t, mn, mx):

@@ -52,7 +52,10 @@ def main() -> int:
         eng.publish([_R("g1", float(t[j]), float(v[j]))
                      for j in range(i, min(i + 250, len(t)))])
     # noise that must be ignored: a still-filling frame + a non-scalar value
-    eng.publish([_R("g1", now, 9.9, partial=True), _R("g1", now, "n/a")])
+    # + non-finite values (a failed read emits NaN with status≠0 — NaN in the
+    # store poisons min/max rollup buckets; absence IS the representation)
+    eng.publish([_R("g1", now, 9.9, partial=True), _R("g1", now, "n/a"),
+                 _R("g1", now + 0.1, float("nan")), _R("g1", now + 0.2, float("inf"))])
     w.flush_all()
 
     # queryable MID-RUN (no stop yet) — the ambient durable tier is live
@@ -62,7 +65,9 @@ def main() -> int:
     assert store.coverage("g1") and store.coverage("g1")[0][0] <= now - 999
     print("✓ grows: coverage spans the streamed range")
     assert 9.9 not in y, "partial/non-scalar leaked into the store"
-    print("✓ skipped the partial frame and the non-scalar value")
+    rt, rv = store.read_raw("g1", now - 1000, now + 1)
+    assert np.isfinite(rv).all(), "non-finite value leaked into the durable store"
+    print("✓ skipped the partial frame, the non-scalar, and non-finite values")
 
     # --- traces + bool persist too (all current datatypes), while attached ---
     from ferrodac.core.trace import Trace

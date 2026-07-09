@@ -119,6 +119,12 @@ class StoreWriter:
                     v = 1.0 if v else 0.0        # persist bool as 0/1 scalar
                 elif not isinstance(v, (int, float)):
                     continue
+                if not np.isfinite(v):
+                    continue                     # a failed read (devices emit NaN with
+                #                                  status≠0) is NOT data: NaN in `v` poisons
+                #                                  min/max rollup buckets, and the RAM tier
+                #                                  already drops these — absence (a coverage
+                #                                  gap) is the one representation of "no data"
                 tb, vb = self._buf.setdefault(r.key, ([], []))
                 tb.append(float(r.t))
                 vb.append(float(v))
