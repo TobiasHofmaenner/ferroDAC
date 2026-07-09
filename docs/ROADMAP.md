@@ -4,6 +4,48 @@
 the **scale-back**: the order we'd actually build it (smallest-useful-first), and
 the decisions still open. This file is expected to churn; DESIGN.md is stable.
 
+---
+
+## The v1.0 milestone (defined 2026-07-09)
+
+**v1 = the complete, trustworthy single-station instrument.** Everything a bench
+user needs to acquire, see, record, replay, annotate, and export — with data they
+can defend in a thesis. Multi-user platform concerns (auth, web viewer, sample
+tracking, the UI rework) are **v2 by decision** — the hub stays what it is today:
+a trusted-network sync/viewer convenience.
+
+Already true (verified, not aspirational):
+- Data plane: always-on durable store (schema-versioned), tiered resolver, pull
+  display (§22 complete + transition-matrix harness), replay, sample-exact CSV
+  export round-trip (incl. GUM σ columns), gap/coverage algebra selftests.
+- Recording/markers/tags (hub-synced), projects, docs/ELN, session save/restore,
+  device identity + auto-rebind, extensions SDK (§21.4), locked env (uv) with
+  reproducible multi-platform release binaries, GPL-2.0-only.
+
+Remaining for v1 (in suggested order):
+1. **Media plane, staged per §9**: (a) camera **snapshots** into the project's
+   `media/` on the run clock — manual button, optional on-Record capture, and a
+   timestamped reference into `log.md`; (b) **image tile panel** + photos as
+   timeline markers (scrub surfaces time-correlated shots); (c) **recorded
+   clips** per Record span (QMediaRecorder → `media/*.mp4`, timestamped).
+   Live WebRTC / phone upload need the web client → v2.
+2. **Retention & disk honesty**: the store currently grows forever ("for now" —
+   §7.4). v1 needs at least a disk-space guard + visible usage + a prune tool
+   honoring pinned (recorded) spans; full time/size rollover policy may follow.
+3. **Trust/safety flags from the 2026-07 audit** (small, real): Gitea admin
+   token out of clone URLs/backups; doc-room compaction actually invoked;
+   backup dirty-tracking sees doc edits; QMS filament-off shows PENDING while
+   queued behind a sweep (safety-relevant control must not look done).
+4. **Driver velocity kit** (the reason this tool exists — request #4 must be
+   cheap): a documented driver template + "driver in a day" guide against the
+   published SDK, with the sim drivers as reference implementations.
+5. **User quickstart** for colleagues (install → first device → first record →
+   export), separate from the dev docs.
+
+Explicitly **v2**: auth/roles, web components (viewer, phone capture), sample
+tracking, UI rework, live video (WebRTC), waveform/block plane, multi-station
+aggregation, community driver library.
+
 > Method (agreed): *design the best version, then scale back to a manageable
 > scope.* So every phase below only **implements** a slice — the **slots** for
 > the rest already exist in the design.
