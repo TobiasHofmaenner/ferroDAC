@@ -163,6 +163,17 @@ a = Analysis(
     noarchive=False,
 )
 
+# Never ship the host graphics stack or the GCC runtime (Linux): the target's
+# GPU drivers (Mesa/DRI) must load against the TARGET's own libGL/libstdc++
+# family. Bundling the builder's (Ubuntu 22.04) copies made Qt's GLX init
+# abort on newer distros ("Could not initialize GLX" + SIGABRT on Kali,
+# 2026-07-09) — the canonical frozen-Qt-on-Linux failure.
+_NEVER_BUNDLE = ("libGL.so", "libGLX", "libEGL.so", "libGLdispatch",
+                 "libOpenGL.so", "libgbm", "libdrm", "libglapi",
+                 "libstdc++", "libgcc_s")
+a.binaries = [(name, path, kind) for (name, path, kind) in a.binaries
+              if not os.path.basename(name).startswith(_NEVER_BUNDLE)]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

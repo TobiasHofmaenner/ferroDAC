@@ -17,6 +17,10 @@ from dataclasses import dataclass, field
 
 TAG = "tag"
 RECORDING = "recording"
+MEDIA = "media"          # a photo/clip event (DESIGN §9): the FILE lives in the
+#                          project's media/ dir; the tag is its timestamped
+#                          reference — payload {"file": <project-relative path>,
+#                          "source": <camera key>, "format": "png"|...}
 # legacy point kinds (still parsed from old sessions)
 REC_START = "record-start"
 REC_STOP = "record-stop"
