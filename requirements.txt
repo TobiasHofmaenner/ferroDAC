@@ -1,5 +1,9 @@
 # runtime deps.
-PySide6>=6.6
+PySide6>=6.6,<6.10  # 6.10 color-management regression: QColorTrcLut
+                    # rebuilds per paint -> minute-long GUI freezes
+                    # (diagnosed live 2026-07-09, Kali Qt 6.10.2/6.10.3;
+                    # 6.9.3 verified green). NB: PySide 6.8 breaks on
+                    # HubController.connect name-shadowing; use 6.9.x.
 qtpy>=2.4
 pyqtgraph>=0.13
 numpy>=1.24
