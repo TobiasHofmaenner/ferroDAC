@@ -324,6 +324,12 @@ class Dashboard(QObject):
         return {k: p.label for k, p in self._sources.items()
                 if p.name and not getattr(p, "proc_id", "")}
 
+    def image_sources(self) -> dict:
+        """key -> display label of the ONLINE camera (image-dtype) sources —
+        the snapshot targets (DESIGN §9)."""
+        return {k: p.label for k, p in self._sources.items()
+                if p.dtype == "image" and p.online}
+
     def trim_live(self, t0: float) -> None:
         """Drop live-accumulated data older than t0 (absolute) so the live window
         slides (slide) / is bounded at the anchor (grow). Auto-range follows."""

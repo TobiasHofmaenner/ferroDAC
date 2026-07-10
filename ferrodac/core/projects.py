@@ -298,6 +298,12 @@ class Project:
     def docs_dir(self) -> str:
         return self.subdir("docs")
 
+    # -- media (photos/clips; DESIGN §9 — the tag substrate holds the
+    #    timestamped references, kind="media", payload.file relative to here) --
+    @property
+    def media_dir(self) -> str:
+        return self.subdir("media")
+
     def docs(self) -> list:
         """Reference files in docs/ (datasheets, notes, protocols, plots) — shown
         as cards so you can reopen them. Scanned fresh; the folder IS the list."""

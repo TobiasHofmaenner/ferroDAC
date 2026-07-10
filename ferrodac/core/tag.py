@@ -34,9 +34,10 @@ ORIGIN_SYSTEM = "system"
 # severity — a small CLOSED enum (kind stays an open string)
 SEVERITIES = ("info", "warn", "error", "critical")
 
-_KIND_COLOR = {TAG: "#ffd54f", RECORDING: "#ff6b6b",
+_KIND_COLOR = {TAG: "#ffd54f", RECORDING: "#ff6b6b", MEDIA: "#4dabf7",
                REC_START: "#69db7c", REC_STOP: "#ff6b6b"}
-_KIND_LABEL = {RECORDING: "REC", REC_START: "REC", REC_STOP: "STOP"}
+_KIND_LABEL = {RECORDING: "REC", REC_START: "REC", REC_STOP: "STOP",
+               MEDIA: "📷"}
 # severity tints the marker when the kind doesn't pin a colour itself
 _SEVERITY_COLOR = {"warn": "#ffa94d", "error": "#ff6b6b", "critical": "#f03e3e"}
 

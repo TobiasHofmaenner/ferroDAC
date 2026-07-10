@@ -487,6 +487,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         self.record_action = tb.addAction("● Record", self._toggle_record)
         tb.addAction("＋ Tag", self._add_tag)
+        tb.addAction("📷 Photo", self._take_photo)
         tb.addAction("🕑 Timeline", self._open_timeline)
         tb.addAction("📄 Docs", self._open_docs)
         tb.addSeparator()
@@ -782,6 +783,52 @@ class MainWindow(QMainWindow):
             label, comment = dlg.values()
             self.dashboard.markers.add(time.time(), label=label, comment=comment)
             self.events_dock.raise_()
+
+    # -- media (DESIGN §9: snapshots) ------------------------------------------
+    def _media_service(self):
+        """Lazy MediaService against the ACTIVE project (it may switch)."""
+        from ..core.media import MediaService
+        return MediaService(
+            latest=self.engine.latest,
+            markers=self.dashboard.markers,
+            media_dir=lambda: (self._project_mgr.active.media_dir
+                               if self._project_mgr.active else ""),
+            names=self.dashboard.source_names,
+        )
+
+    def _take_photo(self):
+        """Toolbar 📷: one camera → snap it; several → a menu of each plus
+        'All cameras' (one tag per camera — "document the bench now")."""
+        cams = self.dashboard.image_sources()
+        if not cams:
+            self.statusBar().showMessage("No camera source online", 4000)
+            return
+        if len(cams) == 1:
+            self._snap([next(iter(cams))])
+            return
+        from qtpy.QtGui import QCursor
+        from qtpy.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.addAction("All cameras", lambda: self._snap(list(cams)))
+        menu.addSeparator()
+        for key, label in sorted(cams.items(), key=lambda kv: kv[1]):
+            menu.addAction(f"📷 {label}", lambda k=key: self._snap([k]))
+        menu.exec(QCursor.pos())
+
+    def _snap(self, keys: list) -> None:
+        from ..core.media import MediaError
+        try:
+            results, errors = self._media_service().snapshot_all(keys)
+        except Exception as exc:                    # noqa: BLE001 — never crash a photo
+            self.statusBar().showMessage(f"Photo failed: {exc}", 6000)
+            return
+        if results:
+            names = ", ".join(os.path.basename(r["relpath"]) for r in results)
+            self.statusBar().showMessage(f"📷 saved {names}", 5000)
+            self.events_dock.raise_()               # the tag is the reference
+        for key, reason in errors:
+            label = self.dashboard.image_sources().get(key, key)
+            self.statusBar().showMessage(f"📷 {label}: {reason}", 6000)
 
     # -- record --------------------------------------------------------------
     def _app_dir(self) -> str:
