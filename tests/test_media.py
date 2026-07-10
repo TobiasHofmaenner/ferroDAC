@@ -189,3 +189,78 @@ def test_unknown_panel_kind_is_preserved_not_fatal():
     assert set(dash._panels) == {"chart-1", "num-1"}   # both known kinds restored
     out = dash.export_layout()
     assert alien in out["panels"]                       # the alien survives verbatim
+
+
+# -- §9 stage c: documentation clips per Record span -----------------------------
+
+class _FakeCam:
+    """Duck-typed camera for ClipService: records start/stop calls; whether a
+    file 'lands' is controlled by the test (QMediaRecorder finalises async)."""
+
+    def __init__(self, data_id, name, enabled=True, streaming=True):
+        self.data_id, self.name = data_id, name
+        self.clips_enabled, self._streaming = enabled, streaming
+        self.started_path, self.stopped = None, False
+
+    def start_clip(self, path):
+        if not self._streaming:
+            return False
+        self.started_path = path
+        return True
+
+    def stop_clip(self):
+        self.stopped = True
+
+
+def _clip_rig(tmp_path, cams):
+    from ferrodac.core.media import ClipService
+    markers = MarkerModel()
+    svc = ClipService(devices=lambda: cams, markers=markers,
+                      media_dir=lambda: str(tmp_path / "media"),
+                      names=lambda: {})
+    return svc, markers
+
+
+def test_clips_start_only_on_opted_in_streaming_cameras(tmp_path):
+    cams = [_FakeCam("camA", "Bench"), _FakeCam("camB", "Chamber", enabled=False),
+            _FakeCam("camC", "Scope", streaming=False)]
+    svc, _ = _clip_rig(tmp_path, cams)
+    n = svc.on_record_start(time.time())
+    assert n == 1 and svc.running
+    assert cams[0].started_path and cams[0].started_path.endswith(".mp4")
+    assert "media" in cams[0].started_path
+    assert cams[1].started_path is None                # opted out
+    assert cams[2].started_path is None                # not streaming
+
+
+def test_finalize_tags_only_files_that_landed(tmp_path):
+    cams = [_FakeCam("camA", "Bench"), _FakeCam("camB", "Chamber")]
+    svc, markers = _clip_rig(tmp_path, cams)
+    t0 = time.time() - 30
+    svc.on_record_start(t0)
+    t1 = time.time()
+    entries = svc.on_record_stop(t1)
+    assert len(entries) == 2 and all(c.stopped for c in cams)
+    assert not svc.running
+    # camA's encoder "worked": its file landed; camB's never appeared
+    os.makedirs(os.path.dirname(cams[0].started_path), exist_ok=True)
+    with open(cams[0].started_path, "wb") as fh:
+        fh.write(b"\x00" * 2048)
+    tagged, failed = svc.finalize(entries)
+    assert len(tagged) == 1 and len(failed) == 1
+    assert failed[0]["key"] == "camB/frame"            # named, not silent
+
+    m = markers.get(tagged[0]["tag_id"])               # the span tag
+    assert m.kind == MEDIA and m.is_region
+    assert m.t == pytest.approx(t0) and m.t_end == pytest.approx(t1)
+    assert m.payload["format"] == "mp4"
+    assert m.payload["clip"] == "documentation"        # §9.1: labelled as such
+    assert m.label.startswith("🎬")
+    assert len(markers.visible()) == 1                 # no ghost tag for camB
+
+
+def test_double_start_is_ignored(tmp_path):
+    cams = [_FakeCam("camA", "Bench")]
+    svc, _ = _clip_rig(tmp_path, cams)
+    assert svc.on_record_start(time.time()) == 1
+    assert svc.on_record_start(time.time()) == 0       # stray second start: no-op

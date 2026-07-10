@@ -1976,9 +1976,48 @@ class MainWindow(QMainWindow):
 
     def _toggle_record(self):
         """Start/stop a recording — the lifecycle lives in RecordingController; here
-        we just flip the toolbar button to match."""
+        we just flip the toolbar button to match (and ride the clip service along,
+        §9 stage c: opted-in cameras record documentation clips over the span)."""
         state = self._recording.toggle()
         self.record_action.setText("■ Stop" if state == "started" else "● Record")
+        try:
+            if state == "started":
+                n = self._clip_service().on_record_start(time.time())
+                if n:
+                    self.statusBar().showMessage(f"🎬 {n} camera clip(s) recording", 4000)
+            else:
+                entries = self._clip_service().on_record_stop(time.time())
+                if entries:
+                    # QMediaRecorder finalises its file ASYNC — verify + tag after
+                    # a grace period so a failed encode never yields a ghost tag
+                    QTimer.singleShot(2000, lambda e=entries: self._finalize_clips(e))
+        except Exception:                              # noqa: BLE001 — clips must never
+            logging.getLogger("ferrodac").warning(     # break the recording lifecycle
+                "clip service failed", exc_info=True)
+
+    def _clip_service(self):
+        # ONE instance — it carries the running-clip state across start → stop
+        # (collaborators are late-bound callables, so project switches are fine)
+        svc = getattr(self, "_clips", None)
+        if svc is None:
+            from ..core.media import ClipService
+            svc = self._clips = ClipService(
+                devices=self.manager.active_devices,
+                markers=self.dashboard.markers,
+                media_dir=lambda: (self._project_mgr.active.media_dir
+                                   if self._project_mgr.active else ""),
+                names=self.dashboard.source_names,
+            )
+        return svc
+
+    def _finalize_clips(self, entries: list) -> None:
+        tagged, failed = self._clip_service().finalize(entries)
+        if tagged:
+            self.statusBar().showMessage(
+                f"🎬 saved {len(tagged)} clip(s) to media/", 5000)
+        for e in failed:
+            self.statusBar().showMessage(
+                f"🎬 {e['label']}: clip not written (encoder unavailable?)", 6000)
 
     def _run_recording_export(self, dest, sources, t0, t1, *, flush, exclusive,
                               on_ok, on_fail):

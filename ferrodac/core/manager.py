@@ -355,6 +355,12 @@ class DeviceManager(QObject):
     def active_descriptors(self) -> list[DeviceDescriptor]:
         return [d.describe() for d in self._active.values()]
 
+    def active_devices(self) -> list:
+        """The live Device OBJECTS (not descriptors) — for capability-probed
+        cross-cutting services (e.g. the media plane's clip recorder asking
+        cameras to start/stop, DESIGN §9). Read-only snapshot."""
+        return list(self._active.values())
+
     # -- helpers -------------------------------------------------------------
     def _run_async(self, fn: Callable[[], None], on_finished=None) -> None:
         worker = _OpWorker(fn)

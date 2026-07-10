@@ -126,6 +126,9 @@ class _CaptureController(QObject):
         self._cam = None
         self._session = None
         self._sink = None
+        self._recorder = None      # live QMediaRecorder while a clip runs
+        self._pending_clip_path = None   # handed over from start_clip (any thread;
+        #                                  atomic attr write, consumed on the GUI thread)
 
     @Slot()
     def begin(self) -> None:
@@ -155,7 +158,51 @@ class _CaptureController(QObject):
         self._cam.start()
 
     @Slot()
+    def begin_clip(self) -> None:
+        """Start recording a DOCUMENTATION clip (DESIGN §9.1 — compressed is
+        fine, it is context, not data) alongside the live sink. Best-effort:
+        any encoder/backend failure logs and leaves streaming untouched — the
+        caller verifies the FILE exists before tagging, so a failed clip can
+        never produce a tag pointing at nothing."""
+        path, self._pending_clip_path = self._pending_clip_path, None
+        if not path or self._session is None or self._recorder is not None:
+            return
+        try:
+            from qtpy.QtCore import QUrl
+            from qtpy.QtMultimedia import QMediaFormat, QMediaRecorder
+            rec = QMediaRecorder()
+            fmt = QMediaFormat(QMediaFormat.FileFormat.MPEG4)
+            fmt.setVideoCodec(QMediaFormat.VideoCodec.H264)
+            rec.setMediaFormat(fmt)
+            rec.setQuality(QMediaRecorder.Quality.NormalQuality)
+            rec.setOutputLocation(QUrl.fromLocalFile(path))
+            self._session.setRecorder(rec)
+            rec.record()
+            self._recorder = rec
+        except Exception:                              # noqa: BLE001 — no encoder /
+            self._recorder = None                      # backend quirk → no clip
+            import logging
+            logging.getLogger("ferrodac").warning(
+                "clip recording unavailable for %s", path, exc_info=True)
+
+    @Slot()
+    def end_clip(self) -> None:
+        rec, self._recorder = self._recorder, None
+        if rec is None:
+            return
+        try:
+            rec.stop()                                 # file finalises ASYNC —
+        except Exception:                              # callers verify on disk
+            pass                                       # after a grace period
+        if self._session is not None:
+            try:
+                self._session.setRecorder(None)
+            except Exception:
+                pass
+
+    @Slot()
     def end(self) -> None:
+        self.end_clip()                                # never leave a recorder running
         try:
             if self._sink is not None:
                 self._sink.videoFrameChanged.disconnect(self._on_frame)
@@ -202,7 +249,11 @@ class CameraDevice(BaseDevice):
                 name="Format",
                 choices=tuple((i, lbl) for i, (_f, lbl) in enumerate(formats)),
                 value=idx,
-            )
+            ),
+            # §9 stage c: opt-in per camera — ● Record also captures a
+            # documentation clip (media/*.mp4 + a span media tag)
+            Option(key="clips", name="Clip on ● Record",
+                   choices=((0, "Off"), (1, "On")), value=0),
         ]
         super().__init__(
             instance_id=instance_id,
@@ -278,3 +329,23 @@ class CameraDevice(BaseDevice):
         if self._controller is not None:
             QMetaObject.invokeMethod(self._controller, "end", Qt.QueuedConnection)
         self._emit = None
+
+    # -- documentation clips (§9 stage c; called by the media ClipService) ----
+    @property
+    def clips_enabled(self) -> bool:
+        return bool(self._option_values.get("clips", 0))
+
+    def start_clip(self, path: str) -> bool:
+        """Queue clip recording into `path` (best-effort — the service verifies
+        the file on disk before tagging). False = not streaming right now."""
+        if self._controller is None:
+            return False
+        self._controller._pending_clip_path = str(path)   # cross-binding safe
+        QMetaObject.invokeMethod(self._controller, "begin_clip",
+                                 Qt.QueuedConnection)     # (no Q_ARG in PySide6)
+        return True
+
+    def stop_clip(self) -> None:
+        if self._controller is not None:
+            QMetaObject.invokeMethod(self._controller, "end_clip",
+                                     Qt.QueuedConnection)
