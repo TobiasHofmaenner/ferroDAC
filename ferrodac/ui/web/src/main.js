@@ -69,6 +69,9 @@ const existingWaiters = new Map();
 const exportResults = new Map();        // recId → files from a fresh export-now
 const exportWaiters = new Map();
 let processorsCache = [];               // [{kind,label}] — the /proc macro's choices
+let camerasCache = [];                  // [{key,label}] — the /cam macro's choices
+const camerasWaiters = [];
+let awaitingCamShot = false;            // a /cam snapshot is being taken
 const processorsWaiters = [];           // resolvers awaiting a cold-cache fetch
 let awaitingProcInsert = false;         // a picked processor's source is being fetched
 let awaitingDevTable = false;           // the /dev instruments table is being built
@@ -345,6 +348,23 @@ function slashSource(context) {
         })),
       });
   }
+  if (cmd === "cam") {
+    return resolveMenu(
+      whenCache(() => camerasCache,
+                () => { if (bridge) bridge.requestCameras(); },
+                camerasWaiters),
+      (cams) => !cams.length ? null : {
+        from: w.from, filter: false,
+        options: cams.map((cam) => ({
+          label: "cam: " + cam.label, detail: "take photo", type: "function",
+          apply: (v, c, from, to) => {
+            v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/cam`
+            awaitingCamShot = true;
+            if (bridge) bridge.requestCameraShot(cam.key);        // inserted on arrival
+          },
+        })),
+      });
+  }
   if (cmd === "dev") {
     return {
       from: w.from, filter: false,
@@ -567,6 +587,9 @@ const SLASH_HELP = [
   { cmd: "/dev", title: "Insert an instruments table",
     desc: "Drops a lab-journal table of the devices behind your curated sources — "
         + "manufacturer, model, serial, firmware, calibration and asset tag." },
+  { cmd: "/cam", title: "Insert a fresh camera photo",
+    desc: "Pick a camera → takes a snapshot NOW (lossless, into the project's "
+        + "media/, with a 📷 tag on the timeline) and embeds it in the doc." },
   { cmd: "/meta", title: "Insert a report header",
     desc: "Drops a front-matter block — experiment, date(s), experimenter(s), "
         + "sample, instruments, recordings and the ferroDAC version." },
@@ -641,6 +664,18 @@ function connect() {
     bridge.processorsAvailable.connect((j) => {
       try { processorsCache = JSON.parse(j) || []; } catch (e) { processorsCache = []; }
       flushWaiters(processorsWaiters);          // wake a cold-cache /proc menu
+    });
+    bridge.camerasAvailable.connect((j) => {
+      try { camerasCache = JSON.parse(j) || []; } catch (e) { camerasCache = []; }
+      flushWaiters(camerasWaiters);             // wake a cold-cache /cam menu
+    });
+    bridge.camShot.connect((j) => {            // picked /cam → the snapshot landed
+      if (!awaitingCamShot) return;
+      awaitingCamShot = false;
+      let res = {};
+      try { res = JSON.parse(j) || {}; } catch (e) { /* fall through */ }
+      if (res.error) { status("📷 " + res.error); return; }
+      insertMarkdownBlock(`![${res.name}](${res.relpath})`);
     });
     bridge.processorSource.connect((kind, src, paperRel) => {  // picked /proc → insert
       if (!awaitingProcInsert) return;

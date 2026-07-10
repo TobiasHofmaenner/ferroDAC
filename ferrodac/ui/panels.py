@@ -2516,12 +2516,14 @@ class DocPanel(Panel):
     def set_doc_macros(self, on_list_recordings, on_export_recording,
                        on_list_recording_exports=None, on_list_processors=None,
                        on_processor_source=None, on_device_table=None,
-                       on_run_meta=None) -> None:
-        """Wire the editor macros (/rec, /proc, /dev, /meta) to the app's services."""
+                       on_run_meta=None, on_list_cameras=None,
+                       on_camera_shot=None) -> None:
+        """Wire the editor macros (/rec, /proc, /dev, /meta, /cam) to the app."""
         if self._view is not None:
             self._view.set_macros(on_list_recordings, on_export_recording,
                                   on_list_recording_exports, on_list_processors,
-                                  on_processor_source, on_device_table, on_run_meta)
+                                  on_processor_source, on_device_table, on_run_meta,
+                                  on_list_cameras, on_camera_shot)
 
     def state(self) -> dict:
         return {"path": self._path} if self._path else {}

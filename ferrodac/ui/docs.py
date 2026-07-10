@@ -138,6 +138,12 @@ class DocBridge(QObject):
     runMeta = Signal(str)                # (markdown)
     runMetaRequested = Signal()
 
+    # Editor macro (/cam): snapshot a camera into the doc (§9). Qt → JS / JS → Qt:
+    camerasAvailable = Signal(str)       # (json [{key, label}])
+    camShot = Signal(str)                # (json {name, relpath} | {error})
+    camerasRequested = Signal()
+    camShotRequested = Signal(str)       # (source key)
+
     # Save-to-PDF: JS asks, Qt prints the rendered page, then reports a status line.
     pdfRequested = Signal()              # JS → Qt
     pdfExported = Signal(str)            # Qt → JS (a status message; "" clears)
@@ -167,6 +173,14 @@ class DocBridge(QObject):
     @Slot()
     def requestRecordings(self) -> None:
         self.recordingsRequested.emit()
+
+    @Slot()
+    def requestCameras(self) -> None:
+        self.camerasRequested.emit()
+
+    @Slot(str)
+    def requestCameraShot(self, key: str) -> None:
+        self.camShotRequested.emit(key)
 
     @Slot(str)
     def requestRecordingExports(self, rec_id: str) -> None:
@@ -233,6 +247,8 @@ class DocServices:
     processor_source: Callable = field(default=lambda *a: "")    # (kind) -> source
     device_table: Callable = field(default=lambda: "")           # -> instruments markdown
     run_meta: Callable = field(default=lambda: "")               # -> report front-matter
+    list_cameras: Callable = field(default=lambda: [])           # -> [{key,label}] (§9 /cam)
+    camera_shot: Callable = field(default=lambda *a: None)       # (key) -> {name,abspath}|{error}
 
 
 class DocView(QWidget):
@@ -317,6 +333,8 @@ class DocView(QWidget):
         self.bridge.exportRequested.connect(self._export_recording)
         self.bridge.processorsRequested.connect(self._push_processors)
         self.bridge.procSourceRequested.connect(self._send_processor_source)
+        self.bridge.camerasRequested.connect(self._push_cameras)
+        self.bridge.camShotRequested.connect(self._send_camera_shot)
         self.bridge.deviceTableRequested.connect(self._send_device_table)
         self.bridge.runMetaRequested.connect(self._send_run_meta)
         self.bridge.pdfRequested.connect(self._export_pdf)
@@ -475,6 +493,7 @@ class DocView(QWidget):
         self._js_ready = True
         self._push_recordings()               # seed the /rec macro's cache
         self._push_processors()               # …and /proc's
+        self._push_cameras()                  # …and /cam's
         if self._pending_collab:              # a pop-out asked to collab before JS was up
             self._pending_collab = False
             self._start_collab()
@@ -483,7 +502,8 @@ class DocView(QWidget):
     def set_macros(self, on_list_recordings, on_export_recording,
                    on_list_recording_exports=None, on_list_processors=None,
                    on_processor_source=None, on_device_table=None,
-                   on_run_meta=None) -> None:
+                   on_run_meta=None, on_list_cameras=None,
+                   on_camera_shot=None) -> None:
         """Wire the editor macros to the app's services (used by doc panels created via
         the Add menu or a layout, which can't get the callbacks at construction)."""
         self.services.list_recordings = on_list_recordings
@@ -493,9 +513,14 @@ class DocView(QWidget):
         self.services.processor_source = on_processor_source
         self.services.device_table = on_device_table
         self.services.run_meta = on_run_meta
+        if on_list_cameras is not None:
+            self.services.list_cameras = on_list_cameras
+        if on_camera_shot is not None:
+            self.services.camera_shot = on_camera_shot
         if self._js_ready:                    # warm the caches if the page is already up
             self._push_recordings()
             self._push_processors()
+            self._push_cameras()
 
     def _push_recordings(self) -> None:
         if self.services.list_recordings is None:
@@ -566,6 +591,29 @@ class DocView(QWidget):
     def _on_pdf_finished(self, path: str, ok: bool) -> None:
         name = os.path.basename(path or getattr(self, "_pdf_path", "") or "PDF")
         self.bridge.pdfExported.emit(f"saved {name}" if ok else "PDF export failed")
+
+    def _push_cameras(self) -> None:
+        try:
+            cams = self.services.list_cameras() or []
+        except Exception:                     # noqa: BLE001
+            cams = []
+        self.bridge.camerasAvailable.emit(json.dumps(cams))
+
+    def _send_camera_shot(self, key: str) -> None:
+        """/cam picked a camera: snapshot NOW (file lands in media/ + a media tag
+        like the toolbar 📷) and hand JS the doc-relative path to embed."""
+        try:
+            res = self.services.camera_shot(key)
+        except Exception as exc:              # noqa: BLE001 — surface, never crash JS
+            res = {"error": str(exc)}
+        if not isinstance(res, dict) or not res.get("abspath"):
+            err = (res or {}).get("error", "no snapshot") if isinstance(res, dict)                 else "no snapshot"
+            self.bridge.camShot.emit(json.dumps({"error": err}))
+            return
+        rel = os.path.relpath(res["abspath"], self._dir or os.getcwd())
+        self.bridge.camShot.emit(json.dumps(
+            {"name": res.get("name") or os.path.basename(res["abspath"]),
+             "relpath": rel.replace(os.sep, "/")}))
 
     def _send_processor_source(self, kind: str) -> None:
         src, paper = "", None

@@ -566,6 +566,8 @@ class MainWindow(QMainWindow):
             processor_source=self._processor_source,
             device_table=self._device_journal_markdown,
             run_meta=self._run_meta_markdown,
+            list_cameras=self._doc_list_cameras,
+            camera_shot=self._doc_camera_shot,
             saved=lambda: self._schedule_project_commit("Edited documents")))
         self.docs_dock.setWidget(self._docs_view)
         self._open_active_doc()
@@ -632,7 +634,9 @@ class MainWindow(QMainWindow):
                                      self._list_processors,
                                      self._processor_source,
                                      self._device_journal_markdown,
-                                     self._run_meta_markdown)
+                                     self._run_meta_markdown,
+                                     self._doc_list_cameras,
+                                     self._doc_camera_shot)
 
     def _active_readme(self) -> str | None:
         """The active project's README.md path, bootstrapping a starter if missing."""
@@ -817,6 +821,24 @@ class MainWindow(QMainWindow):
                 "Photo file not on this machine (media isn't synced in v1)", 5000)
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _doc_list_cameras(self) -> list:
+        """/cam macro: the online cameras as [{key, label}]."""
+        return [{"key": k, "label": lbl}
+                for k, lbl in sorted(self.dashboard.image_sources().items(),
+                                     key=lambda kv: kv[1])]
+
+    def _doc_camera_shot(self, key: str) -> dict:
+        """/cam macro picked a camera: snapshot through the SAME path as the
+        toolbar 📷 (file in media/ + a media tag), return {name, abspath} for the
+        doc-relative embed — or {error} (shown in the editor status line)."""
+        from ..core.media import MediaError
+        try:
+            res = self._media_service().snapshot(key)
+        except MediaError as exc:
+            return {"error": str(exc)}
+        label = self.dashboard.image_sources().get(key, key)
+        return {"name": f"📷 {label}", "abspath": res["path"]}
 
     def _take_photo(self):
         """Toolbar 📷: one camera → snap it; several → a menu of each plus
