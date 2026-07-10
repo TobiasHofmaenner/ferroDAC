@@ -1106,12 +1106,13 @@ class EventsPanel(QWidget):
 
     def __init__(self, markers, clock, on_zoom=None, on_export_csv=None,
                  on_export_plots=None, on_lens=None, projects_provider=None,
-                 on_jump=None, parent=None):
+                 on_jump=None, on_open_media=None, parent=None):
         super().__init__(parent)
         self.markers = markers
         self.clock = clock
         self._on_zoom = on_zoom
         self._on_jump = on_jump                          # jump the timeline to a tag
+        self._on_open_media = on_open_media              # open a media tag's photo
         self._on_export_csv = on_export_csv
         self._on_export_plots = on_export_plots
         self._on_lens = on_lens
@@ -1218,6 +1219,12 @@ class EventsPanel(QWidget):
             proj.clicked.connect(
                 lambda _=False, mid=m.id, b=None: self._assign_menu(mid, self.sender()))
             top.addWidget(proj)
+        if m.kind == "media" and self._on_open_media is not None:
+            show = QToolButton()
+            show.setText("🖼")
+            show.setToolTip("Open the photo")
+            show.clicked.connect(lambda _=False, mid=m.id: self._on_open_media(mid))
+            top.addWidget(show)
         edit = QToolButton()
         edit.setText("✎")
         edit.clicked.connect(lambda _=False, mid=m.id: self._edit(mid))

@@ -388,8 +388,10 @@ class TimelineWindow(QtWidgets.QMainWindow):
     Live is just the head at now. Its own charts are a preview of the resolver."""
 
     def __init__(self, resolver, store, time_context, parent=None, names=None,
-                 sources_fn=None, lens_fn=None, reads=None):
+                 sources_fn=None, lens_fn=None, reads=None, markers=None):
         super().__init__(parent)
+        self._markers = markers              # MarkerModel | None — media tags on
+        #                                      the ribbon (scrub-to-photo, §9b)
         self._reads = reads                  # async resolver facade (§21.3); the
         #                                      coverage tick + preview queries go
         #                                      through it so they never block paint.
@@ -465,10 +467,42 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._live_timer.start()
         # hub coverage arrives async (the init seed above was local-only)
         QtCore.QTimer.singleShot(0, self._refresh_coverage)
+        self._marker_unsub = None
+        if self._markers is not None:
+            self._markers.changed.connect(self._sync_media_marks)
+            self._marker_unsub = lambda: self._markers.changed.disconnect(
+                self._sync_media_marks)
+            self._sync_media_marks()
         # debounce the live PREVIEW during a drag (cheap downsampled query); the
         # heavy main re-stream only fires on release (windowChanged).
         self._preview_timer = QtCore.QTimer(self, interval=40, singleShot=True)
         self._preview_timer.timeout.connect(self._do_preview)
+
+    def _sync_media_marks(self) -> None:
+        """Media tags (kind="media") as thin photo marks on the ribbon, so a
+        scrubbing user sees WHERE photos exist; the photo tile panel shows the
+        image for the head position. Diff-free redraw — media tags are few."""
+        if not _alive(self.ribbon):
+            return
+        from ..core.tag import MEDIA
+        for ln in getattr(self.ribbon, "_media_lines", ()):
+            try:
+                self.ribbon.removeItem(ln)
+            except Exception:                # noqa: BLE001 — teardown race
+                pass
+        lines = []
+        for m in self._markers.visible():
+            if m.kind != MEDIA:
+                continue
+            ln = pg.InfiniteLine(pos=m.t, angle=90, movable=False,
+                                 pen=pg.mkPen("#4dabf7", width=1,
+                                              style=QtCore.Qt.DotLine),
+                                 label="📷", labelOpts={"position": 0.94,
+                                                        "color": "#4dabf7"})
+            ln.setZValue(15)
+            self.ribbon.addItem(ln)
+            lines.append(ln)
+        self.ribbon._media_lines = lines
 
     def _name(self, key):
         return self._names.get(key) or _label(key)
@@ -889,6 +923,11 @@ class TimelineWindow(QtWidgets.QMainWindow):
             self._tc_unsub()
         except Exception:
             pass
+        if self._marker_unsub is not None:
+            try:
+                self._marker_unsub()
+            except Exception:
+                pass
         super().closeEvent(ev)
 
     def _refresh(self):

@@ -35,11 +35,13 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+import time
+
 import numpy as np
 import pyqtgraph as pg
 
 from ..core import units
-from ..core.markers import RECORDING
+from ..core.markers import MEDIA, RECORDING
 from ..core.plotbuffer import CurveBuffer
 from ..core.trace import Trace
 from ..analysis.library import DEFAULT_GASES, LIBRARY
@@ -1745,7 +1747,12 @@ class VideoView(QWidget):
         super().__init__(parent)
         self._img: QImage | None = None
         self._overlays: list = []     # (text, roi, color, ok) — detector regions
+        self._placeholder_text = "no video — route a camera here"
         self.setMinimumSize(160, 120)
+
+    def set_placeholder(self, text: str) -> None:
+        self._placeholder_text = text
+        self.update()
 
     def set_image(self, img) -> None:
         self._img = img
@@ -1787,7 +1794,7 @@ class VideoView(QWidget):
         p.fillRect(self.rect(), QColor("#0b0e13"))
         if self._img is None or self._img.isNull():
             p.setPen(QColor("#5b6b7f"))
-            p.drawText(self.rect(), Qt.AlignCenter, "no video — route a camera here")
+            p.drawText(self.rect(), Qt.AlignCenter, self._placeholder_text)
             return
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.drawImage(self.content_rect(), self._img)
@@ -2525,6 +2532,86 @@ class DocPanel(Panel):
             self.open(path)
 
 
+class PhotoTilePanel(Widget):
+    """The photo tile (DESIGN §9 stage b): shows the newest media snapshot AT OR
+    BEFORE the shared time window's head — so a parked/scrubbing timeline
+    surfaces the time-correlated photo, and LIVE simply shows the latest one.
+    Fed by the tag substrate (kind="media" markers), never the data bus: it has
+    no data port. The file is resolved through the injected media provider
+    (None → the reference is from another box; show the label only)."""
+
+    kind = "imagetile"
+    routable = False
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(2)
+        self.view = VideoView()
+        self.view.set_placeholder("no photo yet — 📷 takes one")
+        self._caption = QLabel("")
+        self._caption.setStyleSheet("color:#7f8a99; font-size:10px;")
+        self._caption.setAlignment(Qt.AlignHCenter)
+        lay.addWidget(self.view, 1)
+        lay.addWidget(self._caption)
+        self._markers = None
+        self._resolve = None                 # fn(marker) -> abs path | None
+        self._head = None                    # shared window head (None = live/latest)
+        self._shown = None                   # marker id currently displayed
+
+    # -- wiring (Widget contract) ---------------------------------------------
+    def attach_session(self, clock, markers) -> None:
+        self._markers = markers
+        markers.changed.connect(self._refresh)
+        self._refresh()
+
+    def set_media_provider(self, fn) -> None:
+        self._resolve = fn
+        self._shown = None                   # a new project → re-resolve
+        self._refresh()
+
+    def set_window(self, t0: float, t1: float) -> None:
+        """The shared timeline window moved (live tick / scrub / park): follow
+        its head so scrubbing surfaces the photo of that moment."""
+        self._head = float(t1)
+        self._refresh()
+
+    # -- selection + render ------------------------------------------------------
+    def _pick(self):
+        """The newest media marker at-or-before the head (ties → newest id wins
+        deterministically via sort stability)."""
+        if self._markers is None:
+            return None
+        best = None
+        for m in self._markers.visible():
+            if m.kind != MEDIA:
+                continue
+            if self._head is not None and m.t > self._head + 1e-9:
+                continue
+            if best is None or m.t >= best.t:
+                best = m
+        return best
+
+    def _refresh(self) -> None:
+        m = self._pick()
+        if m is None:
+            if self._shown is not None:
+                self._shown = None
+                self.view.set_image(None)
+                self._caption.setText("")
+            return
+        if m.id == self._shown:
+            return                            # already on screen — no disk I/O
+        path = self._resolve(m) if self._resolve is not None else None
+        img = QImage(path) if path else QImage()
+        self.view.set_image(None if img.isNull() else img)
+        when = time.strftime("%H:%M:%S", time.localtime(m.t))
+        self._caption.setText(f"{m.label} · {when}" if not img.isNull()
+                              else f"{m.label} · {when} (file on another box)")
+        self._shown = m.id
+
+
 # Built-ins register into the shared WIDGET_TYPES registry; PANEL_TYPES is that same
 # dict, so plugin widgets (which call register_widget) appear in the Add menu too.
 WIDGET_TYPES.update({
@@ -2540,5 +2627,6 @@ WIDGET_TYPES.update({
     "button": ("Button", ButtonPanel),
     "toggle": ("Toggle", TogglePanel),
     "doc": ("Document", DocPanel),
+    "imagetile": ("Photo tile", PhotoTilePanel),
 })
 PANEL_TYPES = WIDGET_TYPES

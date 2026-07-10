@@ -95,6 +95,12 @@ class Widget(QWidget):
         drawn curve at a recorded-data gap instead of drawing a line across it. Only
         the chart widget uses it; display-only. Default: ignore."""
 
+    def set_media_provider(self, fn) -> None:
+        """Give a media-aware widget a resolve(marker) → abs-path|None provider for
+        kind="media" tags (DESIGN §9 — the file lives in the project's media/; a
+        hub-synced reference whose file is on another box resolves to None). Only
+        the photo tile uses it. Default: ignore."""
+
     # -- data lifecycle (the Dashboard + replay drive these) -----------------
     def add_source(self, key: str, source) -> None: ...
 

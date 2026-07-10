@@ -122,3 +122,70 @@ def test_resolve_stays_inside_the_project(tmp_path):
     m_evil = marker_from_dict({**marker_to_dict(m), "id": "x3",
                                "payload": {"file": "../../etc/passwd"}})
     assert MediaService.resolve(m_evil, str(tmp_path)) is None
+
+
+# -- §9 stage b: the photo tile + forward-compat layout guard --------------------
+
+def test_photo_tile_follows_the_time_window(tmp_path, qapp=None):
+    """The tile shows the newest media snapshot AT OR BEFORE the shared window's
+    head — scrubbing surfaces the time-correlated photo; live shows the latest."""
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.core.markers import SessionClock
+    from ferrodac.core.media import MediaService
+    from ferrodac.ui.panels import PhotoTilePanel
+
+    svc, markers = _service(tmp_path, {})
+    t0 = time.time()
+    readings = {}
+    for i, color in enumerate(("#102030", "#405060", "#708090")):
+        readings["cam/frame"] = _reading("cam/frame", _frame(color=color),
+                                         t0 - 30 + i * 10)     # t0-30, -20, -10
+        svc._latest = lambda r=dict(readings): r
+        # bypass staleness for the two older frames (they were live "back then")
+        import ferrodac.core.media as media_mod
+        real_time = media_mod.time.time
+        media_mod.time.time = lambda: t0 - 30 + i * 10 + 0.1
+        try:
+            svc.snapshot("cam/frame")
+        finally:
+            media_mod.time.time = real_time
+    tags = sorted((m for m in markers.visible()), key=lambda m: m.t)
+    assert len(tags) == 3
+
+    tile = PhotoTilePanel()
+    tile.set_media_provider(lambda m: MediaService.resolve(m, str(tmp_path)))
+    tile.attach_session(SessionClock(), markers)
+    tile.set_window(t0 - 60, t0 - 25)          # head between photo 1 and 2
+    assert tile._shown == tags[0].id
+    tile.set_window(t0 - 60, t0 - 15)          # head between photo 2 and 3
+    assert tile._shown == tags[1].id
+    tile.set_window(t0 - 60, t0)               # head at now → latest
+    assert tile._shown == tags[2].id
+    tile.set_window(t0 - 60, t0 - 40)          # head BEFORE any photo → blank
+    assert tile._shown is None
+
+
+def test_unknown_panel_kind_is_preserved_not_fatal():
+    """Forward compat: a layout from a newer build (e.g. with an imagetile) must
+    restore everything it CAN, keep the unknown entry verbatim, and re-emit it
+    on export — previously the KeyError aborted the whole session restore."""
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.core.engine import Engine
+    from ferrodac.core.manager import DeviceManager
+    from ferrodac.ui.workspace import Dashboard, WorkspaceArea
+
+    engine = Engine()
+    manager = DeviceManager([], engine=engine, registry=None)
+    dash = Dashboard(WorkspaceArea(), engine, manager)
+    alien = {"id": "future-1", "kind": "holo-display", "title": "From the future",
+             "state": {"answer": 42}}
+    dash.import_layout({"panels": [
+        {"id": "chart-1", "kind": "chart", "title": "Chart", "state": {}},
+        alien,
+        {"id": "num-1", "kind": "numeric", "title": "Numeric", "state": {}},
+    ], "routes": {}})
+    assert set(dash._panels) == {"chart-1", "num-1"}   # both known kinds restored
+    out = dash.export_layout()
+    assert alien in out["panels"]                       # the alien survives verbatim

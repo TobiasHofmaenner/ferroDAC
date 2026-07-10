@@ -233,6 +233,7 @@ class MainWindow(QMainWindow):
         self._sigma_refresh.start()
         self.dashboard.set_sigma_provider(self._chart_sigma)
         self.dashboard.set_gap_provider(self._chart_coverage)
+        self.dashboard.set_media_provider(self._resolve_media)   # photo tile (§9)
         self.dashboard.on_chart_zoom = self.chart_feed.on_chart_zoom   # zoom → re-query (Fix B)
 
         # recording lifecycle (start/stop span → auto-export, crash recovery) lives
@@ -314,7 +315,7 @@ class MainWindow(QMainWindow):
             self.dashboard.markers, self.dashboard.clock,
             on_zoom=self._zoom_recording, on_export_csv=self._export_recording_csv,
             on_export_plots=self._export_plots, on_lens=self._set_tag_lens_all,
-            on_jump=self._jump_to_tag,
+            on_jump=self._jump_to_tag, on_open_media=self._open_media_tag,
             projects_provider=lambda: [(p.id, p.name)
                                        for p in self._project_mgr.projects()]
             if getattr(self, "_project_mgr", None) else [])
@@ -515,7 +516,8 @@ class MainWindow(QMainWindow):
                                  names=self._timeline_sources(),
                                  sources_fn=self._timeline_sources,
                                  lens_fn=self._curated_source_keys,
-                                 reads=self.reads)
+                                 reads=self.reads,
+                                 markers=self.dashboard.markers)
             win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
             self._timeline_win = win
         self._timeline_win.show()
@@ -795,6 +797,26 @@ class MainWindow(QMainWindow):
                                if self._project_mgr.active else ""),
             names=self.dashboard.source_names,
         )
+
+    def _resolve_media(self, marker):
+        """resolve(marker) → abs path|None against the ACTIVE project — the one
+        provider the photo tile and the Events dock share."""
+        from ..core.media import MediaService
+        proj = self._project_mgr.active if getattr(self, "_project_mgr", None) else None
+        if proj is None or marker is None:
+            return None
+        return MediaService.resolve(marker, proj.path)
+
+    def _open_media_tag(self, mid: str) -> None:
+        """Events dock 🖼: open the photo in the system viewer."""
+        from qtpy.QtCore import QUrl
+        from qtpy.QtGui import QDesktopServices
+        path = self._resolve_media(self.dashboard.markers.get(mid))
+        if path is None:
+            self.statusBar().showMessage(
+                "Photo file not on this machine (media isn't synced in v1)", 5000)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _take_photo(self):
         """Toolbar 📷: one camera → snap it; several → a menu of each plus

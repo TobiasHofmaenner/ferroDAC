@@ -22,7 +22,7 @@ from qtpy.QtCore import QObject, Signal
 # Re-export the Qt-free entity + constants so `from ..core.markers import …`
 # (Marker, RECORDING, ORIGIN_*, …) keeps resolving exactly as before.
 from .tag import (  # noqa: F401
-    TAG, RECORDING, REC_START, REC_STOP,
+    TAG, RECORDING, MEDIA, REC_START, REC_STOP,
     ORIGIN_USER, ORIGIN_DEVICE, ORIGIN_PROCESSOR, ORIGIN_SYSTEM,
     SEVERITIES, Marker, Tag, color_for, marker_from_dict, marker_to_dict,
     _KIND_LABEL, _SEVERITY_COLOR, _KIND_COLOR)

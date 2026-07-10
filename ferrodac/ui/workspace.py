@@ -409,6 +409,7 @@ class Dashboard(QObject):
                                  self.processor, self.processors_for)
         panel.set_sigma_provider(getattr(self, "_sigma_provider", None))
         panel.set_gap_provider(getattr(self, "_gap_provider", None))
+        panel.set_media_provider(getattr(self, "_media_provider", None))
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -711,6 +712,8 @@ class Dashboard(QObject):
         # NOTE: markers/tags are NOT in the layout — they're GLOBAL (one catalog,
         # persisted to tags.json, filtered by the active project lens). A layout is
         # just the dashboard view; switching projects must not swap the tags.
+        panels += list(getattr(self, "_foreign_panels", ()))   # round-trip unknown
+        #                                                         kinds untouched
         out = {"panels": panels, "detectors": detectors, "processors": processors,
                "routes": routes, "default_sink": self.default_sink_id}
         if self.export_default:
@@ -743,7 +746,16 @@ class Dashboard(QObject):
         # catalog intact. (One-time migration of legacy embedded markers is done by
         # the app at startup, not here.)
         self.export_default = data.get("export_default") or None
+        self._foreign_panels = []
         for p in data.get("panels", []):
+            if p.get("kind") not in PANEL_TYPES:
+                # a layout from a NEWER build (or a missing plugin): skipping used
+                # to hard-abort the whole restore (KeyError) and the entry was
+                # lost on the next autosave — preserve it verbatim instead
+                log.warning("unknown panel kind %r — preserved, not shown",
+                            p.get("kind"))
+                self._foreign_panels.append(p)
+                continue
             pid = self.add_panel(p["kind"], pid=p["id"], title=p.get("title"))
             panel = self._panels.get(pid)
             if panel is not None and p.get("state") and hasattr(panel, "set_state"):
@@ -968,6 +980,13 @@ class Dashboard(QObject):
         self._gap_provider = fn
         for panel in self._panels.values():
             panel.set_gap_provider(fn)
+
+    def set_media_provider(self, fn) -> None:
+        """Wire the media resolve(marker) → path provider (DESIGN §9) into every
+        panel, existing and future (the photo tile consumes it)."""
+        self._media_provider = fn
+        for panel in self._panels.values():
+            panel.set_media_provider(fn)
 
     def sink_ports(self) -> list:
         return sorted(self._sinks.values(), key=lambda p: (p.kind != "device", p.name))
