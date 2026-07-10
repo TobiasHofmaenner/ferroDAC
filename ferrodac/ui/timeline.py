@@ -422,7 +422,13 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._syncing = False                           # guard tc⇄ribbon feedback
 
         self._sources, self._names = self._available()
-        self._cover = {k: resolver.coverage(k) for k in self._sources}
+        # Seed coverage from LOCAL tiers only — this runs on the GUI thread at
+        # open, and the full resolver walks the hub tier's GetCoverage gRPC per
+        # source (a cold cache on a hub project = N round-trips = a multi-second
+        # freeze, watchdog 2026-07-10). The async refresh scheduled below fills
+        # in hub coverage through ReadService moments after the window is up.
+        self._cover = {k: resolver.coverage(k, local_only=True)
+                       for k in self._sources}
         now = time.time()
         lo = min((c[0][0] for c in self._cover.values() if c), default=now - 600)
         self.now = now
@@ -457,6 +463,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._live_timer = QtCore.QTimer(self, interval=500)
         self._live_timer.timeout.connect(self._live_tick)
         self._live_timer.start()
+        # hub coverage arrives async (the init seed above was local-only)
+        QtCore.QTimer.singleShot(0, self._refresh_coverage)
         # debounce the live PREVIEW during a drag (cheap downsampled query); the
         # heavy main re-stream only fires on release (windowChanged).
         self._preview_timer = QtCore.QTimer(self, interval=40, singleShot=True)
