@@ -38,7 +38,7 @@ hiddenimports = collect_submodules("ferrodac")
 # the sim devices) were never bundled and the app saw zero devices. List the
 # builtin drivers explicitly so they're guaranteed in the frozen app regardless.
 hiddenimports += [f"ferrodac.devices.{m}"
-                  for m in ("camera", "fake", "keithley6221", "qms200",
+                  for m in ("camera", "fake", "keithley6221", "lsa31", "qms200",
                             "shelly_cloud", "tpg256a", "uncertainty_specs")]
 # ^ keep this list in sync with ferrodac/devices/ — the Linux smoke build
 #   (2026-07-09) showed shelly_cloud silently missing from the frozen app.
