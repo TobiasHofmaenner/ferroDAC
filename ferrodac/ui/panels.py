@@ -42,7 +42,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from ..core import units
-from ..core.markers import MEDIA, RECORDING
+from ..core.markers import MEDIA, RECORDING, is_movable
 from ..core.plotbuffer import CurveBuffer
 from ..core.trace import Trace
 from ..analysis.library import DEFAULT_GASES, LIBRARY
@@ -418,7 +418,7 @@ class ChartPanel(Panel):
         x = self._x(m.t)
         if entry is None:
             line = pg.InfiniteLine(
-                pos=x, angle=90, movable=True,
+                pos=x, angle=90, movable=is_movable(m),
                 pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
                 label=m.label,
                 labelOpts={"position": 0.92, "color": m.color,
@@ -444,7 +444,7 @@ class ChartPanel(Panel):
         x0, x1 = self._x(m.t), self._x(m.t_end)
         if entry is None:
             reg = pg.LinearRegionItem(
-                values=[x0, x1], movable=True,
+                values=[x0, x1], movable=is_movable(m),
                 brush=pg.mkBrush(255, 107, 107, 38),
                 pen=pg.mkPen(m.color, width=1, style=Qt.DashLine))
             reg.setZValue(-10)
@@ -1365,7 +1365,7 @@ class WaterfallPanel(Panel):
                     if item is not None:
                         self.plot.removeItem(item)
                     item = pg.LinearRegionItem(
-                        orientation="horizontal", movable=True,   # drag to retime the span
+                        orientation="horizontal", movable=is_movable(m),  # drag to retime
                         brush=pg.mkBrush(m.color[0], m.color[1], m.color[2], 40)
                         if isinstance(m.color, (tuple, list)) else pg.mkBrush(77, 171, 247, 40))
                     item.setZValue(10)
@@ -1384,7 +1384,7 @@ class WaterfallPanel(Panel):
                     if item is not None:
                         self.plot.removeItem(item)
                     item = pg.InfiniteLine(
-                        angle=0, movable=True,                 # drag to retime the tag
+                        angle=0, movable=is_movable(m),        # drag to retime the tag
                         pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
                         label=m.label, labelOpts={"color": m.color,
                                                   "fill": (10, 14, 19, 180)})
@@ -1660,7 +1660,7 @@ class SpectrumWaterfallPanel(Panel):
                     br = (m.color if isinstance(m.color, (tuple, list))
                           else (77, 171, 247))
                     item = pg.LinearRegionItem(
-                        orientation="horizontal", movable=True,   # drag to retime the span
+                        orientation="horizontal", movable=is_movable(m),  # drag to retime
                         brush=pg.mkBrush(br[0], br[1], br[2], 40))
                     item.setZValue(10)
                     item.sigRegionChangeFinished.connect(
@@ -1678,7 +1678,7 @@ class SpectrumWaterfallPanel(Panel):
                     if item is not None:
                         self.p_wf.removeItem(item)
                     item = pg.InfiniteLine(
-                        angle=0, movable=True,                 # drag to retime the tag
+                        angle=0, movable=is_movable(m),        # drag to retime the tag
                         pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
                         label=m.label, labelOpts={"color": m.color,
                                                   "fill": (10, 14, 19, 180)})

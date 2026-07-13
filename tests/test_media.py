@@ -538,3 +538,56 @@ def test_capture_service_disk_floor_pauses_video(tmp_path, monkeypatch):
     monkeypatch.setattr(st, "free_gb", lambda: 100.0)  # recovered
     svc.reconcile()
     assert not svc._paused_disk and set(svc._active) == {"always"}
+
+
+# -- §9.3 phase 2: segment_at (scrub preview kernel) + media_files_in (export) ----
+
+def test_segment_at_point_query(tmp_path):
+    from ferrodac.core.videostore import VideoStore
+    st = VideoStore(str(tmp_path / "video"))
+    base = 1_700_000_000.0
+    for i in range(3):                                 # [0,120],[120,240],[240,360]
+        _write_seg(st, "camA", base + i * 120, base + (i + 1) * 120)
+    r = st.segment_at("camA", base + 130)              # inside segment 1
+    assert r is not None and abs(r["offset"] - 10.0) < 1e-6
+    assert r["path"].endswith(f"seg_{int((base + 120) * 1000)}.mp4")
+    assert st.segment_at("camA", base + 240)["offset"] < 1e-6   # boundary → later seg
+    # a gap: drop the middle segment, ask inside the hole
+    st2 = VideoStore(str(tmp_path / "v2"))
+    _write_seg(st2, "camB", base, base + 120)
+    _write_seg(st2, "camB", base + 600, base + 720)    # 8-min gap
+    assert st2.segment_at("camB", base + 300) is None  # in the gap
+    assert st2.segment_at("camB", base - 5) is None     # before coverage
+    assert st2.segment_at("camB", base + 50)["offset"] == pytest.approx(50.0)
+
+
+def test_media_files_in_enumerates_span_media(tmp_path):
+    from ferrodac.core.media import MediaService
+    proj = tmp_path / "proj"
+    (proj / "media").mkdir(parents=True)
+    for n, data in (("a.png", b"P"), ("c.part1.mp4", b"C1"), ("c.part2.mp4", b"C2")):
+        (proj / "media" / n).write_bytes(data)
+    base = 1_700_000_000.0
+    tags = [
+        {"kind": "media", "t": base + 5, "t_end": None, "deleted": False,
+         "payload": {"file": "media/a.png", "format": "png", "source": "cam/frame"}},
+        {"kind": "media", "t": base + 2, "t_end": base + 8, "deleted": False,
+         "payload": {"file": "media/c.part1.mp4",
+                     "files": ["media/c.part1.mp4", "media/c.part2.mp4"],
+                     "format": "mp4", "source": "cam/frame", "rec_mid": "R1"}},
+        {"kind": "media", "t": base + 999, "payload": {"file": "media/a.png", "format": "png"}},
+        {"kind": "media", "t": base + 3, "deleted": True,
+         "payload": {"file": "media/a.png", "format": "png"}},
+        {"kind": "media", "t": base + 3, "payload": {"file": "../../etc/passwd", "format": "png"}},
+        {"kind": "media", "t": base + 3, "payload": {"file": "media/gone.png", "format": "png"}},
+        {"kind": "tag", "t": base + 3, "payload": {}},
+    ]
+    ents = MediaService.media_files_in(tags, base, base + 10, str(proj))
+    assert sorted(e["kind"] for e in ents) == ["clip", "photo"]     # only the 2 valid
+    clip = next(e for e in ents if e["kind"] == "clip")
+    assert len(clip["files"]) == 2 and clip["rec_mid"] == "R1"
+    assert clip["t_end"] == pytest.approx(base + 8)
+    photo = next(e for e in ents if e["kind"] == "photo")
+    assert photo["t_end"] is None and len(photo["files"]) == 1
+    # out-of-span, deleted, path-escape, and missing-file all excluded
+    assert len(ents) == 2

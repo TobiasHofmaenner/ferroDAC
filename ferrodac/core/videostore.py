@@ -99,6 +99,22 @@ class VideoStore:
                 for e in self._load(cam_uuid)
                 if e["t1"] > t0 and e["t0"] < t1]
 
+    def segment_at(self, cam_uuid: str, t: float) -> "dict | None":
+        """POINT query for the scrub preview (§9.3 phase 2): the segment whose
+        [t0,t1] contains instant `t`, as {"path", "offset"} where offset is the
+        seek position within the file (seconds). None when `t` lands in a gap or
+        outside coverage. If two segments touch at a rotation boundary the later
+        one wins (its offset ≈ 0), matching 'newest at-or-covering the head'."""
+        d = self.cam_dir(cam_uuid)
+        best = None
+        for e in self._load(cam_uuid):
+            if e["t0"] <= t < e["t1"] and (best is None or e["t0"] >= best["t0"]):
+                best = e
+        if best is None:
+            return None
+        return {"path": os.path.join(d, best["file"]),
+                "offset": max(0.0, float(t) - float(best["t0"]))}
+
     def covers(self, cam_uuid: str, t0: float, t1: float,
                slack: float = None) -> bool:
         """Does ambient video cover [t0,t1] (within one segment of slack at each

@@ -126,19 +126,60 @@ class MediaService:
         return os.path.join("media", rel), os.path.join(mdir, rel)
 
     @staticmethod
-    def resolve(marker, project_path: str) -> str | None:
-        """A media tag's absolute file path inside `project_path`, or None if
-        the payload is foreign/absent (e.g. a hub-synced reference whose file
-        lives on another box — v1 does not sync blobs)."""
-        rel = (marker.payload or {}).get("file", "")
+    def _contained(rel: str, project_path: str) -> "str | None":
+        """Resolve a project-relative media path to an existing abs path INSIDE
+        the project (a hostile/corrupt payload must not escape via ../..)."""
         if not rel:
             return None
         path = os.path.normpath(os.path.join(project_path, rel))
-        # the file must stay INSIDE the project (a hostile/corrupt payload
-        # must not escape via ../..)
         if not path.startswith(os.path.abspath(project_path) + os.sep):
             return None
         return path if os.path.exists(path) else None
+
+    @staticmethod
+    def resolve(marker, project_path: str) -> "str | None":
+        """A media tag's absolute file path inside `project_path`, or None if
+        the payload is foreign/absent (e.g. a hub-synced reference whose file
+        lives on another box — v1 does not sync blobs)."""
+        return MediaService._contained((marker.payload or {}).get("file", ""),
+                                       project_path)
+
+    @staticmethod
+    def media_files_in(tags, t0: float, t1: float, project_path: str) -> list:
+        """Enumerate the media (photos + clips) belonging to span [t0,t1] for the
+        export bundle (§9.3 phase 2). `tags` are marker DICTS (marker_to_dict) —
+        Qt-free. Returns one entry per in-span, non-deleted, project-contained
+        media item::
+
+            {"kind": "photo"|"clip", "label", "format", "source", "t", "t_end",
+             "rec_mid", "files": [abs path, ...]}
+
+        A clip may be multi-part (payload["files"]); a foreign/missing file is
+        skipped (never fatal). Out-of-span and deleted tags are excluded."""
+        out = []
+        for d in tags:
+            if d.get("kind") != MEDIA or d.get("deleted"):
+                continue
+            t = float(d.get("t", 0.0))
+            te = d.get("t_end")
+            end = float(te) if te is not None else t
+            if not (t <= t1 and end >= t0):        # same span test as tags export
+                continue
+            payload = d.get("payload") or {}
+            rels = payload.get("files") or ([payload["file"]]
+                                            if payload.get("file") else [])
+            files = [p for p in (MediaService._contained(r, project_path)
+                                 for r in rels) if p]
+            if not files:
+                continue                            # foreign/missing → skip
+            fmt = payload.get("format", "")
+            out.append({
+                "kind": "clip" if fmt == "mp4" else "photo",
+                "label": d.get("label", ""), "format": fmt,
+                "source": payload.get("source", ""), "t": t,
+                "t_end": end if te is not None else None,
+                "rec_mid": payload.get("rec_mid", ""), "files": files})
+        return out
 
 
 class ClipMaterializer:

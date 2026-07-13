@@ -24,7 +24,7 @@ from qtpy.QtCore import QObject, Signal
 from .tag import (  # noqa: F401
     TAG, RECORDING, MEDIA, REC_START, REC_STOP,
     ORIGIN_USER, ORIGIN_DEVICE, ORIGIN_PROCESSOR, ORIGIN_SYSTEM,
-    SEVERITIES, Marker, Tag, color_for, marker_from_dict, marker_to_dict,
+    SEVERITIES, Marker, Tag, color_for, is_movable, marker_from_dict, marker_to_dict,
     _KIND_LABEL, _SEVERITY_COLOR, _KIND_COLOR)
 
 
@@ -74,7 +74,7 @@ class MarkerModel(QObject):
             run_dir: str = None, origin_kind: str = ORIGIN_USER,
             origin_id: str = "", scope: str = "global",
             severity: str = "info", payload: dict = None,
-            projects: list = None) -> str:
+            projects: list = None, immutable: bool = None) -> str:
         if mid is None:
             mid = _uuid.uuid4().hex
         self._label_counter += 1
@@ -84,6 +84,9 @@ class MarkerModel(QObject):
         projs = list(projects) if projects is not None else list(self.default_projects)
         m = Marker(mid, float(t), kind, label, comment, color, t_end, run_dir,
                    origin_kind, origin_id, scope, severity, dict(payload or {}), projs)
+        # immutability defaults to the kind/origin rule (photos + emitted events
+        # are fixed) unless the caller states otherwise (§ immutable tags)
+        m.immutable = (not is_movable(m)) if immutable is None else bool(immutable)
         self._markers[mid] = m
         self._local(mid)
         return mid
@@ -111,8 +114,11 @@ class MarkerModel(QObject):
         self.tag_removed.emit(mid)
 
     def move(self, mid: str, t: float) -> None:
+        """Drag a marker's time. Refused for immutable events (a photo / an
+        emitted alarm is a fixed instant) — the chart also makes those lines
+        non-draggable, so this is defense in depth against a stray call."""
         m = self._markers.get(mid)
-        if m is not None:
+        if m is not None and is_movable(m):
             m.t = float(t)
             self._local(mid)
 

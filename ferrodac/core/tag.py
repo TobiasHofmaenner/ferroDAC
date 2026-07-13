@@ -62,6 +62,10 @@ class Marker:
     projects: list = field(default_factory=list)  # project ids — curation lens (§8.1)
     version: int = 1                  # LWW: higher wins on merge by id
     deleted: bool = False             # tombstone — propagates a delete across peers
+    immutable: bool = False           # a FIXED point-in-time fact whose TIME must
+    #                                   not be dragged (a photo documents an instant;
+    #                                   a device/processor alarm is a fact). Set at
+    #                                   creation; label/comment stay editable.
 
     @property
     def is_region(self) -> bool:
@@ -70,6 +74,22 @@ class Marker:
     @property
     def duration(self) -> float:
         return (self.t_end - self.t) if self.t_end is not None else 0.0
+
+
+def is_movable(m) -> bool:
+    """Whether a marker's TIME may be dragged. Immutable events are fixed facts:
+    photos (a captured instant) and device/processor/system-emitted events (an
+    alarm happened WHEN it happened). User annotations and recording spans stay
+    movable (a REC marker moving re-slices its clip — §9.3). The explicit
+    `immutable` flag is authoritative; the kind/origin derivation also covers
+    legacy tags persisted before the flag existed."""
+    if getattr(m, "immutable", False):
+        return False
+    if m.kind == MEDIA:                        # photos + clip refs are fixed
+        return False
+    if m.origin_kind in (ORIGIN_DEVICE, ORIGIN_PROCESSOR, ORIGIN_SYSTEM):
+        return False                           # emitted facts, not annotations
+    return True
 
 
 def color_for(kind: str, severity: str = "info") -> str:
@@ -83,7 +103,7 @@ def marker_to_dict(m: Marker) -> dict:
             "run_dir": m.run_dir, "origin_kind": m.origin_kind,
             "origin_id": m.origin_id, "scope": m.scope, "severity": m.severity,
             "payload": m.payload, "projects": list(m.projects),
-            "version": m.version, "deleted": m.deleted}
+            "version": m.version, "deleted": m.deleted, "immutable": m.immutable}
 
 
 def marker_from_dict(d: dict) -> "Marker | None":
@@ -97,7 +117,8 @@ def marker_from_dict(d: dict) -> "Marker | None":
         d.get("origin_kind", ORIGIN_USER), d.get("origin_id", ""),
         d.get("scope", "global"), d.get("severity", "info"),
         dict(d.get("payload") or {}), list(d.get("projects") or []),
-        int(d.get("version", 1)), bool(d.get("deleted", False)))
+        int(d.get("version", 1)), bool(d.get("deleted", False)),
+        bool(d.get("immutable", False)))
 
 
 # §7.3 vocabulary alias — the entity is a Tag; "Marker" is the legacy name.
