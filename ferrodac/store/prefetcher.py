@@ -33,7 +33,6 @@ import time as _time
 import numpy as np
 
 from .intervals import intersect as _intersect
-from .intervals import merge as _merge
 from .intervals import subtract as _subtract
 
 log = logging.getLogger("ferrodac.prefetch")
@@ -146,10 +145,11 @@ class PlaybackPrefetcher:
         # BEFORE the (slower) history backfill, so play starts within one chunk rather
         # than after a whole pass. The forward watermark depends only on coverage AHEAD
         # of the head, so phase 2 (all behind the head) never changes it.
-        self._watermark = min(
-            (self._source_watermark(head, hub_covs.get(src, []),
-                                    self.resolver.coverage(src, local_only=True))
-             for src in sources), default=None)
+        marks = [self._source_watermark(head, hub_covs.get(src, []),
+                                        self.resolver.coverage(src, local_only=True))
+                 for src in sources]
+        marks = [m for m in marks if m is not None]   # non-hub sources don't gate
+        self._watermark = min(marks) if marks else None
         self._wm_nav = nav                    # watermark is fresh for this position
         if filled:
             self._deliver(self._on_filled)    # runway landed → redraw near the head
@@ -212,32 +212,24 @@ class PlaybackPrefetcher:
         return chunks
 
     def _source_watermark(self, head, hub_cov, local_cov):
-        """How far play may safely advance for this source: the nearest point after
-        `head` that the HUB covers but the LOCAL tiers (incl. the cache) do not — an
-        unfilled gap. None ahead → free (capped at now). But if hub_cov is EMPTY we
-        can't confirm there's nothing ahead (a coverage-refresh failure looks the
-        same as genuinely-no-data), so we hold at the LOCAL data edge rather than
-        free-run — safe against the §12.1 silent-skip."""
+        """How far play may advance for THIS source before it would outrun buffered
+        hub data: the nearest point after `head` the HUB covers but the LOCAL tiers
+        (incl. the cache) do not — an unfilled hub gap. Nothing ahead → free (now).
+
+        A source with NO hub coverage returns None — it does NOT gate the hub buffer.
+        The gate exists to hold play until HUB history is cached; a derived (processor
+        output), local-only, offline, or image source has nothing on the hub to wait
+        for, so letting it gate pins play at the head forever (the 'always buffering,
+        never advancing' bug — dashboard.source_keys feeds ALL sources here, most not
+        hub-backed). A transient coverage RPC failure is not conflated with this:
+        `_fetch_coverage_blocking` returns the LAST-KNOWN intervals on failure, so a
+        genuinely-hub-backed source keeps gating on its cached (non-empty) coverage."""
+        if not hub_cov:
+            return None                       # not hub-backed → does not gate the buffer
         unfilled = [iv for iv in _subtract(hub_cov, local_cov) if iv[1] > head]
         if unfilled:
             return max(head, min(a for a, _b in unfilled))
-        if not hub_cov:
-            return self._local_end(local_cov, head)
         return self._now()                    # confirmed nothing to fetch ahead → free
-
-    @staticmethod
-    def _local_end(local_cov, head):
-        """The end of the contiguous local coverage from `head` (how far local data
-        runs without a gap)."""
-        end = head
-        for a, b in _merge(local_cov):
-            if b <= end:
-                continue
-            if a <= end + 1e-6:               # contiguous with what we have
-                end = max(end, b)
-            else:
-                break                         # a real gap between `end` and this interval
-        return end
 
     def _fetch_chunk(self, src, dtype, a, b) -> bool:
         """Fetch [a,b] from the hub into the cache. Uses the STRICT hub read that

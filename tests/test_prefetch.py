@@ -192,9 +192,10 @@ def test_watermark_holds_after_a_scrub_until_recomputed():
     assert pf.buffered_until() is not None                # fresh again
 
 
-def test_watermark_holds_at_local_edge_when_hub_coverage_is_empty():
-    """Hub coverage transiently returning [] (a refresh failure) must NOT free-run
-    (it looks identical to genuinely-no-data) — hold at the local data edge."""
+def test_a_source_with_no_hub_coverage_does_not_gate():
+    """A source the hub doesn't back (derived processor output, local-only, offline,
+    image) must NOT gate the hub buffer — else it pins play at the head forever ('always
+    buffering, never advancing'). Its watermark is None, so it drops out of the min."""
     class _NoCov(_FakeHub):
         def coverage(self, s):
             return []
@@ -210,7 +211,34 @@ def test_watermark_holds_at_local_edge_when_hub_coverage_is_empty():
                             tc=_fake_tc(450.0, playing=True), sources_fn=lambda: ["s"],
                             now_fn=lambda: 1000.0)
     pf._pass()
-    assert abs(pf.buffered_until() - 480.0) < 1.0        # held at the local edge, not now
+    assert pf.buffered_until() is None                   # no hub data → no gate (free play)
+
+
+def test_a_non_hub_source_does_not_pin_a_hub_backed_one():
+    """The reported 'always buffering' bug: dashboard.source_keys feeds BOTH hub-backed
+    AND non-hub (derived/offline) sources to the prefetcher. A non-hub source must not
+    drag the gate down to the head — the watermark reflects only the hub-backed one."""
+    class _Partial(_FakeHub):
+        def coverage(self, s):
+            return [(0.0, 1000.0)] if s == "hub/a" else []      # only hub/a is on the hub
+
+        def read_raw(self, s, t0, t1):
+            if s != "hub/a":
+                return np.array([]), np.array([])
+            return super().read_raw(s, t0, t1)
+
+    cache = PrefetchCache()
+    resolver = Resolver([])
+    resolver.set_prefetch(cache)
+    hub = _Partial()
+    resolver.set_remote(hub)
+    pf = PlaybackPrefetcher(resolver=resolver, hub=hub, cache=cache,
+                            tc=_fake_tc(500.0, playing=True),
+                            sources_fn=lambda: ["hub/a", "derived/x"],
+                            now_fn=lambda: 1000.0)
+    pf._pass()
+    wm = pf.buffered_until()
+    assert wm is not None and wm > 500.0                 # gated by hub/a's runway, not pinned
 
 
 def test_pin_only_fetches_what_the_store_lacks_no_duplication(tmp_path):
