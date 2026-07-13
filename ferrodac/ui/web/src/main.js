@@ -256,6 +256,9 @@ function fileOption(f) {                        // a completion that inserts one
   };
 }
 
+// test seam: the pytest suite drives the slash menu through this
+window.__fd_slash = (ctx) => Promise.resolve(slashSource(ctx));
+
 // Resolve a macro's data cache. Always fires a refresh; when the cache is cold
 // (e.g. right after a doc reload reset the page) it AWAITS the fetch so the menu
 // populates on the first keystroke instead of silently showing nothing. A short

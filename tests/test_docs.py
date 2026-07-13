@@ -822,3 +822,46 @@ def test_docview_renders_and_reloads(qapp):
         assert "Changed" in html2 and "Title" not in html2
     finally:
         dv.deleteLater()
+
+
+@pytest.mark.ui
+def test_slash_macro_menus_populate(qapp):
+    """Regression (2026-07-13): _push_cameras raised NameError (missing json
+    import) during the js-ready handshake, killing the editor macro seeding —
+    the / menus silently stopped appearing. Drive the REAL completion source
+    (window.__fd_slash — synthetic key events can't reach CodeMirror) for every
+    macro and require options to come back, with the caches seeded exactly the
+    way a live app seeds them."""
+    from ferrodac.ui.docs import DocServices, DocView
+    d = tempfile.mkdtemp()
+    doc = os.path.join(d, "j.md")
+    with open(doc, "w") as fh:
+        fh.write("# journal\n")
+    dv = DocView(DocServices(
+        list_recordings=lambda: [{"id": "r1", "label": "Bakeout",
+                                  "t0": 1.0, "t1": 2.0}],
+        list_processors=lambda: [{"kind": "gas", "label": "Gas analysis"}],
+        list_cameras=lambda: [{"key": "cam/frame", "label": "Bench cam"}]))
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")                 # page up + doc rendered
+        for cmd, expect_min in (("rec", 1), ("proc", 1), ("cam", 1),
+                                ("dev", 1), ("meta", 1)):
+            expr = f"""
+              window.__slash_n = undefined;
+              window.__fd_slash({{
+                pos: {len(cmd) + 1}, explicit: true,
+                matchBefore: (re) => ({{from: 0, to: {len(cmd) + 1},
+                                        text: "/{cmd}"}})
+              }}).then((r) => {{
+                window.__slash_n = r && r.options ? r.options.length : 0;
+              }});
+              true"""
+            assert _js(qapp, dv.view, expr) is not None
+            n = _js(qapp, dv.view, "window.__slash_n", timeout=8.0)
+            assert n is not None and n >= expect_min, \
+                f"/{cmd} menu empty (got {n})"
+    finally:
+        dv.close()
+        qapp.processEvents()
