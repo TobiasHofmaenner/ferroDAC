@@ -107,6 +107,19 @@ def test_prefetcher_watermark_reaches_lookahead_when_filled():
     assert wm is not None and wm >= 503.0             # head + realtime look-ahead, filled
 
 
+def test_runway_ahead_of_head_is_prefetched_so_play_can_advance():
+    """The buffer gate holds play at the watermark; if the prefetcher only filled the
+    window BEHIND the head (never the runway AHEAD), the watermark would pin AT the
+    head and Play would never advance — the reported 'hit play, nothing happens' bug.
+    Even PARKED, the runway [head, head+lookahead] must be cached so the watermark
+    LEADS the head."""
+    pf, cache, _ = _wired(head=500.0)                 # PARKED, window [490,500]
+    pf._pass()
+    lo, hi = cache.coverage("s")[0]
+    assert lo <= 490.0 and hi > 500.0, cache.coverage("s")   # cached PAST the head
+    assert pf.buffered_until() > 500.0                # gate leads the head → not pinned
+
+
 def test_prefetcher_pin_writes_hub_data_into_the_durable_store(tmp_path):
     from ferrodac.store import ZarrStore
     store = ZarrStore(str(tmp_path / "pinned.zarr"))

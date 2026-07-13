@@ -3,14 +3,18 @@ head, so replay never blocks the GUI and never silently skips hub data (DESIGN
 §12.1). The worked-out model:
 
   * A worker thread, woken by TimeContext notifications + a 0.25 s heartbeat,
-    computes a TARGET range (the parked window, or [head, head+lookahead] while
-    playing) and fetches the sub-ranges that are hub-covered but not yet local
-    (`subtract(intersect(hub_cov, target), local_cov)`) from the hub into the
-    cache, chunked and nearest-to-head first.
+    fetches in TWO priorities: PHASE 1 fills the RUNWAY ahead of the head
+    ([head, head+lookahead]) for every played source — this is the gate, so it
+    runs first and unbudgeted (whether parked or playing, so play starts at once);
+    PHASE 2 backfills the visible window BEHIND the head for the display, chunked
+    NEAREST-HEAD-FIRST and bounded to a per-pass budget so the pass returns and the
+    next one re-targets a moved head. Both fetch only the hub-covered-but-not-yet-
+    local sub-ranges (`subtract(intersect(hub_cov, target), local_cov)`).
   * It publishes a WATERMARK = the nearest still-unfilled hub gap after the head
     (min over the played sources). `tick_play` gates on it: the head HOLDS at the
     watermark ("buffering…") rather than silently slowing — replay speed stays
-    honest (a physicist calibrates rate intuition against it).
+    honest (a physicist calibrates rate intuition against it). Because the runway
+    ahead is prefetched (phase 1), the watermark leads the head and play advances.
   * On fill it asks for a redraw (debounced), so the synchronous local display
     re-reads and completes as ranges land.
   * Supersession is by TimeContext.nav (bumps only on navigation, NOT on play/
@@ -38,7 +42,8 @@ log = logging.getLogger("ferrodac.prefetch")
 class PlaybackPrefetcher:
     def __init__(self, *, resolver, hub, cache, tc, sources_fn, store=None,
                  deliver=None, on_filled=None, now_fn=_time.time,
-                 buffer_realtime_s: float = 3.0, chunk_s: float = 4.0):
+                 buffer_realtime_s: float = 3.0, chunk_s: float = 60.0,
+                 per_pass: int = 32):
         self.resolver = resolver          # local coverage (local_only) + tier host
         self.hub = hub                    # HubReadTier: coverage + read_raw[_trace]
         self.cache = cache                # PrefetchCache to fill
@@ -49,7 +54,10 @@ class PlaybackPrefetcher:
         self._on_filled = on_filled or (lambda: None)
         self._now = now_fn
         self._buffer_rt = float(buffer_realtime_s)   # seconds of realtime runway ahead
-        self._chunk = float(chunk_s)
+        self._chunk = float(chunk_s)      # fetch granularity: big enough that a wide
+        #                                   backfill isn't thousands of tiny RPCs, small
+        #                                   enough that the runway lands in one/few reads
+        self._per_pass = int(per_pass)    # phase-2 backfill chunk budget per pass
         self._watermark: "float | None" = None
         self._wm_nav = -1                 # the tc.nav the watermark was computed for
         self._pin_seq = 0                 # unique epoch per pin (no cross-pin tail-append)
@@ -107,58 +115,101 @@ class PlaybackPrefetcher:
 
     def _pass(self) -> None:
         nav = self.tc.nav                     # supersession token (navigation only)
-        playing = self.tc.playing
         head = self.tc.head
         w0, w1 = self.tc.window
         self.cache.set_focus(head)
+        now = self._now()
+        lookahead = max(self._chunk, self.tc.speed * self._buffer_rt)
         lo = min(w0, head)
-        hi = (head + max(self._chunk, self.tc.speed * self._buffer_rt)) if playing else w1
-        hi = min(hi, self._now())
+        front = min(head + lookahead, now)    # end of the play runway ahead of head
         sources = list(self.sources_fn() or [])
-        if not sources or hi <= lo:
+        if not sources or max(w1, front) <= lo:
             self._watermark = None            # nothing to prefetch → no gating
             self._wm_nav = nav
             return
+        hub_covs = {}
         filled = False
-        marks = []
+        # PHASE 1 — the GATE: fill the runway AHEAD of the head [head, front] for
+        # EVERY source. The watermark is the min over sources of the nearest unfilled
+        # hub gap after the head, so play advances only once ALL played sources have
+        # their runway cached — hence this runs FIRST and unbudgeted (it is small:
+        # ~one chunk/source), or a single source's long history would starve the gate.
+        # Filled even when PARKED, so hitting Play advances immediately.
         for src in sources:
-            if self.tc.nav != nav:            # navigated → this target is stale; leave
-                return                        # _wm_nav behind so the gate keeps holding
-            got = self._fill_source(src, head, lo, hi, nav)
-            filled = filled or got[0]
-            marks.append(got[1])
+            if self.tc.nav != nav:            # navigated → target stale; leave _wm_nav
+                return                        # behind so the gate keeps holding
+            hub_covs[src] = self._hub_cov(src)
+            filled |= self._fill(src, hub_covs[src], head, [(head, front)], nav, None)
         if self.tc.nav != nav:
             return
-        self._watermark = min(marks) if marks else None
+        # Publish the watermark AS SOON AS the runway is cached — the gate opens now,
+        # BEFORE the (slower) history backfill, so play starts within one chunk rather
+        # than after a whole pass. The forward watermark depends only on coverage AHEAD
+        # of the head, so phase 2 (all behind the head) never changes it.
+        self._watermark = min(
+            (self._source_watermark(head, hub_covs.get(src, []),
+                                    self.resolver.coverage(src, local_only=True))
+             for src in sources), default=None)
         self._wm_nav = nav                    # watermark is fresh for this position
         if filled:
-            self._deliver(self._on_filled)    # debounced: one redraw per pass
+            self._deliver(self._on_filled)    # runway landed → redraw near the head
+        # PHASE 2 — the DISPLAY: backfill the visible window BEHIND the head, nearest-
+        # head first, within a bounded budget so the pass returns promptly and the
+        # NEXT pass re-targets a moved head (during play the runway must track it).
+        budget = [self._per_pass]
+        back = False
+        for src in sources:
+            if self.tc.nav != nav or budget[0] <= 0:
+                break
+            back |= self._fill(src, hub_covs[src], head, [(lo, head)], nav, budget)
+        if back:
+            self._deliver(self._on_filled)    # debounced: one redraw per backfill pass
+            if budget[0] <= 0:                # backfill hit the budget → more to do:
+                self._wake.set()              # continue now, don't wait the heartbeat
 
-    def _fill_source(self, src, head, lo, hi, nav) -> tuple:
-        """Fetch this source's unfilled hub gaps in [lo,hi]; return (did_fetch,
-        source_watermark)."""
+    def _hub_cov(self, src) -> list:
         try:
-            hub_cov = list(self.hub.coverage(src))    # fresh (worker) — TTL-cached
+            return list(self.hub.coverage(src))       # fresh (worker) — TTL-cached
         except Exception:                             # noqa: BLE001 — hub down → nothing to pull
-            hub_cov = []
+            return []
+
+    def _fill(self, src, hub_cov, head, target, nav, budget) -> bool:
+        """Fetch the hub-covered-but-not-local chunks of `target` into the cache,
+        NEAREST-HEAD first. `budget` (a 1-element list) caps the chunk count and is
+        decremented; None fills all of `target`. Returns whether anything was fetched."""
         local_cov = self.resolver.coverage(src, local_only=True)
-        need = _subtract(_intersect(hub_cov, [(lo, hi)]), local_cov)
-        need = sorted((iv for iv in need if iv[1] > iv[0]),
-                      key=lambda iv: abs(iv[0] - head))   # nearest the head first
+        need = _subtract(_intersect(hub_cov, target), local_cov)
         dtype = self._dtype(src)
         did = False
+        for a, b in self._chunks_near(need, head):
+            if self.tc.nav != nav or (budget is not None and budget[0] <= 0):
+                break
+            did = self._fetch_chunk(src, dtype, a, b) or did
+            if budget is not None:
+                budget[0] -= 1
+        return did
+
+    def _chunks_near(self, need, head) -> list:
+        """Split `need` into ≤ chunk_s pieces ordered by distance from the head —
+        AHEAD of the head first (the gate runway), then BEHIND (history), each
+        nearest-first — so both the gate and the near-head display fill before far data."""
+        chunks = []
         for a, b in need:
             c = a
             while c < b:
-                if self.tc.nav != nav:                 # scrubbed away mid-fill → stop
-                    break
                 d = min(c + self._chunk, b)
-                did = self._fetch_chunk(src, dtype, c, d) or did
+                chunks.append((c, d))
                 c = d
-            if self.tc.nav != nav:
-                break
-        local2 = self.resolver.coverage(src, local_only=True)   # now incl. what we filled
-        return did, self._source_watermark(head, hub_cov, local2)
+
+        def _key(ab):
+            a, b = ab
+            if a >= head:                     # ahead of head → gate runway, nearest first
+                return (0, a - head)
+            if b <= head:                     # behind head → visible history, nearest first
+                return (1, head - b)
+            return (0, 0.0)                   # straddles the head
+        chunks.sort(key=_key)
+        return chunks
 
     def _source_watermark(self, head, hub_cov, local_cov):
         """How far play may safely advance for this source: the nearest point after
