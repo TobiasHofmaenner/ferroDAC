@@ -4,7 +4,7 @@
 QT := QT_QPA_PLATFORM=offscreen
 UV := uv run
 
-.PHONY: help sync test test-core test-ui test-int run hub codegen render
+.PHONY: help sync test test-core test-ui test-int bench run hub codegen render
 
 help:  ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -24,6 +24,9 @@ test-ui:  ## UI smoke tests only (offscreen Qt)
 
 test-int:  ## the real-gRPC end-to-end tests only
 	$(UV) pytest -m integration -ra
+
+bench:  ## data-plane benchmarks (saves a baseline; --benchmark-compare for diffs)
+	$(UV) pytest benchmarks/ --benchmark-autosave --benchmark-columns=min,median,rounds
 
 render:  ## render panels to /tmp/ferrodac_*.png for visual QA (SCENE=all|waterfall|…)
 	$(QT) $(UV) python tools/render.py $(or $(SCENE),all)

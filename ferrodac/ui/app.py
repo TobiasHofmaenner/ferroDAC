@@ -495,6 +495,8 @@ class MainWindow(QMainWindow):
         self.edit_action.toggled.connect(self._lock_chrome)
         self._lock_chrome(False)                    # Player/Log start locked too
         view.addAction("Export defaults…", self.dashboard.configure_export_default)
+        view.addSeparator()
+        view.addAction("Benchmark…", self._open_benchmark)   # measure the real paths
 
         add = self.menuBar().addMenu("&Add")
         for kind, (label, _cls) in PANEL_TYPES.items():
@@ -539,6 +541,17 @@ class MainWindow(QMainWindow):
         for key, channel, device, _u, _dt in self._historic_sources():
             names.setdefault(key, compose_label(channel, device))
         return names
+
+    def _open_benchmark(self):
+        """Open the in-app benchmark (measures the real data-plane + render paths)."""
+        from .benchmark import BenchmarkDialog
+        if getattr(self, "_bench_dlg", None) is None:
+            self._bench_dlg = BenchmarkDialog(self)
+            self._bench_dlg.finished.connect(
+                lambda *_: setattr(self, "_bench_dlg", None))
+        self._bench_dlg.show()
+        self._bench_dlg.raise_()
+        self._bench_dlg.activateWindow()
 
     def _open_timeline(self):
         if self.resolver is None or self.time_context is None:

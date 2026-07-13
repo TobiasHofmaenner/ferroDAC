@@ -50,6 +50,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-benchmark>=4",
 ]
 package = [
     # Windows one-file exe (CI + local Windows builds): uv sync --group package
