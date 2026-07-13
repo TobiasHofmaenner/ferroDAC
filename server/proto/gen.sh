@@ -11,7 +11,7 @@ ROOT="$(cd "$HERE/.." && pwd)"            # server/
 
 docker run --rm -e HU="$(id -u)" -e HG="$(id -g)" -v "$ROOT":/work -w /work \
   python:3.12-slim sh -c '
-    pip install -q grpcio-tools
+    pip install -q 'grpcio-tools==1.82.1'  # pinned: generated code demands grpcio>=THIS — keep in lockstep with server/requirements.txt + pyproject
     mkdir -p gen
     python -m grpc_tools.protoc -I proto --python_out=gen --grpc_python_out=gen \
       proto/ferrodac_contract/v1/data_plane.proto

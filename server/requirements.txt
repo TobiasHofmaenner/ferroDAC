@@ -2,7 +2,7 @@
 # Milestone 1: the gRPC data plane + the durable Zarr store (sync target + read
 # tier, DESIGN §12.1). FastAPI/REST + remote object storage arrive later.
 
-grpcio>=1.60
+grpcio>=1.82.1   # must satisfy the GENERATED stubs (gen.sh pins the tools)
 # Match the generated contract stubs (gencode requires runtime >= 6.33.5).
 protobuf>=6.33.5
 
