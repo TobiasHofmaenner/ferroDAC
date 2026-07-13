@@ -110,29 +110,39 @@ class HubReadTier:
 
     # -- extras the resolver/replay can use ----------------------------------
     def read_raw(self, series, t0, t1):
-        """Full-resolution scalars over the wire (for replay/analysis, not just
-        the decimated preview)."""
+        """Full-resolution scalars over the wire (for replay/analysis). Failure →
+        empty (a read tier must never hang / raise into the resolver stitch)."""
         try:
-            resp = self.stub.ReadRaw(
-                pb.RawRequest(source=str(series), t0=float(t0), t1=float(t1),
-                              token=self.token),
-                timeout=self.timeout)
-            return np.asarray(resp.t, dtype="f8"), np.asarray(resp.v, dtype="f8")
+            return self.read_raw_strict(series, t0, t1)
         except Exception as exc:                     # noqa: BLE001
             log.debug("hub read_raw(%s) failed: %s", series, exc)
             return np.array([]), np.array([])
 
+    def read_raw_strict(self, series, t0, t1):
+        """Like read_raw but RAISES on an RPC failure instead of swallowing it to
+        empty. The prefetcher needs this to tell a GENUINE no-data range (empty
+        result, no error → mark it cached, play advances with a NaN break) from a
+        transient FAILURE (raises → retry) — conflating them either freezes playback
+        or silently skips data (§12.1)."""
+        resp = self.stub.ReadRaw(
+            pb.RawRequest(source=str(series), t0=float(t0), t1=float(t1),
+                          token=self.token), timeout=self.timeout)
+        return np.asarray(resp.t, dtype="f8"), np.asarray(resp.v, dtype="f8")
+
     def read_raw_trace(self, series, t0, t1) -> list:
-        """Full-resolution trace scans over the wire: list of (times[k], Y[k,m],
-        x[m]) blocks (the swept axis differs per epoch)."""
+        """Full-resolution trace scans over the wire; failure → [] (see read_raw)."""
         try:
-            resp = self.stub.ReadRawTrace(
-                pb.RawRequest(source=str(series), t0=float(t0), t1=float(t1),
-                              token=self.token),
-                timeout=self.timeout)
+            return self.read_raw_trace_strict(series, t0, t1)
         except Exception as exc:                     # noqa: BLE001
             log.debug("hub read_raw_trace(%s) failed: %s", series, exc)
             return []
+
+    def read_raw_trace_strict(self, series, t0, t1) -> list:
+        """Trace scans, RAISING on failure (see read_raw_strict). list of
+        (times[k], Y[k,m], x[m]) blocks (the swept axis differs per epoch)."""
+        resp = self.stub.ReadRawTrace(
+            pb.RawRequest(source=str(series), t0=float(t0), t1=float(t1),
+                          token=self.token), timeout=self.timeout)
         out = []
         for b in resp.blocks:
             m = int(b.m)

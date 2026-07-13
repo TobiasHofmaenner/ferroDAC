@@ -103,7 +103,8 @@ class BenchmarkDialog(QtWidgets.QDialog):
         # data-plane suite off the GUI thread so the app stays responsive
         self._status.setText("Running data-plane paths (off the GUI thread)…")
         self._worker = _BenchWorker(scalar, trace, rounds=5)
-        self._thread = QtCore.QThread(self)
+        self._thread = QtCore.QThread()          # NOT parented to the dialog: closing the
+        #                                          dialog must never destroy a running thread
         self._worker.moveToThread(self._thread)
         self._worker.row.connect(self._add_row)          # queued: worker → GUI
         self._worker.finished.connect(self._finished)
@@ -165,9 +166,13 @@ class BenchmarkDialog(QtWidgets.QDialog):
         self._status.setText(f"Saved {len(self._rows)} rows → {path}")
 
     def closeEvent(self, ev):  # noqa: N802
+        # cancel is polled BETWEEN measurements (bench._tick), so the worker returns
+        # within one measurement; wait generously so the thread is fully stopped
+        # before it (and the dialog) are torn down — never destroyed mid-run.
         if self._worker is not None:
             self._worker.cancel()
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait(2000)
+            self._thread.wait(15000)
+            self._thread = self._worker = None
         super().closeEvent(ev)

@@ -101,21 +101,25 @@ def scalar_scenarios(tmp, sizes=SCALAR_SIZES, rounds=5, on_progress=None,
         out.append(_row("resolver.query (decimated display)", n, "samples",
                         time_it(lambda _c: [res.query(s, a, b, 2000) for s in srcs],
                                 rounds=rounds), total))
-        _tick(on_progress, out)
+        if _tick(on_progress, out, cancel):
+            return out
         out.append(_row("resolver.read_raw (full-res)", n, "samples",
                         time_it(lambda _c: [res.read_raw(s, a, b) for s in srcs],
                                 rounds=rounds), total))
-        _tick(on_progress, out)
+        if _tick(on_progress, out, cancel):
+            return out
         out.append(_row("playback.read_window (re-stream)", n, "samples",
                         time_it(lambda _c: play.read_window(srcs, a, b),
                                 rounds=max(2, rounds // 2)), total))
-        _tick(on_progress, out)
+        if _tick(on_progress, out, cancel):
+            return out
         meta = {s: {"name": s, "unit": "mbar", "dtype": "scalar"} for s in srcs}
         out.append(_row("export_window (CSV)", n, "samples",
                         time_it(lambda dest: export_window(dest, meta, res, a, b),
                                 setup=lambda: tempfile.mkdtemp(dir=tmp),
                                 rounds=max(2, rounds // 2)), total))
-        _tick(on_progress, out)
+        if _tick(on_progress, out, cancel):
+            return out
     return out
 
 
@@ -130,44 +134,55 @@ def trace_scenarios(tmp, sizes=TRACE_SIZES, rounds=5, on_progress=None,
         out.append(_row("resolver.read_raw_trace", n, "scans",
                         time_it(lambda _c: res.read_raw_trace("rga/spec", a, b),
                                 rounds=rounds), n))
-        _tick(on_progress, out)
+        if _tick(on_progress, out, cancel):
+            return out
         out.append(_row("resolver.query_trace (waterfall)", n, "scans",
                         time_it(lambda _c: res.query_trace("rga/spec", a, b, 400),
                                 rounds=rounds), n))
-        _tick(on_progress, out)
+        if _tick(on_progress, out, cancel):
+            return out
     return out
 
 
-def write_scenarios(tmp, sizes=SCALAR_SIZES, rounds=3, on_progress=None,
-                    cancel=None) -> list:
+def write_scenarios(tmp, rounds=3, on_progress=None, cancel=None) -> list:
+    """The write hot path is NOT one bulk append — the StoreWriter flushes small
+    batches into a growing store (a partial tail-chunk rewrite each time), and a
+    slow source flushes ~seconds of samples. So the LEVER is the batch size; measure
+    a fixed total appended in different batch sizes (small = the realistic case)."""
     out = []
-    for n in sizes:
+    total = 8_000
+    for batch in (20, 200, 4096):
         if cancel is not None and cancel():
             break
 
-        def setup(n=n):
+        def setup():
             d = tempfile.mkdtemp(dir=tmp)
             st = ZarrStore(os.path.join(d, "w.zarr"))
             st.add_source("dev/a")
-            t = _T0 + np.arange(n) / _HZ
-            v = 100.0 + np.random.default_rng(0).standard_normal(n)
+            t = _T0 + np.arange(total) / _HZ
+            v = 100.0 + np.random.default_rng(0).standard_normal(total)
             return st, t, v.astype("f8")
 
-        def run(ctx):
+        def run(ctx, b=batch):
             st, t, v = ctx
-            st.append("dev/a", t, v, epoch="b")
-        out.append(_row("ZarrStore.append (write)", n, "samples",
-                        time_it(run, setup=setup, rounds=rounds), n))
-        _tick(on_progress, out)
+            for i in range(0, len(t), b):
+                st.append("dev/a", t[i:i + b], v[i:i + b], epoch="e")
+        out.append(_row(f"ZarrStore.append (batch={batch})", batch, "/batch",
+                        time_it(run, setup=setup, rounds=rounds), total))
+        if _tick(on_progress, out, cancel):
+            return out
     return out
 
 
-def _tick(on_progress, out):
+def _tick(on_progress, out, cancel=None) -> bool:
+    """Report progress after a measurement + poll cancel BETWEEN measurements (so a
+    long run stops promptly, not only between whole load sizes). Returns True to stop."""
     if on_progress is not None:
         try:
             on_progress(len(out), out[-1])
         except Exception:                        # noqa: BLE001 — a bad observer ≠ abort
             pass
+    return bool(cancel is not None and cancel())
 
 
 def run_all(scalar_sizes=SCALAR_SIZES, trace_sizes=TRACE_SIZES, rounds=5,
@@ -177,7 +192,7 @@ def run_all(scalar_sizes=SCALAR_SIZES, trace_sizes=TRACE_SIZES, rounds=5,
     tmp = tempfile.mkdtemp(prefix="ferrodac-bench-")
     try:
         rows = []
-        rows += write_scenarios(tmp, scalar_sizes, max(2, rounds // 2), on_progress, cancel)
+        rows += write_scenarios(tmp, max(2, rounds // 2), on_progress, cancel)
         rows += scalar_scenarios(tmp, scalar_sizes, rounds, on_progress, cancel)
         rows += trace_scenarios(tmp, trace_sizes, rounds, on_progress, cancel)
         return rows

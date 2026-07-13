@@ -2838,6 +2838,8 @@ class MainWindow(QMainWindow):
             from .tasks import set_default_runner
             self._tasks.shutdown()          # cancel background exports/loads
             set_default_runner(None)        # don't leave a shut-down runner as default
+        if getattr(self, "_bench_dlg", None) is not None:
+            self._bench_dlg.close()         # stop the benchmark worker thread cleanly
         if getattr(self, "reads", None) is not None:
             self.reads.shutdown()           # cancel in-flight timeline reads
         if getattr(self, "_prefetcher", None) is not None:

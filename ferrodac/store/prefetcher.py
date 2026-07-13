@@ -52,6 +52,8 @@ class PlaybackPrefetcher:
         self._chunk = float(chunk_s)
         self._watermark: "float | None" = None
         self._wm_nav = -1                 # the tc.nav the watermark was computed for
+        self._pin_seq = 0                 # unique epoch per pin (no cross-pin tail-append)
+        self._pin_lock = threading.Lock()  # serialize pins (no two writers → no dup/tear)
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: "threading.Thread | None" = None
@@ -187,28 +189,30 @@ class PlaybackPrefetcher:
         return end
 
     def _fetch_chunk(self, src, dtype, a, b) -> bool:
-        """Fetch [a,b] from the hub into the cache. Returns True iff data actually
-        landed. An EMPTY result is NOT marked covered — HubReadTier returns [] on a
-        timeout WITHOUT raising, and a range within hub coverage is dense, so empty
-        means the fetch failed. Marking it would mask real hub data on every path
-        (display, replay, EXPORT) and let the watermark skip it (§12.1). Left
-        unmarked → retried next pass; a genuinely-empty range drops out of hub_cov
-        on the next coverage refresh, so this never spins forever."""
+        """Fetch [a,b] from the hub into the cache. Uses the STRICT hub read that
+        RAISES on an RPC failure, so we distinguish two empties that must be handled
+        oppositely (§12.1): a genuine no-data range (empty result, no error) is
+        MARKED covered so play advances across it with a NaN break — not marking it
+        would freeze playback forever at any real sub-30 s recording gap; a transient
+        FAILURE raises → NOT marked → retried, so it can't mask real hub data.
+        Returns whether the range is now cached (advance) vs must be retried."""
         try:
             if dtype == "trace":
-                blocks = self.hub.read_raw_trace(src, a, b)
-                if not any(len(bt) for (bt, _y, _x) in (blocks or ())):
-                    return False
-                self.cache.add_trace(src, blocks, a, b)
-                return True
-            t, v = self.hub.read_raw(src, a, b)
-            if not len(t):
-                return False
-            self.cache.add_scalar(src, t, v, a, b)
-            return True
-        except Exception:                             # noqa: BLE001 — transient → retry
+                self.cache.add_trace(src, self._hub_read_trace(src, a, b), a, b)
+            else:
+                t, v = self._hub_read(src, a, b)
+                self.cache.add_scalar(src, t, v, a, b)
+            return True                               # success (incl. genuine empty)
+        except Exception:                             # noqa: BLE001 — RPC failure → retry
             log.debug("prefetch %s[%.1f,%.1f] failed", src, a, b, exc_info=True)
             return False
+
+    def _hub_read(self, src, a, b):
+        return (getattr(self.hub, "read_raw_strict", None) or self.hub.read_raw)(src, a, b)
+
+    def _hub_read_trace(self, src, a, b):
+        return (getattr(self.hub, "read_raw_trace_strict", None)
+                or self.hub.read_raw_trace)(src, a, b)
 
     def _dtype(self, src) -> str:
         f = getattr(self.hub, "source_dtype", None)
@@ -225,15 +229,20 @@ class PlaybackPrefetcher:
         if self.store is None or self.hub is None:
             return False
         srcs = list(sources or self.sources_fn() or [])
-        ep = epoch or f"pin-{int(t0)}"
+        self._pin_seq += 1
+        ep = epoch or f"pin-{int(t0)}-{self._pin_seq}"   # UNIQUE per pin: appends within
+        #                                                  one epoch stay monotonic, and a
+        #                                                  re-pin never tail-appends into an
+        #                                                  older epoch's array (§7.4).
 
         def work():
-            n = 0
-            for src in srcs:
-                try:
-                    n += 1 if self._pin_source(src, float(t0), float(t1), ep) else 0
-                except Exception:                     # noqa: BLE001
-                    log.debug("pin %s failed", src, exc_info=True)
+            with self._pin_lock:                        # serialize: one durable writer
+                n = 0
+                for src in srcs:
+                    try:
+                        n += 1 if self._pin_source(src, float(t0), float(t1), ep) else 0
+                    except Exception:                   # noqa: BLE001
+                        log.debug("pin %s failed", src, exc_info=True)
             if on_done is not None:
                 self._deliver(lambda: on_done(n))
 
@@ -247,8 +256,8 @@ class PlaybackPrefetcher:
         # local epoch (ZarrStore.read_raw concatenates epochs with no dedup).
         try:
             have = store.coverage(src)
-        except Exception:                             # noqa: BLE001 — unknown source → all new
-            have = []
+        except Exception:                             # noqa: BLE001 — can't dedup safely →
+            return False                              # ABORT rather than re-append blindly
         need = _subtract([(float(t0), float(t1))], have)
         if not need:
             return False
@@ -262,12 +271,13 @@ class PlaybackPrefetcher:
         wrote = False
         if dtype == "trace":
             store.add_source(src, dtype="trace")
+            # each hub block is one config-epoch (its own swept axis); write each under
+            # an epoch keyed by that axis, so append_trace never drops a differing-bin
+            # block or binds one axis's scans to another's (§7.4). gen/last_x run ACROSS
+            # all need-ranges — a per-range reset would collide two axes on the same key.
+            gen, last_x = 0, None
             for a, b in need:
-                # each hub block is one config-epoch (its own swept axis); write each
-                # under an epoch keyed by that axis, so append_trace never drops a
-                # differing-bin block or binds one axis's scans to another's (§7.4).
-                gen, last_x = 0, None
-                for (bt, by, bx) in self.hub.read_raw_trace(src, a, b):
+                for (bt, by, bx) in self._hub_read_trace(src, a, b):
                     bt = np.asarray(bt, dtype="f8")
                     bx = np.asarray(bx, dtype="f8")
                     if last_x is None or last_x.shape != bx.shape \
@@ -283,7 +293,7 @@ class PlaybackPrefetcher:
             return wrote
         store.add_source(src)
         for a, b in need:
-            t, v = self.hub.read_raw(src, a, b)
+            t, v = self._hub_read(src, a, b)
             if len(t):
                 m = _fresh(np.asarray(t, dtype="f8"))
                 if m.any():

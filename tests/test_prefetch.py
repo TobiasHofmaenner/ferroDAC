@@ -119,16 +119,18 @@ def test_prefetcher_pin_writes_hub_data_into_the_durable_store(tmp_path):
 
 
 # -- review regressions: never silently skip hub data (§12.1) ----------------
-def test_empty_hub_read_is_not_marked_covered_and_is_retried():
-    """A hub read that returns empty (a timeout returns [] WITHOUT raising) must NOT
-    mark the range fetched — else it masks real hub data on every path and the
-    watermark skips it. It must be retried."""
+def test_rpc_failure_is_retried_but_a_genuine_gap_is_marked():
+    """The two 'empties' must be handled oppositely (§12.1): an RPC FAILURE (raises)
+    must NOT be cached — retried, never masking real data; a GENUINE no-data range
+    (empty result, no error) MUST be cached — so play advances across a <30 s
+    recording gap instead of freezing there forever."""
+    # (a) a failure raises → not cached, retried
     class _Flaky(_FakeHub):
         fail = True
 
         def read_raw(self, s, t0, t1):
             if self.fail:
-                return np.array([]), np.array([])       # simulate a socket blip
+                raise RuntimeError("simulated RPC timeout")     # a FAILURE raises
             return super().read_raw(s, t0, t1)
 
     cache = PrefetchCache()
@@ -140,11 +142,29 @@ def test_empty_hub_read_is_not_marked_covered_and_is_retried():
                             tc=_fake_tc(500.0), sources_fn=lambda: ["s"],
                             now_fn=lambda: 1000.0)
     pf._pass()
-    assert not cache.has("s")                            # the blip is NOT cached as empty
+    assert not cache.has("s")                            # failure NOT cached
     hub.fail = False
     pf._pass()
     assert cache.has("s")                                # recovers on retry
-    assert len(resolver.read_raw("s", 492.0, 498.0, local_only=True)[0]) > 0
+
+    # (b) a genuine gap (empty, no error) IS cached → play doesn't stall on it
+    class _GapHub(_FakeHub):
+        def read_raw(self, s, t0, t1):                   # no samples in [200,240]
+            t, v = super().read_raw(s, t0, t1)
+            m = (t < 200.0) | (t > 240.0)
+            return t[m], v[m]
+
+    c2 = PrefetchCache()
+    r2 = Resolver([])
+    r2.set_prefetch(c2)
+    g = _GapHub()
+    r2.set_remote(g)
+    pf2 = PlaybackPrefetcher(resolver=r2, hub=g, cache=c2, sources_fn=lambda: ["s"],
+                             tc=_fake_tc(220.0, width=40.0), now_fn=lambda: 1000.0)
+    pf2._pass()
+    lo, hi = c2.coverage("s")[0]
+    assert lo <= 200.0 and hi >= 220.0                   # the empty gap IS marked covered
+    assert len(c2.read_raw("s", 205.0, 235.0)[0]) == 0   # reads back empty (a true gap)
 
 
 def test_watermark_holds_after_a_scrub_until_recomputed():
