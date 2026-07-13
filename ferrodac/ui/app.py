@@ -234,6 +234,7 @@ class MainWindow(QMainWindow):
         self.dashboard.set_sigma_provider(self._chart_sigma)
         self.dashboard.set_gap_provider(self._chart_coverage)
         self.dashboard.set_media_provider(self._resolve_media)   # photo tile (§9)
+        self.dashboard.set_snapshot_handler(lambda key: self._snap([key]))
         self.dashboard.on_chart_zoom = self.chart_feed.on_chart_zoom   # zoom → re-query (Fix B)
 
         # recording lifecycle (start/stop span → auto-export, crash recovery) lives
@@ -316,6 +317,7 @@ class MainWindow(QMainWindow):
             on_zoom=self._zoom_recording, on_export_csv=self._export_recording_csv,
             on_export_plots=self._export_plots, on_lens=self._set_tag_lens_all,
             on_jump=self._jump_to_tag, on_open_media=self._open_media_tag,
+            media_resolver=self._resolve_media,
             projects_provider=lambda: [(p.id, p.name)
                                        for p in self._project_mgr.projects()]
             if getattr(self, "_project_mgr", None) else [])

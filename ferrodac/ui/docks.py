@@ -16,7 +16,7 @@ from typing import Callable
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
 from qtpy.QtCore import QRect, Qt, QTimer, Signal
-from qtpy.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from qtpy.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -1106,13 +1106,16 @@ class EventsPanel(QWidget):
 
     def __init__(self, markers, clock, on_zoom=None, on_export_csv=None,
                  on_export_plots=None, on_lens=None, projects_provider=None,
-                 on_jump=None, on_open_media=None, parent=None):
+                 on_jump=None, on_open_media=None, media_resolver=None,
+                 parent=None):
         super().__init__(parent)
         self.markers = markers
         self.clock = clock
         self._on_zoom = on_zoom
         self._on_jump = on_jump                          # jump the timeline to a tag
         self._on_open_media = on_open_media              # open a media tag's photo
+        self._media_resolver = media_resolver            # marker -> abs path | None
+        self._thumbs: dict = {}                          # path -> QPixmap (44 px)
         self._on_export_csv = on_export_csv
         self._on_export_plots = on_export_plots
         self._on_lens = on_lens
@@ -1179,6 +1182,28 @@ class EventsPanel(QWidget):
     def _on_group_toggle(self, title, collapsed):
         (self._collapsed.add if collapsed else self._collapsed.discard)(title)
 
+    def _media_thumb(self, m):
+        """A 44 px-high thumbnail for a media tag whose file is on this machine
+        (None otherwise — the 🖼 button then reports 'file on another box').
+        Cached per path: _rebuild redraws every row on each markers change, and
+        re-reading every photo from disk each time would not scale."""
+        if m.kind != "media" or self._media_resolver is None:
+            return None
+        try:
+            path = self._media_resolver(m)
+        except Exception:                                # noqa: BLE001
+            return None
+        if not path:
+            return None
+        pm = self._thumbs.get(path)
+        if pm is None:
+            src = QPixmap(path)
+            if src.isNull():
+                return None
+            pm = src.scaledToHeight(44, Qt.SmoothTransformation)
+            self._thumbs[path] = pm
+        return pm
+
     def _row(self, m):
         card = QFrame()
         card.setObjectName("EventCard")
@@ -1225,6 +1250,18 @@ class EventsPanel(QWidget):
             show.setToolTip("Open the photo")
             show.clicked.connect(lambda _=False, mid=m.id: self._on_open_media(mid))
             top.addWidget(show)
+        thumb = self._media_thumb(m)
+        if thumb is not None:
+            pic = QToolButton()                          # the thumbnail IS a button
+            pic.setIcon(QIcon(thumb))
+            pic.setIconSize(thumb.size())
+            pic.setToolTip("Open the photo")
+            pic.setStyleSheet("QToolButton{border:1px solid #232a38;"
+                              "border-radius:4px;padding:1px;}")
+            if self._on_open_media is not None:
+                pic.clicked.connect(
+                    lambda _=False, mid=m.id: self._on_open_media(mid))
+            lay.addWidget(pic, 0, Qt.AlignLeft)
         edit = QToolButton()
         edit.setText("✎")
         edit.clicked.connect(lambda _=False, mid=m.id: self._edit(mid))

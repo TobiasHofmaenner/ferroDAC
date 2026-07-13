@@ -30,6 +30,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QToolButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -1829,15 +1830,37 @@ class ImagePanel(Panel):
         lay.addWidget(self.view)
         self._src_key = None
         self._last_img = None
+        self.on_snapshot = None            # fn(source_key) — the Dashboard wires
+        #                                    the app's snapshot service (§9)
+        self._snap_btn = QToolButton(self.view)
+        self._snap_btn.setText("📷")
+        self._snap_btn.setToolTip("Take a photo of this camera (into the "
+                                  "project's media/ + a timeline tag)")
+        self._snap_btn.setCursor(Qt.PointingHandCursor)
+        self._snap_btn.setStyleSheet(
+            "QToolButton{background:rgba(20,26,34,190);border:1px solid #3a4250;"
+            "border-radius:5px;color:#cdd6e0;font-size:14px;padding:2px 7px;}"
+            "QToolButton:hover{background:rgba(46,57,74,230);}")
+        self._snap_btn.move(6, 6)          # fixed top-left corner (gear owns top-right)
+        self._snap_btn.raise_()
+        self._snap_btn.setVisible(False)   # only when a camera is routed
+        self._snap_btn.clicked.connect(self._snap)
+
+    def _snap(self):
+        if self.on_snapshot is not None and self._src_key:
+            self.on_snapshot(self._src_key)
 
     def add_source(self, key, source):
         self._src_key = key
+        self._snap_btn.setVisible(True)
+        self._snap_btn.raise_()
 
     def remove_source(self, key):
         if key == self._src_key:
             self._src_key = None
             self._last_img = None
             self.view.set_image(None)
+            self._snap_btn.setVisible(False)
 
     def feed(self, batch):
         img = None

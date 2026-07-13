@@ -410,6 +410,8 @@ class Dashboard(QObject):
         panel.set_sigma_provider(getattr(self, "_sigma_provider", None))
         panel.set_gap_provider(getattr(self, "_gap_provider", None))
         panel.set_media_provider(getattr(self, "_media_provider", None))
+        if hasattr(panel, "on_snapshot"):
+            panel.on_snapshot = getattr(self, "_snapshot_handler", None)
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
@@ -987,6 +989,14 @@ class Dashboard(QObject):
         self._media_provider = fn
         for panel in self._panels.values():
             panel.set_media_provider(fn)
+
+    def set_snapshot_handler(self, fn) -> None:
+        """Wire the app's take-a-photo service (§9) into every panel that offers
+        an on_snapshot hook (the camera view's 📷 button), existing and future."""
+        self._snapshot_handler = fn
+        for panel in self._panels.values():
+            if hasattr(panel, "on_snapshot"):
+                panel.on_snapshot = fn
 
     def sink_ports(self) -> list:
         return sorted(self._sinks.values(), key=lambda p: (p.kind != "device", p.name))

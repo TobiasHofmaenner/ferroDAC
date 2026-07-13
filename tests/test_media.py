@@ -336,3 +336,53 @@ def test_decode_rejects_garbage():
         FramePayload(b"not a jpeg", "jpeg", 4, 4)) is None
     assert HubController._decode_frame(
         FramePayload(b"\x00" * 5, "rgb888", 4, 4)) is None   # wrong size
+
+
+# -- §9 polish: per-panel 📷 button + Events-dock thumbnails ----------------------
+
+def test_camera_panel_snapshot_button():
+    """The camera view's 📷 button appears when a source is routed, fires the
+    wired handler with THAT panel's source key, and hides on unroute."""
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.ui.panels import ImagePanel
+    p = ImagePanel()
+    assert not p._snap_btn.isVisibleTo(p)
+    shots = []
+    p.on_snapshot = shots.append
+    p.add_source("cam/frame", types.SimpleNamespace(unit="", name="Cam"))
+    assert p._snap_btn.isVisibleTo(p)
+    p._snap_btn.click()
+    assert shots == ["cam/frame"]
+    p.remove_source("cam/frame")
+    assert not p._snap_btn.isVisibleTo(p)
+    p._snap_btn.click()                                  # unrouted → no shot
+    assert shots == ["cam/frame"]
+
+
+def test_events_dock_shows_media_thumbnails(tmp_path):
+    """A media row whose file is local gets a clickable thumbnail; a foreign
+    reference (file on another box) gets none — the 🖼 button handles that."""
+    from qtpy.QtWidgets import QApplication, QToolButton
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.core.markers import MarkerModel, SessionClock
+    from ferrodac.core.media import MediaService
+    from ferrodac.ui.docks import EventsPanel
+
+    svc, markers = _service(tmp_path, {"cam/frame": _reading("cam/frame", _frame())})
+    res = svc.snapshot("cam/frame")                      # a real, local photo
+    markers.add(res["t"] + 1, label="ghost", kind=MEDIA,
+                payload={"file": "media/not-here.png"})  # foreign/missing file
+
+    opened = []
+    panel = EventsPanel(markers, SessionClock(),
+                        on_open_media=opened.append,
+                        media_resolver=lambda m: MediaService.resolve(
+                            m, str(tmp_path)))
+    thumbs = [b for b in panel.findChildren(QToolButton)
+              if not b.icon().isNull() and b.toolTip() == "Open the photo"]
+    assert len(thumbs) == 1                              # local photo only
+    assert thumbs[0].iconSize().height() == 44
+    thumbs[0].click()
+    assert opened == [res["tag_id"]]                     # thumbnail opens the photo
+    panel.deleteLater()
