@@ -410,21 +410,22 @@ def test_ribbon_whole_window_drag_translates(qapp):
 
 
 @pytest.mark.ui
-def test_ribbon_window_cannot_be_zoomed_shut(qapp):
-    """The ribbon IS the window now (1:1 with the preview) and is changed by
-    panning/zooming it; a zoom floor stops the window collapsing to zero width
-    (which would break tc.width). Also: user pan/zoom emits windowChanged."""
+def test_ribbon_min_window_is_zoom_relative(qapp):
+    """The timeline window can't be dragged shut (head onto tail), but the floor is
+    a fraction of the VISIBLE span — zoom in and you can make a finer window."""
     from ferrodac.ui.timeline import Ribbon
     r = Ribbon(["k"], {"k": []}, 0.0, 1000.0)
     vb = r.getPlotItem().getViewBox()
-    vb.setXRange(500.0, 500.02, padding=0)           # try to zoom below the floor
-    (a, b), _ = vb.viewRange()
-    assert b - a >= 1.0                              # clamped to the min window
-
-    got = []
-    r.windowChanged.connect(lambda a, b, m: got.append((a, b)))
-    r._commit_ranged()                               # what a user pan/zoom commits
-    assert got and got[0][1] - got[0][0] >= 1.0      # the current view becomes the window
+    vb.setXRange(0, 1000, padding=0)
+    r.set_window(200.0, 800.0)
+    r.region.setRegion((200.0, 200.5))               # collapse the head onto the tail
+    a, b = r.region.getRegion()
+    assert b - a >= 0.029 * 1000                      # floored to ~3% of the 1000-wide view
+    vb.setXRange(0, 100, padding=0)                   # zoom in 10×
+    r.set_window(40.0, 60.0)
+    r.region.setRegion((40.0, 40.1))
+    a2, b2 = r.region.getRegion()
+    assert 0.029 * 100 <= (b2 - a2) < (b - a)         # finer floor when zoomed in
 
 
 @pytest.mark.ui

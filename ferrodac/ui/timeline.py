@@ -218,9 +218,6 @@ class Ribbon(pg.PlotWidget):
         self.setBackground(_PANEL)
         self.setMenuEnabled(False)
         self.setMouseEnabled(x=True, y=False)
-        # pan/zoom the ribbon = change the window; floor the zoom so it can't be
-        # closed onto a zero-width window (which would collapse tc.width).
-        self.getPlotItem().getViewBox().setLimits(minXRange=1.0)
         self.hideButtons()
         self.getAxis("left").setStyle(showValues=False)
         self.getAxis("left").setWidth(60)
@@ -245,16 +242,12 @@ class Ribbon(pg.PlotWidget):
         self._draw_bars(cover)
         self._draw_video_lanes()
         self._apply_yrange()
-        # 1:1 with the preview: the ribbon shows EXACTLY the window, so there is no
-        # sub-window band to drag — the window is changed by panning/zooming the
-        # ribbon itself (sigRangeChangedManually, wired after set_window). The region
-        # object is kept for set_window()'s bookkeeping, but hidden + fixed.
         self.region = pg.LinearRegionItem(brush=(77, 171, 247, 40),
                                            hoverBrush=(77, 171, 247, 70))
         self.region.setZValue(10)
-        self.region.setMovable(False)
-        self.region.hide()
         self.addItem(self.region)
+        self.region.sigRegionChanged.connect(self._on_region)
+        self.region.sigRegionChangeFinished.connect(self._on_region_done)
         self.head = pg.InfiniteLine(angle=90, movable=False,
                                     pen=pg.mkPen("#ff6b6b", width=2))
         self.head.setZValue(20)
@@ -266,15 +259,9 @@ class Ribbon(pg.PlotWidget):
         self.now_line.setZValue(15)
         self.addItem(self.now_line)
         self._now_t = t1
-        self.setXRange(t0, t1, padding=0)
+        self.setXRange(t0, t1, padding=0.02)
         self.set_now(t1)
         self.set_window(t0, t1)
-        # user pan/zoom of the ribbon = change the window (debounced heavy commit).
-        # sigRangeChangedManually fires ONLY on user input, so the programmatic
-        # frame_window() below never loops back here.
-        self._commit_timer = QtCore.QTimer(self, singleShot=True, interval=180)
-        self._commit_timer.timeout.connect(self._commit_ranged)
-        self.getPlotItem().getViewBox().sigRangeChangedManually.connect(self._on_ranged)
         self.scene().sigMouseClicked.connect(self._click)
         self.getPlotItem().getViewBox().sigXRangeChanged.connect(self._reflow)
         self._reflow()
@@ -438,23 +425,6 @@ class Ribbon(pg.PlotWidget):
         self.head.setPos(b)
         self._region_ref = (a, b)
 
-    def frame_window(self, a, b):
-        """Show EXACTLY [a,b] — the ribbon tracks the preview window 1:1. Programmatic
-        (padding 0), so it is not counted as a user range change (no commit loop)."""
-        self.getPlotItem().getViewBox().setXRange(a, b, padding=0)
-
-    def _on_ranged(self, *_):
-        """The user panned/zoomed the ribbon → THAT is the new window. Live-preview
-        immediately (cheap) and debounce the heavy commit (re-stream)."""
-        (a, b), _ = self.getPlotItem().getViewBox().viewRange()
-        self.head.setPos(b)
-        self.windowPreview.emit(a, b)
-        self._commit_timer.start()
-
-    def _commit_ranged(self):
-        (a, b), _ = self.getPlotItem().getViewBox().viewRange()
-        self.windowChanged.emit(a, b, "move")
-
     def _click(self, ev):
         if ev.double():
             t = self.getPlotItem().getViewBox().mapSceneToView(ev.scenePos()).x()
@@ -553,12 +523,16 @@ class TimelineWindow(QtWidgets.QMainWindow):
             self.tc.set_width(max(60.0, min(600.0, now - lo)))
             self.tc.follow_now()
             self.t0, self.t1 = self.tc.window
-            self._view0, self._view1 = self.t0, self.t1   # ribbon = window, 1:1 with preview
+            w = max(60.0, self.t1 - self.t0)
+            self._view0 = max(lo - 0.04 * w, now - 3.0 * w)   # 3× window, clamped to data
+            self._view1 = now + 0.02 * w
         else:
             # opened while PARKED (e.g. after Zoom-to-recording) → keep that exact
-            # window so the Timeline lands where you already are.
+            # window and frame the ribbon around it, so the Timeline lands where you
+            # already are instead of snapping back to the live edge.
             self.t0, self.t1 = self.tc.window
-            self._view0, self._view1 = self.t0, self.t1   # ribbon = window, 1:1 with preview
+            pad = max(1.0, (self.t1 - self.t0) * 0.1)
+            self._view0, self._view1 = self.t0 - pad, self.t1 + pad
 
         self._build_ui()
         self._restore_state()                  # reopen as it was left (checked + speed)
@@ -765,6 +739,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         bar.addWidget(self._live_btn)
         bar.addWidget(mk("📅 Date", self._open_calendar))
         bar.addWidget(mk("⤢ Fit", self._fit_to_view))
+        bar.addWidget(mk("⊡ Frame", self._frame_slice))
         sp = QtWidgets.QLabel("  speed"); sp.setStyleSheet(f"color:{_MUTED};")
         bar.addWidget(sp)
         self._speed = QtWidgets.QComboBox()
@@ -796,10 +771,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
             p.setBackground(_PANEL)
             p.setMinimumHeight(150)
             p.showGrid(x=True, y=True, alpha=0.15)
-            p.setMouseEnabled(x=False, y=False)      # read-only; the ribbon owns the window
+            p.setMouseEnabled(x=False, y=False)      # read-only; finder owns the window
             p.setMenuEnabled(False)
             p.hideButtons()
-            p.getAxis("left").setWidth(60)           # match the ribbon's left inset (1:1 x)
             if self._charts:
                 p.setXLink(next(iter(self._charts.values())))   # shared time axis
             if self.resolver.source_dtype(key) == "trace":      # spectrogram track
@@ -932,13 +906,22 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.tc.park_window(t - half, t + half)
 
     def _fit_to_view(self):
-        """Zoom the window OUT to span all recorded data — the ribbon IS the window
-        now (1:1 with the preview), so 'Fit' fits the window to the whole session.
-        (Pan/zoom the ribbon itself to change the window; double-click to recentre.)"""
-        covs = [self.resolver.coverage(k) for k in self._sources]
-        starts = [c[0][0] for c in covs if c]
-        if starts:
-            self.tc.park_window(min(starts), time.time())
+        """Snap the window/head to whatever the ribbon currently shows — navigate
+        the finder (drag=pan, scroll=zoom) to frame a region, then Fit."""
+        x0, x1 = self.ribbon.getPlotItem().getViewBox().viewRange()[0]
+        if x1 - x0 < 1e-6:
+            return
+        self.tc.width = x1 - x0
+        self.tc.park(x1)
+
+    def _frame_slice(self):
+        """Reverse of Fit: zoom the finder to frame the current window (with a
+        margin so the handles sit inset). Moves only the ribbon view."""
+        t0, t1 = self.tc.window
+        if t1 - t0 <= 0:
+            return
+        pad = (t1 - t0) * 0.1
+        self.ribbon.getPlotItem().getViewBox().setXRange(t0 - pad, t1 + pad, padding=0)
 
     def _day_densities(self):
         """{date: 0..1} fraction of each day covered by any source — for the
@@ -1008,7 +991,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self.t0, self.t1 = self.tc.window
         self._syncing = True                  # ribbon update must not re-park tc
         self.ribbon.set_window(self.t0, self.t1)
-        self.ribbon.frame_window(self.t0, self.t1)   # ribbon tracks the window 1:1
+        if self.tc.following:
+            self.ribbon.follow_view(self.t1)  # keep the live edge in view
         self._syncing = False
         self._refresh()
         self._drive_video_preview()
