@@ -561,6 +561,41 @@ def test_segment_at_point_query(tmp_path):
     assert st2.segment_at("camB", base + 50)["offset"] == pytest.approx(50.0)
 
 
+def test_segment_at_is_memoized_but_reflects_writes(tmp_path, monkeypatch):
+    """The scrub preview calls segment_at every transport tick; it must not
+    re-parse the O(segments) index each time (GUI-thread rule), yet must still
+    see a freshly-committed segment (the cache is keyed by the file's mtime)."""
+    import ferrodac.core.videostore as vsmod
+    from ferrodac.core.videostore import VideoStore
+    st = VideoStore(str(tmp_path / "video"))
+    base = 1_700_000_000.0
+    for i in range(2):                                 # [0,120],[120,240]
+        _write_seg(st, "camA", base + i * 120, base + (i + 1) * 120)
+
+    calls = {"n": 0}
+    real_load = vsmod.json.load
+    monkeypatch.setattr(vsmod.json, "load",
+                        lambda fh, _r=real_load: (calls.__setitem__("n", calls["n"] + 1), _r(fh))[1])
+    for _ in range(20):                                # a burst of scrub ticks
+        assert st.segment_at("camA", base + 130)["offset"] == pytest.approx(10.0)
+    assert calls["n"] == 1                             # parsed ONCE, not 20×
+
+    _write_seg(st, "camA", base + 240, base + 360)     # a new segment lands
+    r = st.segment_at("camA", base + 300)              # now inside coverage
+    assert r is not None and r["offset"] == pytest.approx(60.0)
+    assert calls["n"] == 2                             # re-parsed exactly once, on change
+
+
+def test_reads_do_not_create_camera_dirs(tmp_path):
+    """A point/coverage query for an unknown camera must not mkdir on the GUI
+    thread — only write paths create the camera directory."""
+    from ferrodac.core.videostore import VideoStore
+    st = VideoStore(str(tmp_path / "video"))
+    assert st.segment_at("ghost", 1_700_000_000.0) is None
+    assert st.coverage("ghost") == []
+    assert not os.path.exists(os.path.join(str(tmp_path / "video"), "ghost"))
+
+
 def test_media_files_in_enumerates_span_media(tmp_path):
     from ferrodac.core.media import MediaService
     proj = tmp_path / "proj"
@@ -633,3 +668,80 @@ def test_video_preview_resolves_and_blanks(tmp_path):
     assert vp._cur_path == st.segment_at("camA", base + 90)["path"]
     vp.set_head(base + 9999)                          # a gap → cleared
     assert vp._cur_path is None
+
+
+def test_video_preview_camera_list_is_pushed_not_polled(tmp_path):
+    """refresh_cameras honours a caller-supplied list without touching the disk —
+    the Timeline lists cameras off the paint thread and pushes them in (§9.3)."""
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])           # noqa: F841
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.ui.videopreview import VideoPreviewPanel
+    st = VideoStore(str(tmp_path / "video"))
+    vp = VideoPreviewPanel(st, names_fn=lambda: {})
+    st.cameras = lambda: (_ for _ in ()).throw(               # must NOT be polled
+        AssertionError("cameras() polled on the GUI tick"))
+    vp.refresh_cameras(["camA", "camB"])                        # pushed set, no disk
+    assert vp._cameras == ["camA", "camB"]
+
+
+def test_video_preview_drops_stale_frame_after_switch(tmp_path):
+    """A frame still in flight from the previous camera must not paint over the
+    newly-picked one: _on_frame is gated while _cur_path is None (§9.3)."""
+    from qtpy.QtWidgets import QApplication
+    from qtpy.QtGui import QImage
+    app = QApplication.instance() or QApplication([])           # noqa: F841
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.ui.videopreview import VideoPreviewPanel
+    vp = VideoPreviewPanel(VideoStore(str(tmp_path / "video")), names_fn=lambda: {})
+    painted = []
+    vp.view.set_image = lambda img: painted.append(img)
+    im = QImage(4, 4, QImage.Format.Format_RGB888)
+    im.fill(0)
+    frame = types.SimpleNamespace(toImage=lambda: im)
+    vp._cur_path = None                                # between a switch/gap and set_head
+    vp._on_frame(frame)
+    assert painted == []                               # stale frame dropped
+    vp._cur_path = "seg.mp4"                            # a source is now loaded
+    vp._on_frame(frame)
+    assert len(painted) == 1                            # and it paints
+
+
+def test_clips_bundle_waits_for_the_export_to_finish(tmp_path, monkeypatch):
+    """Regression: a long recording's auto-export sets run_dir only when it
+    COMPLETES, which can outlast clip materialization. The bundler must DEFER
+    (not silently drop the clips onto a still-None run_dir) until the export
+    lands via _on_recording_saved (§9.3)."""
+    import ferrodac.ui.app as appmod
+    from ferrodac.core.markers import MarkerModel
+
+    dispatched = []
+    monkeypatch.setattr(appmod, "run_task",
+                        lambda work, **kw: dispatched.append(kw.get("exclusive")))
+
+    markers = MarkerModel()
+    rec_mid = markers.add(100.0, kind="recording", t_end=160.0, label="REC")
+    clip_mid = markers.add(
+        100.0, t_end=160.0, kind="media", label="🎬",
+        payload={"file": "media/clip.mp4", "files": ["media/clip.mp4"],
+                 "source": "camA/frame", "format": "mp4", "rec_mid": rec_mid})
+    tags = [markers.get(clip_mid)]
+
+    fake = types.SimpleNamespace(
+        dashboard=types.SimpleNamespace(markers=markers),
+        _project_root=lambda: str(tmp_path),
+        _refresh_explorer=lambda: None,
+        statusBar=lambda: types.SimpleNamespace(showMessage=lambda *a, **k: None))
+    fake._bundle_clips_into_run = types.MethodType(
+        appmod.MainWindow._bundle_clips_into_run, fake)
+
+    # export still running (run_dir is None) → clips are STASHED, not dispatched
+    fake._bundle_clips_into_run(rec_mid, 100.0, 160.0, tags)
+    assert dispatched == []
+    assert rec_mid in fake.__dict__["_pending_clip_bundles"]
+
+    # export finishes: run_dir lands, then the save callback flushes the clips
+    markers.update(rec_mid, run_dir=str(tmp_path / "run_x"))
+    appmod.MainWindow._on_recording_saved(fake, rec_mid, str(tmp_path / "run_x"), 2)
+    assert dispatched == [f"bundle-clip:{rec_mid}"]    # NOW dispatched, exactly once
+    assert rec_mid not in fake.__dict__.get("_pending_clip_bundles", {})

@@ -46,7 +46,9 @@ def test_explicit_immutable_overrides_the_default_rule():
     pinned = m.get(m.add(30.0, label="pinned note", immutable=True))
     assert pinned.immutable and not is_movable(pinned)   # a user CAN pin an annotation
     loose = m.get(m.add(30.0, kind=MEDIA, payload={"file": "m/x.png"}, immutable=False))
-    assert not loose.immutable                     # ...and un-pin (explicit wins)
+    assert not loose.immutable and is_movable(loose)   # ...and un-pin a photo (explicit wins)
+    m.move(loose.id, 40.0)
+    assert m.get(loose.id).t == 40.0               # the un-pinned photo actually drags
 
 
 def test_immutable_persists_and_legacy_derives():
@@ -59,4 +61,4 @@ def test_immutable_persists_and_legacy_derives():
     legacy = {k: v for k, v in d.items() if k != "immutable"}
     legacy["id"] = "legacy-1"
     lm = marker_from_dict(legacy)
-    assert lm.immutable is False and not is_movable(lm)   # field absent, kind rule holds
+    assert lm.immutable is None and not is_movable(lm)   # field absent → derive by kind

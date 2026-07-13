@@ -1046,7 +1046,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
     def _sync_video_cameras(self) -> None:
         vp = getattr(self, "video_preview", None)
         if vp is not None:
-            vp.refresh_cameras()
+            # cameras were already enumerated OFF the paint thread by the coverage
+            # refresh (_video_cover keys) — reuse that, don't os.listdir on the tick.
+            vp.refresh_cameras(list(self._video_cover))
 
     def closeEvent(self, ev):
         # leave the head/view exactly as-is — the dockable Player controls the

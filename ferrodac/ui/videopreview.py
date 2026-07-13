@@ -51,11 +51,17 @@ class VideoPreviewPanel(QWidget):
         self.refresh_cameras()
 
     # -- camera set -----------------------------------------------------------
-    def refresh_cameras(self) -> None:
-        try:
-            cams = self._store.cameras() if self._store is not None else []
-        except Exception:                # noqa: BLE001
-            cams = []
+    def refresh_cameras(self, cams=None) -> None:
+        """Reconcile the camera picker. `cams` is the caller's already-listed set
+        (the Timeline lists them OFF the paint thread in its coverage refresh, so
+        this runs no disk I/O per tick); None → list once from the store (the
+        one-time __init__ call)."""
+        if cams is None:
+            try:
+                cams = self._store.cameras() if self._store is not None else []
+            except Exception:            # noqa: BLE001
+                cams = []
+        cams = list(cams)
         if cams == self._cameras:
             self.setVisible(bool(cams))
             return
@@ -75,8 +81,11 @@ class VideoPreviewPanel(QWidget):
     def _on_pick(self, idx: int) -> None:
         if 0 <= idx < len(self._cameras):
             self._cam = self._cameras[idx]
-            self._cur_path = None        # force a reload for the new camera
+            self._cur_path = None        # force a reload for the new camera; also
+            #                              gates _on_frame so a queued frame from the
+            #                              OLD camera can't paint over the new one
             self._player.stop()
+            self.view.set_image(None)    # drop the previous camera's still at once
 
     # -- head-driven playback -------------------------------------------------
     def set_head(self, t: float, playing: bool = False) -> None:
@@ -104,6 +113,8 @@ class VideoPreviewPanel(QWidget):
             self._player.pause()          # decode + hold the single frame
 
     def _on_frame(self, frame) -> None:
+        if self._cur_path is None:       # between a camera switch / gap and the next
+            return                       #   set_head: any in-flight frame is stale
         try:
             img = frame.toImage()
         except Exception:                # noqa: BLE001

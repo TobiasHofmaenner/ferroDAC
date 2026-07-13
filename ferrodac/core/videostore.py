@@ -31,34 +31,53 @@ def _safe(name: str) -> str:
 class VideoStore:
     def __init__(self, root: str):
         self.root = root                    # <app_dir>/video
+        self._cache: dict = {}              # cam_uuid -> ((mtime_ns, size), entries):
+        #                                     memo of index.json keyed by the file's
+        #                                     signature, so the per-tick scrub point
+        #                                     query (segment_at) doesn't re-parse an
+        #                                     O(segments) index off a GUI timer (§9.3).
 
     # -- paths / index ---------------------------------------------------------
-    def cam_dir(self, cam_uuid: str) -> str:
+    def cam_dir(self, cam_uuid: str, create: bool = False) -> str:
         d = os.path.join(self.root, _safe(cam_uuid))
-        os.makedirs(d, exist_ok=True)
+        if create:                          # WRITE paths only — reads must not touch
+            os.makedirs(d, exist_ok=True)   #   the disk (segment_at is on the GUI thread)
         return d
 
-    def _index_path(self, cam_uuid: str) -> str:
-        return os.path.join(self.cam_dir(cam_uuid), "index.json")
+    def _index_path(self, cam_uuid: str, create: bool = False) -> str:
+        return os.path.join(self.cam_dir(cam_uuid, create=create), "index.json")
 
     def _load(self, cam_uuid: str) -> list:
+        """The camera's index, memoized by (mtime, size). Returns a COPY: callers
+        (commit/prune/delete) mutate the list, so the cached one stays pristine."""
+        path = self._index_path(cam_uuid)
         try:
-            with open(self._index_path(cam_uuid), encoding="utf-8") as fh:
-                return json.load(fh)
-        except Exception:                   # noqa: BLE001 — fresh / corrupt → empty
+            st = os.stat(path)
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:                     # fresh / missing → empty (drop any memo)
+            self._cache.pop(cam_uuid, None)
             return []
+        hit = self._cache.get(cam_uuid)
+        if hit is None or hit[0] != sig:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    entries = json.load(fh)
+            except Exception:               # noqa: BLE001 — corrupt → empty
+                entries = []
+            self._cache[cam_uuid] = hit = (sig, entries)
+        return list(hit[1])
 
     def _save(self, cam_uuid: str, entries: list) -> None:
-        path = self._index_path(cam_uuid)
+        path = self._index_path(cam_uuid, create=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(entries, fh)
-        os.replace(tmp, path)
+        os.replace(tmp, path)               # next _load sees the new mtime → re-parses
 
     # -- segment lifecycle -------------------------------------------------------
     def segment_path(self, cam_uuid: str, t0: float) -> str:
         """Where the recorder should write the segment starting at t0."""
-        return os.path.join(self.cam_dir(cam_uuid), f"seg_{int(t0 * 1000)}.mp4")
+        return os.path.join(self.cam_dir(cam_uuid, create=True), f"seg_{int(t0 * 1000)}.mp4")
 
     def commit(self, cam_uuid: str, t0: float, t1: float, path: str) -> bool:
         """Register a FINALIZED segment (the file must exist and be non-empty —

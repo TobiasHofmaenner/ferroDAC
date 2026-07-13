@@ -62,10 +62,12 @@ class Marker:
     projects: list = field(default_factory=list)  # project ids — curation lens (§8.1)
     version: int = 1                  # LWW: higher wins on merge by id
     deleted: bool = False             # tombstone — propagates a delete across peers
-    immutable: bool = False           # a FIXED point-in-time fact whose TIME must
-    #                                   not be dragged (a photo documents an instant;
-    #                                   a device/processor alarm is a fact). Set at
-    #                                   creation; label/comment stay editable.
+    immutable: "bool | None" = None   # is the TIME fixed? True/False is AUTHORITATIVE
+    #                                   (a photo/emitted alarm pins to its instant;
+    #                                   an explicit False un-pins). None = derive from
+    #                                   kind/origin — legacy tags predate the flag.
+    #                                   add() resolves None→bool at creation; the
+    #                                   label/comment stay editable either way.
 
     @property
     def is_region(self) -> bool:
@@ -81,11 +83,13 @@ def is_movable(m) -> bool:
     photos (a captured instant) and device/processor/system-emitted events (an
     alarm happened WHEN it happened). User annotations and recording spans stay
     movable (a REC marker moving re-slices its clip — §9.3). The explicit
-    `immutable` flag is authoritative; the kind/origin derivation also covers
-    legacy tags persisted before the flag existed."""
-    if getattr(m, "immutable", False):
-        return False
-    if m.kind == MEDIA:                        # photos + clip refs are fixed
+    `immutable` flag is authoritative in BOTH directions (True pins any tag,
+    False un-pins even a photo); only when it is None (a legacy tag persisted
+    before the flag existed) do we derive fixedness from the kind/origin."""
+    imm = getattr(m, "immutable", None)
+    if imm is not None:                        # explicit / add()-resolved flag wins
+        return not imm
+    if m.kind == MEDIA:                        # legacy tag: photos + clip refs fixed
         return False
     if m.origin_kind in (ORIGIN_DEVICE, ORIGIN_PROCESSOR, ORIGIN_SYSTEM):
         return False                           # emitted facts, not annotations
@@ -118,7 +122,9 @@ def marker_from_dict(d: dict) -> "Marker | None":
         d.get("scope", "global"), d.get("severity", "info"),
         dict(d.get("payload") or {}), list(d.get("projects") or []),
         int(d.get("version", 1)), bool(d.get("deleted", False)),
-        bool(d.get("immutable", False)))
+        # ABSENT → None (a legacy tag: is_movable derives from kind); present →
+        # keep the stored bool as authoritative (an explicit un-pin round-trips).
+        (None if d.get("immutable") is None else bool(d["immutable"])))
 
 
 # §7.3 vocabulary alias — the entity is a Tag; "Marker" is the legacy name.

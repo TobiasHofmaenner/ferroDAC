@@ -2108,14 +2108,24 @@ class MainWindow(QMainWindow):
                  on_done=done)
 
     def _bundle_clips_into_run(self, rec_mid, t0, t1, tags) -> None:
-        """Copy freshly-materialized clips into the recording's ALREADY-exported
-        run bundle (the auto-export ran at Stop, before the clips landed). Off the
-        GUI thread; no-op if the recording was never exported to a run dir."""
+        """Copy freshly-materialized clips into the recording's run bundle. The
+        auto-export at Stop runs OFF the GUI thread and only sets the marker's
+        run_dir when it COMPLETES — for a long/multi-source recording that can
+        outlast clip materialization. So if the bundle isn't on disk yet we STASH
+        the clips and let _on_recording_saved flush them once the export lands
+        (previously a fixed 3 s timer raced the export and silently dropped the
+        video from exactly those long recordings). Off the GUI thread; a no-op
+        only if the recording is never exported to a run dir (e.g. export failed)."""
+        root = self._project_root()
+        if not root or not tags:
+            return
         m = self.dashboard.markers.get(rec_mid)
         run_dir = getattr(m, "run_dir", None) if m is not None else None
-        root = self._project_root()
-        if not run_dir or not root:
+        if not run_dir:                              # export still in flight → defer
+            self.__dict__.setdefault("_pending_clip_bundles", {})[rec_mid] = \
+                (t0, t1, tags)
             return
+        self.__dict__.get("_pending_clip_bundles", {}).pop(rec_mid, None)
         from ..core.markers import marker_to_dict
         dicts = [marker_to_dict(t) for t in tags]
 
@@ -2194,6 +2204,12 @@ class MainWindow(QMainWindow):
         self._refresh_explorer()                   # the new recording card shows up
         self.statusBar().showMessage(
             f"■ Saved recording: {n} source(s) → {dest}", 8000)
+        # the run bundle now exists (run_dir was set just before this fired) — flush
+        # any clips that materialized while the export was still running (§9.3).
+        pending = self.__dict__.get("_pending_clip_bundles", {}).pop(mid, None)
+        if pending is not None:
+            t0, t1, tags = pending
+            self._bundle_clips_into_run(mid, t0, t1, tags)
 
     def _export_task(self, dest, sources, t0, t1, *, title, on_ok,
                      on_fail=None, flush=False, exclusive="") -> None:
