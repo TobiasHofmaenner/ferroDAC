@@ -45,6 +45,8 @@ class TimeContext:
         self.nav: int = 0                # bumps on navigation (scrub/tail-drag) only —
         #                                  NOT on pause/play/go-live, so transport never
         #                                  triggers a reload
+        self.buffering: bool = False     # play is HELD at the buffer watermark (§12.1)
+        self._buffer_gate = None         # () -> max playable head, or None (no gate)
         self._subs: list = []
 
     @property
@@ -156,11 +158,32 @@ class TimeContext:
             self.head = self._now()
             self._notify()
 
+    def set_buffer_gate(self, fn):
+        """Install a watermark source: `fn() -> max playable head | None`. While
+        playing, the head never advances past it — it HOLDS ('buffering…') rather
+        than silently slowing, so replay speed stays honest. None disables the
+        gate (no hub / everything local)."""
+        self._buffer_gate = fn
+
     def tick_play(self, dt_wall: float):
-        """Advance the parked head by speed×dt; lock to live when it catches now."""
+        """Advance the parked head by speed×dt; lock to live when it catches now.
+        Gated: if the buffer can't keep up, hold at the watermark at TRUE speed —
+        never fake a slower rate (a physicist calibrates against it, §12.1)."""
         if not self.playing:
             return
-        self.head += self.speed * dt_wall
+        target = self.head + self.speed * dt_wall
+        limit = self._buffer_gate() if self._buffer_gate is not None else None
+        if limit is not None and target > limit:
+            new_head = max(self.head, min(target, limit))   # inch to the edge, no further
+            moved, entering = new_head > self.head, not self.buffering
+            self.head = new_head
+            self.buffering = True
+            if moved or entering:            # while fully stalled, stay quiet (no 20 Hz spam)
+                self._notify()
+            return
+        if self.buffering:
+            self.buffering = False           # buffer caught up → resume at true speed
+        self.head = target
         if self.head >= self._now():
             self.follow_now()
         else:

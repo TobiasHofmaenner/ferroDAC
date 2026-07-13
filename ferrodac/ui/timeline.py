@@ -465,6 +465,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         #                                      per-camera coverage lane + scrub preview
         self._video_cover = {}
         self._video_backfill = None          # hub pull engine (§9.3 ph3), set by app
+        self._pin_fn = None                  # (t0,t1) -> pin the window to local (§12.1)
         self._reads = reads                  # async resolver facade (§21.3); the
         #                                      coverage tick + preview queries go
         #                                      through it so they never block paint.
@@ -740,6 +741,9 @@ class TimelineWindow(QtWidgets.QMainWindow):
         bar.addWidget(mk("📅 Date", self._open_calendar))
         bar.addWidget(mk("⤢ Fit", self._fit_to_view))
         bar.addWidget(mk("⊡ Frame", self._frame_slice))
+        pin = mk("📌 Pin", self._pin_clicked)
+        pin.setToolTip("Pin this window's hub history into the local store (offline)")
+        bar.addWidget(pin)
         sp = QtWidgets.QLabel("  speed"); sp.setStyleSheet(f"color:{_MUTED};")
         bar.addWidget(sp)
         self._speed = QtWidgets.QComboBox()
@@ -1004,10 +1008,21 @@ class TimelineWindow(QtWidgets.QMainWindow):
         else:
             self.perf.set_play("⏸ parked")
         dt = self.now - self.t1
-        tag = ("● LIVE" if self.tc.following
+        buffering = getattr(self.tc, "buffering", False) and self.tc.playing
+        tag = ("⏳ buffering…" if buffering
+               else "● LIVE" if self.tc.following
                else (f"-{dt/60:.1f} min" if dt > 1 else "now"))
         self._clock.setText(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.t1))
                             + f"   {tag}")
+
+    def on_data_prefetched(self) -> None:
+        """Prefetched hub history landed in the local cache → re-query the preview
+        and ribbon coverage (now served locally). Called on the GUI thread."""
+        try:
+            self._refresh()
+            self._refresh_coverage()
+        except Exception:                     # noqa: BLE001 — a stale refresh ≠ crash
+            pass
 
     # -- persistence (reopen as left) ----------------------------------------
     def _restore_state(self) -> None:
@@ -1043,6 +1058,15 @@ class TimelineWindow(QtWidgets.QMainWindow):
                    if self._src_list.item(i).checkState() == QtCore.Qt.Checked]
         QtCore.QSettings("ferroDAC", "ferroDAC").setValue(
             "timeline/state", json.dumps({"checked": checked, "speed": self.tc.speed}))
+
+    def set_pin_handler(self, fn) -> None:
+        """Install `fn(t0,t1)` — pin the current window's hub data into the durable
+        local store (§12.1 Phase 3). None hides the Pin button's effect."""
+        self._pin_fn = fn
+
+    def _pin_clicked(self) -> None:
+        if self._pin_fn is not None:
+            self._pin_fn(self.t0, self.t1)
 
     def set_video_backfill(self, engine) -> None:
         """Install (or clear) the hub backfill engine and reset the miss dedup so a

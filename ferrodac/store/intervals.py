@@ -75,3 +75,42 @@ def merge(intervals):
         else:
             out.append((a, b))
     return out
+
+
+def intersect(a_list, b_list):
+    """Intervals common to BOTH lists (A ∩ B), sorted + disjoint. Used by the
+    playback prefetcher to clip the hub's coverage to the target window."""
+    A, B = merge(a_list), merge(b_list)
+    out, i, j = [], 0, 0
+    while i < len(A) and j < len(B):
+        lo, hi = max(A[i][0], B[j][0]), min(A[i][1], B[j][1])
+        if lo < hi:
+            out.append((lo, hi))
+        if A[i][1] < B[j][1]:
+            i += 1
+        else:
+            j += 1
+    return out
+
+
+def subtract(a_list, b_list):
+    """A − B: the parts of each A interval NOT covered by any B interval. The
+    prefetcher's gap finder: `subtract(intersect(hub_cov, target), local_cov)` is
+    exactly the ranges to fetch from the hub into the local cache."""
+    B = merge(b_list)
+    out = []
+    for a, b in merge(a_list):
+        cur = a
+        for lo, hi in B:
+            if hi <= cur:
+                continue
+            if lo >= b:
+                break
+            if lo > cur:
+                out.append((cur, min(lo, b)))
+            cur = max(cur, hi)
+            if cur >= b:
+                break
+        if cur < b:
+            out.append((cur, b))
+    return out

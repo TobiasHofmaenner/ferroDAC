@@ -70,20 +70,37 @@ class Resolver:
     # threads (DESIGN §21.3) can never see a half-edited list when the GUI
     # attaches/detaches the hub tier. No lock on the read path.
     def __init__(self, tiers):
-        self.tiers = list(tiers)                         # nearest → far
-        self._remote = None
+        self._base = list(tiers)                         # nearest → far (RAM, store)
+        self._prefetch = None                            # local hub-fill cache (§12.1)
+        self._remote = None                              # the hub tier
+        self.tiers = list(self._base)                    # rebuilt on any mutation
+
+    def _rebuild(self) -> None:
+        # order: base locals → prefetch cache (local) → remote hub (farthest).
+        # Rebound atomically (never mutated in place) so worker reads never tear.
+        tiers = list(self._base)
+        if self._prefetch is not None:
+            tiers.append(self._prefetch)
+        if self._remote is not None:
+            tiers.append(self._remote)
+        self.tiers = tiers
 
     def set_remote(self, tier) -> None:
-        """Attach the hub as the FARTHEST tier (local RAM/store win on overlap;
-        the hub fills history we lack locally). Replaces any prior remote."""
-        self.clear_remote()
+        """Attach the hub as the FARTHEST tier (local RAM/store/prefetch win on
+        overlap; the hub fills history we lack locally). Replaces any prior remote."""
         self._remote = tier
-        self.tiers = [*self.tiers, tier]
+        self._rebuild()
 
     def clear_remote(self) -> None:
-        if self._remote is not None:
-            self.tiers = [t for t in self.tiers if t is not self._remote]
         self._remote = None
+        self._rebuild()
+
+    def set_prefetch(self, tier) -> None:
+        """A LOCAL cache tier consulted after the store but before the hub — the
+        playback prefetcher fills it from the hub so GUI-thread reads stay local
+        (§12.1). Counts as local (included in local_only reads)."""
+        self._prefetch = tier
+        self._rebuild()
 
     def _tiers(self, local_only: bool = False) -> list:
         """Atomic tier snapshot; local_only drops the remote (hub) tier — for

@@ -18,7 +18,10 @@ from .replay import Mode, PlaybackSource, ReplayController, TimeContext
 from .asyncread import ReadService
 from .sync import LocalTransport, SyncEngine
 from .export import append_media_to_bundle, export_window
+from .prefetch import PrefetchCache
+from .prefetcher import PlaybackPrefetcher
 
 __all__ = ["ZarrStore", "Resolver", "RamTier", "StoreWriter", "Mode",
            "PlaybackSource", "ReplayController", "TimeContext", "ReadService",
-           "SyncEngine", "LocalTransport", "export_window", "append_media_to_bundle"]
+           "SyncEngine", "LocalTransport", "export_window", "append_media_to_bundle",
+           "PrefetchCache", "PlaybackPrefetcher"]

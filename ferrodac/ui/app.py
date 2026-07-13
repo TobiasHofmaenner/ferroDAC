@@ -125,6 +125,8 @@ class MainWindow(QMainWindow):
         self._video_capture = None       # the rotation service
         self.resolver = None
         self.reads = None                  # async resolver facade (§21.3)
+        self._prefetch_cache = None        # local hub-fill cache tier (§12.1)
+        self._prefetcher = None            # PlaybackPrefetcher (started on hub connect)
         self.time_context = None
         self.replay = None
         # historic-catalog resolve cache — must exist BEFORE the Dashboard is
@@ -146,6 +148,12 @@ class MainWindow(QMainWindow):
             self._push_device_records()
             # the read path: one query() over the live RAM ring + the durable store
             self.resolver = Resolver([RamTier(self.history), store])
+            # a local hub-fill cache sits between the store and the (future) hub tier:
+            # the playback prefetcher pulls hub history into it so GUI-thread reads
+            # stay local (§12.1). Always present; empty until a hub connects.
+            from ..store import PrefetchCache
+            self._prefetch_cache = PrefetchCache()
+            self.resolver.set_prefetch(self._prefetch_cache)
             # every UI-initiated read (Timeline coverage tick + preview queries)
             # goes through here → a worker pool, off the paint thread, with a
             # coverage TTL cache + supersession (§21.3). Results marshal back via
@@ -550,6 +558,7 @@ class MainWindow(QMainWindow):
             self._timeline_win = win
         # scrub-to-preview backfill: a hub-only instant pulls its segment (§9.3 ph3)
         self._timeline_win.set_video_backfill(self.hub.video_backfill)
+        self._timeline_win.set_pin_handler(self._pin_window)   # §12.1 pin-to-local
         self._timeline_win.show()
         self._timeline_win.raise_()
         self._timeline_win.activateWindow()
@@ -739,6 +748,52 @@ class MainWindow(QMainWindow):
         self._refresh_doc_collab()              # offer/retire the Collaborate toggle
         if getattr(self, "_timeline_win", None) is not None:   # (dis)connect → (un)wire
             self._timeline_win.set_video_backfill(self.hub.video_backfill)   # video backfill
+        self._reconcile_prefetcher(connected)   # playback prefetch follows the hub (§12.1)
+
+    def _reconcile_prefetcher(self, connected: bool) -> None:
+        """Start the playback prefetcher on hub connect, stop it on disconnect. It
+        pulls hub history into the local cache ahead of the head so replay never
+        blocks and never skips hub data — the head HOLDS at the buffer edge (§12.1)."""
+        tier = self.hub.read_tier if getattr(self, "hub", None) is not None else None
+        want = bool(connected and tier is not None and self.resolver is not None
+                    and self.time_context is not None and self._prefetch_cache is not None)
+        if want and self._prefetcher is None:
+            from ..store import PlaybackPrefetcher
+            self._prefetcher = PlaybackPrefetcher(
+                resolver=self.resolver, hub=tier, cache=self._prefetch_cache,
+                tc=self.time_context, sources_fn=self.dashboard.source_keys,
+                store=self.store_writer.store if self.store_writer is not None else None,
+                deliver=self._gui_bridge.post, on_filled=self._on_prefetch_filled)
+            self._prefetcher.start()
+            self.time_context.set_buffer_gate(self._prefetcher.buffered_until)
+        elif not want and self._prefetcher is not None:
+            self.time_context.set_buffer_gate(None)
+            self._prefetcher.stop()
+            self._prefetcher = None
+            if self._prefetch_cache is not None:
+                self._prefetch_cache.clear()
+
+    def _pin_window(self, t0, t1) -> None:
+        """§12.1 Phase 3: promote the hub's data over [t0,t1] into the durable local
+        store, so it survives a restart (the prefetch cache is RAM-only)."""
+        if self._prefetcher is None:
+            self.statusBar().showMessage("Pin needs a hub connection", 4000)
+            return
+        self.statusBar().showMessage("📌 Pinning this window into the local store…", 0)
+        self._prefetcher.pin(t0, t1, on_done=lambda n: self.statusBar().showMessage(
+            f"📌 Pinned {n} source(s) to the local store", 6000))
+
+    def _on_prefetch_filled(self) -> None:
+        """A prefetched range landed (GUI thread) → re-read the now-fuller LOCAL
+        tiers. Parked scalars redraw via reconcile; during play the per-tick advance
+        already reads the cache; the Timeline preview re-queries."""
+        if self.reads is not None:
+            self.reads.invalidate()             # local coverage grew
+        if self.chart_feed is not None:
+            self.chart_feed.reconcile(force=True)
+        tl = getattr(self, "_timeline_win", None)
+        if tl is not None:
+            tl.on_data_prefetched()
 
     def _on_hub_link(self, state: str, detail: str) -> None:
         """Recolour the Cloud button from the ACTUAL gRPC link state, so it reflects
@@ -2772,6 +2827,8 @@ class MainWindow(QMainWindow):
             set_default_runner(None)        # don't leave a shut-down runner as default
         if getattr(self, "reads", None) is not None:
             self.reads.shutdown()           # cancel in-flight timeline reads
+        if getattr(self, "_prefetcher", None) is not None:
+            self._prefetcher.stop()         # stop the playback prefetch worker
         if self.store_writer is not None:
             self.store_writer.stop()        # flush the buffer + build final rollups
         self.dashboard.shutdown()

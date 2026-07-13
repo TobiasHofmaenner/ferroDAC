@@ -64,6 +64,7 @@ class HubController(QObject):
         self._sync = None                # store-and-forward SyncRunner (agent role)
         self._videosync = None           # ambient-video segment sync (§9.3 phase 3)
         self._video_backfill = None      # hub-backed VideoSyncEngine for scrub pulls
+        self._read_tier = None           # HubReadTier — the playback prefetcher's source
         self._agent_unsub = None
         self._tags_wired = False
         self._local: set = set()
@@ -193,6 +194,7 @@ class HubController(QObject):
                 from ..net.readtier import HubReadTier
                 tier = HubReadTier(self._read_chan)
                 self._resolver.set_remote(tier)
+                self._read_tier = tier                # exposed for the playback prefetcher
                 self._hub_sources = tier.sources()    # one ListSources for the catalog
             # video read side: an engine that pulls the hub's segment covering a
             # scrubbed instant the local store lacks (§9.3 phase 3 backfill).
@@ -238,6 +240,12 @@ class HubController(QObject):
         or None when not connected / there is no local video store."""
         return self._video_backfill
 
+    @property
+    def read_tier(self):
+        """The live HubReadTier (§12.1) the playback prefetcher pulls from, or None
+        when not connected."""
+        return self._read_tier
+
     def disconnect(self) -> None:
         if self._agent_unsub is not None:
             self._agent_unsub()
@@ -256,6 +264,7 @@ class HubController(QObject):
             self._read_chan = None
         self._hub_sources = []
         self._video_backfill = None
+        self._read_tier = None
         if self._sync is not None:
             self._sync.stop()
             self._sync = None
