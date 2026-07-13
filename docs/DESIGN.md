@@ -872,6 +872,34 @@ complete archives with no separate blob transport needed for durability.
   re-clone everywhere), not a delete.
 - Consequence: no .gitignore for media/; `git add -A` sweeping media is CORRECT.
 
+### 9.3 Ambient video — clips are queries over always-on capture (decided 2026-07-13)
+
+Stage-c clips were welded to the Record button presses, so MOVABLE markers lied
+for video. Fixed by applying §7.1/§7.4 to the video modality: capture is
+(optionally) always-on; a clip is a SELECTION over it, re-materialized whenever
+its markers move — the video twin of data.csv.
+
+- **One pipeline, four gates.** All video flows through a rotating SEGMENT
+  recorder (~2 min H.264 documentation-quality segments + a per-camera
+  [t0,t1]→file index) in the app's ambient area (next to store.zarr — NOT the
+  project). The per-camera option only picks when it runs:
+  Off (default — a new camera never silently eats disk) · While recording ·
+  Always · Always with retention (opt-in, size- or time-based; once hub video
+  sync exists, a "prune only hub-confirmed segments" safety notch).
+- **Philosophy: never silently delete.** Deletion is scarier than a full disk.
+  No default retention; a MANUAL cleanup dialog instead. One guard: a low-disk
+  floor pauses VIDEO capture (loud banner) — video stops, scalars keep flowing;
+  running out mid-experiment is accepted risk, taking down the zarr store is not.
+- **Materialization**: on Record stop, the span's overlapping segments are
+  concatenated (ffmpeg stream-copy when available, multi-part copy otherwise)
+  into <project>/media/ + a span media tag. MOVING a REC marker re-materializes
+  from ambient (debounced); a span beyond ambient coverage keeps the old clip
+  and warns honestly. Segment-boundary slop (~2 min) at clip edges is accepted;
+  the tag carries exact t0/t1.
+- **Phases**: (1) this core; (2) timeline video-coverage bars + scrub preview,
+  export bundles carry clips; (3) hub segment sync + on-demand backfill (the
+  zarr store-and-forward model applied to segments).
+
 ---
 
 ## 10. Documentation / ELN behaviours
