@@ -127,6 +127,7 @@ class MainWindow(QMainWindow):
         self.reads = None                  # async resolver facade (§21.3)
         self._prefetch_cache = None        # local hub-fill cache tier (§12.1)
         self._prefetcher = None            # PlaybackPrefetcher (started on hub connect)
+        self._prefetch_redraw_pending = False   # coalesce prefetch-fill chart redraws
         self.time_context = None
         self.replay = None
         # historic-catalog resolve cache — must exist BEFORE the Dashboard is
@@ -797,17 +798,31 @@ class MainWindow(QMainWindow):
             f"📌 Pinned {n} source(s) to the local store", 6000))
 
     def _on_prefetch_filled(self) -> None:
-        """A prefetched range landed (GUI thread) → re-read the now-fuller LOCAL
-        tiers. reconcile(force=True) redraws the window envelope in BOTH parked and
-        playing modes, so newly-arrived hub history becomes visible immediately (the
-        per-tick advance only appends the swept sliver); the Timeline preview re-queries."""
+        """A prefetched range landed (GUI thread) → re-read the now-fuller LOCAL tiers.
+        Hit back-to-back during a big backfill, so the redraws are COALESCED: while
+        PLAYING the chart is left to advance() (it draws the head area incrementally as
+        the head reaches each newly-cached slice) — a full-window reconcile per fill
+        here just saturates the GUI and stalls replay; while PARKED one reconcile is
+        scheduled per ~150 ms. The Timeline preview throttles itself (on_data_prefetched)."""
         if self.reads is not None:
             self.reads.invalidate()             # local coverage grew
-        if self.chart_feed is not None:
-            self.chart_feed.reconcile(force=True)
         tl = getattr(self, "_timeline_win", None)
         if tl is not None:
             tl.on_data_prefetched()
+        if self.chart_feed is None:
+            return
+        tc = self.time_context
+        if tc is not None and tc.playing:
+            return                              # play: advance() draws it — don't re-query
+        if not self._prefetch_redraw_pending:   # parked: coalesce the full-window redraw
+            self._prefetch_redraw_pending = True
+            QTimer.singleShot(150, self._flush_prefetch_redraw)
+
+    def _flush_prefetch_redraw(self) -> None:
+        self._prefetch_redraw_pending = False
+        tc = self.time_context
+        if self.chart_feed is not None and not (tc is not None and tc.playing):
+            self.chart_feed.reconcile(force=True)
 
     def _on_hub_link(self, state: str, detail: str) -> None:
         """Recolour the Cloud button from the ACTUAL gRPC link state, so it reflects

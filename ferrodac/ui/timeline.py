@@ -559,6 +559,14 @@ class TimelineWindow(QtWidgets.QMainWindow):
         # heavy main re-stream only fires on release (windowChanged).
         self._preview_timer = QtCore.QTimer(self, interval=40, singleShot=True)
         self._preview_timer.timeout.connect(self._do_preview)
+        # COALESCE the preview re-query during playback + prefetch fills: the head
+        # moves every ~50 ms and the prefetcher lands data back-to-back, but a full
+        # per-source query+redraw at that rate is what made replay crawl with the
+        # Timeline open (each _on_tc / on_data_prefetched fired _refresh). ~6 Hz.
+        self._refresh_timer = QtCore.QTimer(self, interval=160, singleShot=True)
+        self._refresh_timer.timeout.connect(self._refresh)
+        self._cov_timer = QtCore.QTimer(self, interval=500, singleShot=True)
+        self._cov_timer.timeout.connect(self._refresh_coverage)
 
     def _sync_media_marks(self) -> None:
         """Media tags (kind="media") as thin photo marks on the ribbon, so a
@@ -998,7 +1006,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         if self.tc.following:
             self.ribbon.follow_view(self.t1)  # keep the live edge in view
         self._syncing = False
-        self._refresh()
+        if not self._refresh_timer.isActive():        # coalesce: ~6 Hz, not per tick
+            self._refresh_timer.start()
         self._drive_video_preview()
         self._sync_transport()
         if self.tc.following:
@@ -1017,12 +1026,14 @@ class TimelineWindow(QtWidgets.QMainWindow):
 
     def on_data_prefetched(self) -> None:
         """Prefetched hub history landed in the local cache → re-query the preview
-        and ribbon coverage (now served locally). Called on the GUI thread."""
-        try:
-            self._refresh()
-            self._refresh_coverage()
-        except Exception:                     # noqa: BLE001 — a stale refresh ≠ crash
-            pass
+        and ribbon coverage (now served locally). Called on the GUI thread, and hit
+        back-to-back during a big backfill — so COALESCE both re-queries (the preview
+        at ~6 Hz, coverage at ~2 Hz) rather than firing per fill, which piled onto the
+        play tick's own refresh and stalled replay."""
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+        if not self._cov_timer.isActive():
+            self._cov_timer.start()
 
     # -- persistence (reopen as left) ----------------------------------------
     def _restore_state(self) -> None:
@@ -1123,6 +1134,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         # head independently, so closing the scrubber changes nothing.
         self._save_state()                     # remember checked sources + speed
         self._live_timer.stop(); self._preview_timer.stop()
+        self._refresh_timer.stop(); self._cov_timer.stop()
         if getattr(self, "video_preview", None) is not None:
             self.video_preview.stop()
         try:
