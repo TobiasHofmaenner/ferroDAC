@@ -69,6 +69,10 @@ class ZarrStore:
         self.root = zarr.open_group(store=str(root), mode=mode)
         self._lock = threading.RLock()   # see _locked — cross-thread store access
         self._key_cache: dict = {}       # group name -> source key (immutable mapping)
+        self._cov_cache: dict = {}       # uuid -> coverage; invalidated on write (below).
+        #   coverage() re-splits the whole DIRTY tail array every call; that path is hit
+        #   per play tick (GUI partition) and hard by the prefetch worker, so without this
+        #   cache both hammer the store lock + zarr sync → GUI freezes (§21.2).
         # Stamp the version on a NEW (empty) store. An existing store with no stamp is
         # pre-versioning → reads back as 0 (legacy); we don't mislabel it as v1.
         if mode != "r" and "schema_version" not in self.root.attrs \
@@ -296,6 +300,7 @@ class ZarrStore:
         v = np.asarray(v, dtype="f8").ravel()
         if len(t) == 0:
             return
+        self._cov_cache.pop(uuid, None)              # coverage grew → drop the memo
         epochs = list(g.attrs.get("epochs", []))
         key = epoch or (epochs[-1] if epochs else "e0")
         if key not in epochs:
@@ -327,6 +332,7 @@ class ZarrStore:
         pyramid is a future optimisation, deliberately deferred (the freeze it
         would remove no longer exists)."""
         g = self._source(uuid)
+        self._cov_cache.pop(uuid, None)              # dirty→clean may re-split → drop memo
         gap_k = float(g.attrs.get("gap_k", _GAP_K))
         keys = [epoch] if epoch else list(g.attrs.get("epochs", []))
         for key in keys:
@@ -378,7 +384,22 @@ class ZarrStore:
         """Contiguous-recording intervals per source (the tier protocol). One epoch
         can yield SEVERAL intervals when a device went offline mid-session without
         rolling an epoch (the split is cached in ``intervals`` at finalize). A legacy
-        epoch (finalized before gap-splitting existed) is migrated once, on demand."""
+        epoch (finalized before gap-splitting existed) is migrated once, on demand.
+
+        MEMOISED per source (invalidated by append/append_trace/finalize): the dirty-
+        tail re-split below reads the whole ``t`` array, and this is called per play
+        tick on the GUI thread and repeatedly by the prefetch worker — recomputing it
+        every time hammered the store lock + zarr sync and froze play (§21.2)."""
+        cached = self._cov_cache.get(uuid)
+        if cached is not None:
+            return cached
+        cov = self._coverage_uncached(uuid)
+        self._cov_cache[uuid] = cov
+        return cov
+
+    def _coverage_uncached(self, uuid) -> list:
+        """The real computation (lock held via coverage()). Kept separate so the hot
+        cache-hit path never touches zarr."""
         try:
             g = self._source(uuid)
         except KeyError:                             # source not in this store yet
@@ -456,6 +477,7 @@ class ZarrStore:
         y = np.asarray(y, dtype="f8").ravel()
         if len(y) == 0:
             return
+        self._cov_cache.pop(uuid, None)              # coverage grew → drop the memo
         m = len(y)
         epochs = list(g.attrs.get("epochs", []))
         if epoch not in epochs:
