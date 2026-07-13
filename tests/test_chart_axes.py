@@ -423,3 +423,33 @@ def test_feed_converts_and_never_raises(qapp):
     p.feed(batch)                              # must not raise
     # raw magnitude is buffered in the SOURCE unit; conversion is applied at draw time
     assert list(p._buf["g/torr"].y) == [1.0]
+
+
+@pytest.mark.ui
+def test_sigma_band_never_drives_the_autorange(qapp):
+    """Regression (2026-07-13): with a large σ model (σ ≳ y — real gauges near
+    range edges), the band's FillBetweenItem drove the Y autorange decades past
+    the data, collapsing the curve to a sliver — 'enabling uncertainties hides
+    my data'. Bands are context: the view must range on the DATA, whatever σ is."""
+    import time as _time
+    spans = {}
+    for sigma_scale in (0.1, 30.0):
+        p = _chart(qapp)
+        p.add_source("g/p", _src("P", "mbar"))
+        p.set_sigma_provider(
+            lambda k, x, y, s=sigma_scale: np.abs(np.asarray(y)) * s)
+        p.apply_config({"show_sigma": True, "logy": True})
+        p.resize(800, 500)
+        p.show()
+        base = _time.time()
+        p.feed([types.SimpleNamespace(key="g/p", value=1e-6 * (1 + 0.05 * i),
+                                      status=0, t=base + i, sigma=None)
+                for i in range(20)])
+        qapp.processEvents()
+        vb = p.plot.getPlotItem().getViewBox()
+        vb.autoRange()
+        (_, _), (y0, y1) = vb.viewRange()          # log units = decades
+        spans[sigma_scale] = y1 - y0
+        p.close()
+    assert spans[30.0] < 0.8, f"huge σ dragged the view to {spans[30.0]:.1f} decades"
+    assert abs(spans[30.0] - spans[0.1]) < 0.1     # σ magnitude must not matter

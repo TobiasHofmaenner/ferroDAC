@@ -626,7 +626,13 @@ class ChartPanel(Panel):
         c.setAlpha(45)
         fill = pg.FillBetweenItem(lo, hi, brush=pg.mkBrush(c))
         fill.setZValue(-20)                   # behind the curve + grid
-        self.plot.addItem(fill)               # single Y axis → always the main viewbox
+        # Bands are CONTEXT and must never drive the view: with a large σ model
+        # (σ ≳ y — real gauges near range edges), the band's lower edge dragged
+        # the Y autorange decades down and the DATA collapsed to a sliver
+        # ("enabling uncertainties hides my data", 2026-07-13 — measured 12% of
+        # the chart). ignoreBounds keeps autorange on the data; band edges may
+        # extend past the view, which is honest.
+        self.plot.addItem(fill, ignoreBounds=True)   # single Y axis → main viewbox
         self._bands[key] = (lo, hi, fill)
 
     def _update_band(self, key):
