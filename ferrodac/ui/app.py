@@ -798,8 +798,9 @@ class MainWindow(QMainWindow):
 
     def _on_prefetch_filled(self) -> None:
         """A prefetched range landed (GUI thread) → re-read the now-fuller LOCAL
-        tiers. Parked scalars redraw via reconcile; during play the per-tick advance
-        already reads the cache; the Timeline preview re-queries."""
+        tiers. reconcile(force=True) redraws the window envelope in BOTH parked and
+        playing modes, so newly-arrived hub history becomes visible immediately (the
+        per-tick advance only appends the swept sliver); the Timeline preview re-queries."""
         if self.reads is not None:
             self.reads.invalidate()             # local coverage grew
         if self.chart_feed is not None:
@@ -2786,15 +2787,20 @@ class MainWindow(QMainWindow):
         tc.rate, shown by the player + Timeline HUD) falls below requested when
         frames can't keep up. Settles to live when it catches now."""
         tc = self.time_context
-        if tc is None or not tc.playing:
+        if tc is None:
+            return
+        # This 50 ms timer runs whether or not we're playing, so reconcile EVERY
+        # frame to keep the chart's display mode in lockstep with the transport.
+        # reconcile() no-ops unless the mode flipped, so it cheaply catches BOTH
+        # transitions that have no reset (nav) to ride on: PARKED→PLAYING (draw the
+        # window envelope under the sweeping playhead) and PLAYING→PAUSE (redraw the
+        # owned parked envelope). The pause redraw used to be MISSED — we returned
+        # early below before reconciling — so the chart stayed blank after Play
+        # cleared it (§22 I-8).
+        self.chart_feed.reconcile()
+        if not tc.playing:
             self._play_wall = None
             return
-        self.chart_feed.reconcile()                  # Play walks the head forward WITHOUT a
-        #                                              reset → the PARKED→PLAYING transition
-        #                                              releases query ownership (clearing the
-        #                                              released envelopes) so the incremental
-        #                                              re-stream drives the curves again;
-        #                                              no-op on every later tick (§22 I-8)
         now = time.perf_counter()
         wall = (now - self._play_wall) if self._play_wall else 0.05
         self._play_wall = now

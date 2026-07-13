@@ -183,9 +183,13 @@ class ChartFeed:
         - PARKED:  the query owns each STORED SCALAR curve (derived / trace /
                    unrecorded keys stay on the feed path): assign ownership, then
                    draw pixel-budgeted envelopes.
-        - PLAYING: the feed owns everything again — releasing ownership CLEARS the
-                   released envelope buffers so the resuming re-stream rebuilds
-                   monotonically (the old clear-on-Play, now a single transition).
+        - PLAYING: the feed owns every curve again (release ownership so the play
+                   slices from advance() append). The window's historic envelope is
+                   REDRAWN un-owned so the whole selected window stays visible with
+                   the playhead sweeping across it. This redraw is essential: since
+                   §22 step 4 the re-stream no longer refeeds raw scalars, so nothing
+                   else rebuilds the backdrop — without it, hitting Play blanked the
+                   chart down to the sliver advance() had swept forward.
 
         Cheap when nothing changed: transport ticks call this every frame and it
         no-ops unless the mode flipped or force=True (navigation: the reset path —
@@ -204,9 +208,14 @@ class ChartFeed:
             for panel in self._panels():
                 if hasattr(panel, "set_query_owned"):
                     panel.set_query_owned(())        # release → clears released bufs
-            if mode is Mode.LIVE and force:
-                self._draw_windows(tc, owned=False)  # go-live / grow-extend-back:
-                #                                      historic envelope under the live tail
+            if mode is Mode.PLAYING or force:
+                # Historic envelope drawn UNDER the appending tail: on every
+                # PARKED→PLAYING transition (so the window is visible from the first
+                # play frame), and on the LIVE reset path (go-live / grow-extend-back).
+                # Un-owned so feed()/advance() keep appending on top (the monotonicity
+                # guard drops the overlap) — owned would make the feed skip it and the
+                # curve would scroll out of view as the window slides forward.
+                self._draw_windows(tc, owned=False)
 
     def _draw_windows(self, tc, owned: bool) -> None:
         """Draw each chart's stored SCALAR curves from a pixel-budgeted store query

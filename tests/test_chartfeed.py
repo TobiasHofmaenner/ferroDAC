@@ -92,19 +92,41 @@ def test_idle_reconcile_is_a_noop():
     assert panel.drawn == before               # no re-query per tick
 
 
-def test_play_releases_ownership_and_clears_exactly_once():
-    """The old clear-on-Play (exit_window per tick, guarded internally) is now a
-    single PARKED→PLAYING transition: released envelopes clear so the resuming
-    re-stream rebuilds monotonically — and only once, not per play tick."""
+def test_play_redraws_the_window_envelope_unowned():
+    """Hitting Play releases query-ownership (so advance()/the live tail append) and
+    REDRAWS the window's historic envelope UN-OWNED — the whole selected window stays
+    visible with the playhead sweeping across it. Regression: since §22 step 4 the
+    re-stream stopped refeeding raw scalars, so the old 'clear on Play and let the
+    re-stream rebuild it' left the chart blank down to the swept sliver. The release
+    still happens exactly once, not per play tick."""
     tc, panel, cf = _rig()
     tc.park(BASE + 150)
     cf.reconcile(force=True)
     tc.play()
     cf.reconcile()
     assert tc.mode is Mode.PLAYING
-    assert panel._query_owned == set() and panel.cleared == ["dev/a"]
-    cf.reconcile()                             # later ticks
-    assert panel.cleared == ["dev/a"]          # not cleared again
+    assert panel._query_owned == set()         # un-owned: feed/advance append on top
+    assert panel.cleared == ["dev/a"]          # ownership released once (buffer cleared)
+    assert panel.drawn.get("dev/a", 0) > 100   # …then the envelope is REDRAWN (visible)
+    drawn_before = panel.drawn["dev/a"]
+    cf.reconcile()                             # later ticks: no-op, no re-clear/redraw
+    assert panel.cleared == ["dev/a"] and panel.drawn["dev/a"] == drawn_before
+
+
+def test_pause_redraws_the_owned_parked_envelope():
+    """Pausing (PLAYING→PARKED) must restore the owned window envelope on the next
+    reconcile — the per-frame play-tick reconcile catches this transition. Regression:
+    the chart stayed blank after pause because Play had cleared it and no redraw ran."""
+    tc, panel, cf = _rig()
+    tc.park(BASE + 150)
+    cf.reconcile(force=True)
+    tc.play()
+    cf.reconcile()                             # PLAYING: envelope drawn un-owned
+    tc.pause()
+    assert tc.mode is Mode.PARKED              # frozen (no nav → no reset path)
+    cf.reconcile()                             # the play-tick's per-frame reconcile
+    assert panel._query_owned == {"dev/a"}     # re-owned by the parked query
+    assert panel.drawn.get("dev/a", 0) > 100   # …and redrawn — not left blank
 
 
 def test_repark_after_pause_reowns_and_redraws():
