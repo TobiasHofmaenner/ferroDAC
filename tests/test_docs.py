@@ -865,3 +865,48 @@ def test_slash_macro_menus_populate(qapp):
     finally:
         dv.close()
         qapp.processEvents()
+
+
+@pytest.mark.ui
+def test_slash_cam_offers_existing_media(qapp):
+    """/cam lists EXISTING project photos/clips to embed — not only 'take a new
+    photo'. Photos become an image option, clips an 'insert existing' link (§9)."""
+    import json
+    from ferrodac.ui.docs import DocServices, DocView
+    d = tempfile.mkdtemp()
+    media = os.path.join(d, "media")
+    os.makedirs(media)
+    photo, clip = os.path.join(media, "shot.png"), os.path.join(media, "bench.mp4")
+    open(photo, "wb").write(b"P")
+    open(clip, "wb").write(b"V")
+    doc = os.path.join(d, "j.md")
+    with open(doc, "w", encoding="utf-8") as fh:
+        fh.write("# journal\n")
+    dv = DocView(DocServices(
+        list_cameras=lambda: [{"key": "cam/frame", "label": "Bench cam"}],
+        list_media=lambda: [
+            {"name": "📷 Bench cam", "abspath": photo, "kind": "photo"},
+            {"name": "🎬 Bench cam", "abspath": clip, "kind": "clip"}]))
+    dv.resize(640, 420)
+    try:
+        dv.open(doc)
+        _wait_html(qapp, dv.view, "<h1")
+        expr = """
+          window.__cam = null;
+          window.__fd_slash({
+            pos: 4, explicit: true,
+            matchBefore: (re) => ({from: 0, to: 4, text: "/cam"})
+          }).then((r) => {
+            window.__cam = (r && r.options || []).map(
+              (o) => (o.label || "") + "|" + (o.detail || ""));
+          });
+          true"""
+        assert _js(qapp, dv.view, expr) is not None
+        assert _pump(qapp, lambda: _js(qapp, dv.view, "window.__cam !== null") is True)
+        raw = _js(qapp, dv.view, "JSON.stringify(window.__cam)")
+        labels = json.loads(raw) if raw else []
+        assert any("take photo" in t for t in labels), labels       # the new-photo option
+        assert "📷 Bench cam|insert existing" in labels, labels      # existing photo
+        assert "🎬 Bench cam|insert existing" in labels, labels      # existing clip
+    finally:
+        dv.deleteLater()

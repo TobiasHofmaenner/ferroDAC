@@ -72,6 +72,8 @@ let processorsCache = [];               // [{kind,label}] — the /proc macro's 
 let camerasCache = [];                  // [{key,label}] — the /cam macro's choices
 const camerasWaiters = [];
 let awaitingCamShot = false;            // a /cam snapshot is being taken
+let mediaCache = [];                    // [{name,relpath,kind}] — existing photos/clips (/cam)
+const mediaWaiters = [];
 const processorsWaiters = [];           // resolvers awaiting a cold-cache fetch
 let awaitingProcInsert = false;         // a picked processor's source is being fetched
 let awaitingDevTable = false;           // the /dev instruments table is being built
@@ -256,6 +258,20 @@ function fileOption(f) {                        // a completion that inserts one
   };
 }
 
+// /cam: an EXISTING project photo/clip. Photos embed as an image; clips insert a
+// link (the remark pipeline drops raw HTML, so a <video> wouldn't render — a link
+// is portable and matches how /rec inserts non-image files).
+function mediaOption(m) {
+  const clip = m.kind === "clip";
+  const icon = clip ? "🎬" : "📷";
+  const label = m.name.startsWith(icon) ? m.name : icon + " " + m.name;  // no double icon
+  const md = clip ? `[${label}](${m.relpath})` : `![${m.name}](${m.relpath})`;
+  return {
+    label, detail: "insert existing", type: clip ? "string" : "text",
+    apply: (v, c, from, to) => v.dispatch({ changes: { from, to, insert: md } }),
+  };
+}
+
 // test seam: the pytest suite drives the slash menu through this
 window.__fd_slash = (ctx) => Promise.resolve(slashSource(ctx));
 
@@ -352,20 +368,26 @@ function slashSource(context) {
       });
   }
   if (cmd === "cam") {
-    return resolveMenu(
-      whenCache(() => camerasCache,
-                () => { if (bridge) bridge.requestCameras(); },
-                camerasWaiters),
-      (cams) => !cams.length ? null : {
-        from: w.from, filter: false,
-        options: cams.map((cam) => ({
+    // Two groups: take a NEW photo from a live camera, or insert an EXISTING
+    // project photo/clip. Await both caches; show whichever have entries.
+    const cams = whenCache(() => camerasCache,
+                           () => { if (bridge) bridge.requestCameras(); },
+                           camerasWaiters);
+    const media = whenCache(() => mediaCache,
+                            () => { if (bridge) bridge.requestMedia(); },
+                            mediaWaiters);
+    return Promise.all([Promise.resolve(cams), Promise.resolve(media)]).then(
+      ([camList, mediaList]) => {
+        const options = camList.map((cam) => ({
           label: "cam: " + cam.label, detail: "take photo", type: "function",
           apply: (v, c, from, to) => {
             v.dispatch({ changes: { from, to, insert: "" } });   // drop the `/cam`
             awaitingCamShot = true;
             if (bridge) bridge.requestCameraShot(cam.key);        // inserted on arrival
           },
-        })),
+        }));
+        mediaList.forEach((m) => options.push(mediaOption(m)));
+        return options.length ? { from: w.from, filter: false, options } : null;
       });
   }
   if (cmd === "dev") {
@@ -590,9 +612,10 @@ const SLASH_HELP = [
   { cmd: "/dev", title: "Insert an instruments table",
     desc: "Drops a lab-journal table of the devices behind your curated sources — "
         + "manufacturer, model, serial, firmware, calibration and asset tag." },
-  { cmd: "/cam", title: "Insert a fresh camera photo",
-    desc: "Pick a camera → takes a snapshot NOW (lossless, into the project's "
-        + "media/, with a 📷 tag on the timeline) and embeds it in the doc." },
+  { cmd: "/cam", title: "Insert a camera photo — new or existing",
+    desc: "Pick a camera to take a snapshot NOW (lossless, into the project's "
+        + "media/, with a 📷 tag on the timeline), OR pick an existing project "
+        + "photo/clip to embed — all with paths relative to the doc." },
   { cmd: "/meta", title: "Insert a report header",
     desc: "Drops a front-matter block — experiment, date(s), experimenter(s), "
         + "sample, instruments, recordings and the ferroDAC version." },
@@ -671,6 +694,10 @@ function connect() {
     bridge.camerasAvailable.connect((j) => {
       try { camerasCache = JSON.parse(j) || []; } catch (e) { camerasCache = []; }
       flushWaiters(camerasWaiters);             // wake a cold-cache /cam menu
+    });
+    bridge.mediaAvailable.connect((j) => {      // existing photos/clips for /cam
+      try { mediaCache = JSON.parse(j) || []; } catch (e) { mediaCache = []; }
+      flushWaiters(mediaWaiters);
     });
     bridge.camShot.connect((j) => {            // picked /cam → the snapshot landed
       if (!awaitingCamShot) return;

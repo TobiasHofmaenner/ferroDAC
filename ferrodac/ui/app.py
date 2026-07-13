@@ -598,6 +598,7 @@ class MainWindow(QMainWindow):
             run_meta=self._run_meta_markdown,
             list_cameras=self._doc_list_cameras,
             camera_shot=self._doc_camera_shot,
+            list_media=self._doc_list_media,
             saved=lambda: self._schedule_project_commit("Edited documents")))
         self.docs_dock.setWidget(self._docs_view)
         self._open_active_doc()
@@ -666,7 +667,8 @@ class MainWindow(QMainWindow):
                                      self._device_journal_markdown,
                                      self._run_meta_markdown,
                                      self._doc_list_cameras,
-                                     self._doc_camera_shot)
+                                     self._doc_camera_shot,
+                                     self._doc_list_media)
 
     def _active_readme(self) -> str | None:
         """The active project's README.md path, bootstrapping a starter if missing."""
@@ -869,6 +871,29 @@ class MainWindow(QMainWindow):
         return [{"key": k, "label": lbl}
                 for k, lbl in sorted(self.dashboard.image_sources().items(),
                                      key=lambda kv: kv[1])]
+
+    def _doc_list_media(self, limit: int = 50) -> list:
+        """/cam macro: EXISTING project media to embed — the media tags whose files
+        still exist, newest first, as [{name, abspath, kind: photo|clip}]. Lets a
+        writer pick a prior photo/clip instead of only taking a fresh snapshot."""
+        root = self._project_root()
+        _VID = ("mp4", "mov", "mkv", "webm", "avi")
+        out, seen = [], set()
+        for m in reversed(self.dashboard.markers.of_kind("media")):   # newest first
+            payload = m.payload or {}
+            rel = payload.get("file")
+            if not rel:
+                continue
+            ap = os.path.join(root, rel) if root else rel
+            if ap in seen or not os.path.isfile(ap):
+                continue
+            seen.add(ap)
+            kind = "clip" if (payload.get("format") or "").lower() in _VID else "photo"
+            out.append({"name": m.label or os.path.basename(ap),
+                        "abspath": ap, "kind": kind})
+            if len(out) >= limit:
+                break
+        return out
 
     def _doc_camera_shot(self, key: str) -> dict:
         """/cam macro picked a camera: snapshot through the SAME path as the

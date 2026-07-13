@@ -144,6 +144,9 @@ class DocBridge(QObject):
     camShot = Signal(str)                # (json {name, relpath} | {error})
     camerasRequested = Signal()
     camShotRequested = Signal(str)       # (source key)
+    # …and pick an EXISTING project photo/clip to embed (not only take a new one):
+    mediaAvailable = Signal(str)         # (json [{name, relpath, kind: photo|clip}])
+    mediaRequested = Signal()
 
     # Save-to-PDF: JS asks, Qt prints the rendered page, then reports a status line.
     pdfRequested = Signal()              # JS → Qt
@@ -182,6 +185,10 @@ class DocBridge(QObject):
     @Slot(str)
     def requestCameraShot(self, key: str) -> None:
         self.camShotRequested.emit(key)
+
+    @Slot()
+    def requestMedia(self) -> None:
+        self.mediaRequested.emit()
 
     @Slot(str)
     def requestRecordingExports(self, rec_id: str) -> None:
@@ -250,6 +257,7 @@ class DocServices:
     run_meta: Callable = field(default=lambda: "")               # -> report front-matter
     list_cameras: Callable = field(default=lambda: [])           # -> [{key,label}] (§9 /cam)
     camera_shot: Callable = field(default=lambda *a: None)       # (key) -> {name,abspath}|{error}
+    list_media: Callable = field(default=lambda: [])             # -> [{name,abspath,kind}] (§9 /cam)
 
 
 class DocView(QWidget):
@@ -336,6 +344,7 @@ class DocView(QWidget):
         self.bridge.procSourceRequested.connect(self._send_processor_source)
         self.bridge.camerasRequested.connect(self._push_cameras)
         self.bridge.camShotRequested.connect(self._send_camera_shot)
+        self.bridge.mediaRequested.connect(self._push_media)
         self.bridge.deviceTableRequested.connect(self._send_device_table)
         self.bridge.runMetaRequested.connect(self._send_run_meta)
         self.bridge.pdfRequested.connect(self._export_pdf)
@@ -494,7 +503,8 @@ class DocView(QWidget):
         self._js_ready = True
         self._push_recordings()               # seed the /rec macro's cache
         self._push_processors()               # …and /proc's
-        self._push_cameras()                  # …and /cam's
+        self._push_cameras()                  # …and /cam's (cameras)
+        self._push_media()                    # …and /cam's existing photos/clips
         if self._pending_collab:              # a pop-out asked to collab before JS was up
             self._pending_collab = False
             self._start_collab()
@@ -504,7 +514,7 @@ class DocView(QWidget):
                    on_list_recording_exports=None, on_list_processors=None,
                    on_processor_source=None, on_device_table=None,
                    on_run_meta=None, on_list_cameras=None,
-                   on_camera_shot=None) -> None:
+                   on_camera_shot=None, on_list_media=None) -> None:
         """Wire the editor macros to the app's services (used by doc panels created via
         the Add menu or a layout, which can't get the callbacks at construction)."""
         self.services.list_recordings = on_list_recordings
@@ -518,10 +528,13 @@ class DocView(QWidget):
             self.services.list_cameras = on_list_cameras
         if on_camera_shot is not None:
             self.services.camera_shot = on_camera_shot
+        if on_list_media is not None:
+            self.services.list_media = on_list_media
         if self._js_ready:                    # warm the caches if the page is already up
             self._push_recordings()
             self._push_processors()
             self._push_cameras()
+            self._push_media()
 
     def _push_recordings(self) -> None:
         if self.services.list_recordings is None:
@@ -599,6 +612,28 @@ class DocView(QWidget):
         except Exception:                     # noqa: BLE001
             cams = []
         self.bridge.camerasAvailable.emit(json.dumps(cams))
+
+    def _push_media(self) -> None:
+        """/cam: EXISTING project photos/clips to embed, with paths RELATIVE to the
+        open doc (portable in-repo links) — the app hands us {name, abspath, kind}."""
+        try:
+            items = self.services.list_media() or []
+        except Exception:                     # noqa: BLE001
+            items = []
+        base = self._dir or os.getcwd()
+        out = []
+        for m in items:
+            ap = m.get("abspath")
+            if not ap:
+                continue
+            try:
+                rel = os.path.relpath(ap, base)
+            except Exception:                 # noqa: BLE001 — e.g. different drive (Windows)
+                rel = ap
+            out.append({"name": m.get("name") or os.path.basename(ap),
+                        "relpath": rel.replace(os.sep, "/"),
+                        "kind": m.get("kind", "photo")})
+        self.bridge.mediaAvailable.emit(json.dumps(out))
 
     def _send_camera_shot(self, key: str) -> None:
         """/cam picked a camera: snapshot NOW (file lands in media/ + a media tag
