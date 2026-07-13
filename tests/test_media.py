@@ -540,6 +540,32 @@ def test_capture_service_disk_floor_pauses_video(tmp_path, monkeypatch):
     assert not svc._paused_disk and set(svc._active) == {"always"}
 
 
+def test_capture_service_self_corrects_a_broken_encoder(tmp_path, monkeypatch):
+    """If several segments in a row never land (hardware encoder silently failing
+    despite the startup probe), the service persists a 'use software' flag for the
+    next launch and warns the user — not just silent empty video (§9.3)."""
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.ui import videocapture
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])   # noqa: F841
+    marked, msgs = [], []
+    monkeypatch.setattr(videocapture, "mark_prefer_software_encode",
+                        lambda: marked.append(1))
+    monkeypatch.setattr(videocapture, "prefer_software_encode", lambda: bool(marked))
+    st = VideoStore(str(tmp_path / "video"))
+    svc = videocapture.VideoCaptureService(
+        st, devices=lambda: [], is_recording=lambda: False, now=lambda: 1000.0,
+        on_status=lambda m, timeout=0: msgs.append(m))
+    seg = {"t0": 1000.0, "path": str(tmp_path / "video" / "gone.mp4"),
+           "dev": None, "label": "cam"}
+    for _ in range(2):                                   # 2 failures → not yet flagged
+        svc._commit("cam", seg, 1002.0)
+    assert marked == []
+    svc._commit("cam", seg, 1002.0)                     # 3rd in a row → flag + warn
+    assert marked == [1]
+    assert any("hardware H.264" in m for m in msgs)
+
+
 # -- §9.3 phase 2: segment_at (scrub preview kernel) + media_files_in (export) ----
 
 def test_segment_at_point_query(tmp_path):
@@ -657,6 +683,46 @@ def test_import_segment_is_idempotent(tmp_path):
     assert st.import_segment("camA", base, base + 120, b"X" * 50) == 0   # dup skipped
     assert st.import_segment("camA", base, base + 120, b"") == 0         # empty rejected
     assert len(st.segments("camA")) == 1
+
+
+def test_video_encoding_falls_back_to_software_only_when_hw_unusable(monkeypatch):
+    """Ambient video encoding is graceful: keep Qt's hardware default when VAAPI
+    H.264 actually works, steer to software only when it can't encode, and never
+    override an explicit user choice or touch non-Linux (§9.3)."""
+    import sys
+    import ferrodac.ui.app as appmod
+    import ferrodac.core.videostore as vsmod
+    KEY = "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: False)   # no prior failure
+
+    monkeypatch.delenv(KEY, raising=False)            # hw usable → leave Qt on hardware
+    monkeypatch.setattr(appmod, "_vaapi_h264_encode_usable", lambda: True)
+    appmod._configure_video_encoding()
+    assert KEY not in os.environ
+
+    monkeypatch.delenv(KEY, raising=False)            # hw unusable → steer to software
+    monkeypatch.setattr(appmod, "_vaapi_h264_encode_usable", lambda: False)
+    appmod._configure_video_encoding()
+    assert os.environ.get(KEY) == ""
+
+    monkeypatch.delenv(KEY, raising=False)            # a persisted prior failure → software
+    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: True)    # even though the
+    monkeypatch.setattr(appmod, "_vaapi_h264_encode_usable", lambda: True)  # probe now says ok
+    appmod._configure_video_encoding()
+    assert os.environ.get(KEY) == ""
+    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: False)
+
+    monkeypatch.setenv(KEY, "vaapi")                  # explicit user choice always wins
+    monkeypatch.setattr(appmod, "_vaapi_h264_encode_usable",
+                        lambda: (_ for _ in ()).throw(AssertionError("probed despite override")))
+    appmod._configure_video_encoding()
+    assert os.environ[KEY] == "vaapi"
+
+    monkeypatch.setattr(sys, "platform", "win32")     # non-Linux → untouched
+    monkeypatch.delenv(KEY, raising=False)
+    appmod._configure_video_encoding()
+    assert KEY not in os.environ
 
 
 def test_media_files_in_enumerates_span_media(tmp_path):

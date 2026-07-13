@@ -19,7 +19,8 @@ import logging
 from qtpy.QtCore import QObject, QTimer
 
 from ..core.videostore import (DISK_FLOOR_GB, DISK_RESUME_GB, SEGMENT_S,
-                               VideoStore)
+                               VideoStore, mark_prefer_software_encode,
+                               prefer_software_encode)
 
 log = logging.getLogger("ferrodac.video")
 
@@ -35,6 +36,8 @@ class VideoCaptureService(QObject):
         self._on_status = on_status or (lambda msg, timeout=0: None)
         self._active: dict = {}          # data_id -> {"t0", "path", "dev", "label"}
         self._paused_disk = False
+        self._encode_fail_streak = 0     # consecutive segments that never landed —
+        #                                  self-corrects a fooled hw-encoder probe (§9.3)
         # rotation heartbeat: a segment is closed + a fresh one opened each tick
         self._timer = QTimer(self)
         self._timer.setInterval(int(SEGMENT_S * 1000))
@@ -119,7 +122,17 @@ class VideoCaptureService(QObject):
     def _commit(self, data_id: str, seg: dict, t1: float) -> None:
         if not self._store.commit(data_id, seg["t0"], t1, seg["path"]):
             log.debug("segment never landed for %s (%s)", data_id, seg["path"])
+            # A landed segment is the only proof the encoder works. If several in a
+            # row produce nothing, the hardware H.264 path is broken here despite the
+            # startup probe — remember it so the NEXT launch encodes in software, and
+            # tell the user why their video is currently empty (§9.3).
+            self._encode_fail_streak += 1
+            if self._encode_fail_streak == 3 and not prefer_software_encode():
+                mark_prefer_software_encode()
+                self._on_status("⚠ Video isn't encoding (no usable hardware H.264 "
+                                "encoder) — restart to switch to software encoding", 0)
             return
+        self._encode_fail_streak = 0                   # a segment landed → encoder works
         dev = seg["dev"]
         if getattr(dev, "video_mode", 0) == 3:        # always + retention → prune
             try:

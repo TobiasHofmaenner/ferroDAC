@@ -35,6 +35,31 @@ def seg_key(t0: float) -> int:
     return int(round(float(t0) * 1000))
 
 
+# -- H.264 encoder preference (§9.3) ------------------------------------------
+# A machine-global flag: hardware H.264 encoding was proven broken here (segments
+# never landed), so steer Qt to SOFTWARE at the next launch. Self-correcting
+# backstop for when the startup probe is fooled (probe says hw ok, Qt still fails).
+def _config_dir() -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    return os.path.join(base, "ferroDAC")
+
+
+def prefer_software_encode() -> bool:
+    return os.path.exists(os.path.join(_config_dir(), "prefer_software_video_encode"))
+
+
+def mark_prefer_software_encode() -> None:
+    """Remember (best-effort) that hardware H.264 encode failed on this box."""
+    try:
+        os.makedirs(_config_dir(), exist_ok=True)
+        with open(os.path.join(_config_dir(), "prefer_software_video_encode"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("hardware H.264 encode produced no segments — using software\n")
+    except OSError:
+        pass
+
+
 class VideoStore:
     def __init__(self, root: str):
         self.root = root                    # <app_dir>/video
