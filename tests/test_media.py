@@ -685,37 +685,27 @@ def test_import_segment_is_idempotent(tmp_path):
     assert len(st.segments("camA")) == 1
 
 
-def test_video_encoding_falls_back_to_software_only_when_hw_unusable(monkeypatch):
-    """Ambient video encoding is graceful: keep Qt's hardware default when VAAPI
-    H.264 actually works, steer to software only when it can't encode, and never
-    override an explicit user choice or touch non-Linux (§9.3)."""
+def test_video_encoding_uses_hardware_until_a_run_proves_it_broken(monkeypatch):
+    """Startup is graceful, not blanket-software: try HARDWARE by default; steer to
+    software only once a prior run persisted a 'no usable hw encoder' verdict (from
+    Qt's real recorder error). Never override an explicit user choice or non-Linux."""
     import sys
     import ferrodac.ui.app as appmod
     import ferrodac.core.videostore as vsmod
     KEY = "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: False)   # no prior failure
 
-    monkeypatch.delenv(KEY, raising=False)            # hw usable → leave Qt on hardware
-    monkeypatch.setattr(appmod, "_vaapi_h264_encode_usable", lambda: True)
+    monkeypatch.delenv(KEY, raising=False)            # no prior failure → try hardware
+    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: False)
     appmod._configure_video_encoding()
     assert KEY not in os.environ
 
-    monkeypatch.delenv(KEY, raising=False)            # hw unusable → steer to software
-    monkeypatch.setattr(appmod, "_vaapi_h264_encode_usable", lambda: False)
+    monkeypatch.delenv(KEY, raising=False)            # a prior run proved hw broken → software
+    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: True)
     appmod._configure_video_encoding()
     assert os.environ.get(KEY) == ""
-
-    monkeypatch.delenv(KEY, raising=False)            # a persisted prior failure → software
-    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: True)    # even though the
-    monkeypatch.setattr(appmod, "_vaapi_h264_encode_usable", lambda: True)  # probe now says ok
-    appmod._configure_video_encoding()
-    assert os.environ.get(KEY) == ""
-    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: False)
 
     monkeypatch.setenv(KEY, "vaapi")                  # explicit user choice always wins
-    monkeypatch.setattr(appmod, "_vaapi_h264_encode_usable",
-                        lambda: (_ for _ in ()).throw(AssertionError("probed despite override")))
     appmod._configure_video_encoding()
     assert os.environ[KEY] == "vaapi"
 
@@ -723,6 +713,32 @@ def test_video_encoding_falls_back_to_software_only_when_hw_unusable(monkeypatch
     monkeypatch.delenv(KEY, raising=False)
     appmod._configure_video_encoding()
     assert KEY not in os.environ
+
+
+def test_camera_record_error_triggers_software_fallback(monkeypatch):
+    """Qt's ACTUAL recorder error is the ground truth: a FormatError/ResourceError
+    (the 'No usable encoding profile' case) steers this process to software and
+    persists it for next launch; a benign NoError does nothing (§9.3)."""
+    from qtpy.QtWidgets import QApplication
+    from qtpy.QtMultimedia import QMediaRecorder
+    app = QApplication.instance() or QApplication([])           # noqa: F841
+    import ferrodac.core.videostore as vsmod
+    from ferrodac.devices.camera import _CaptureController
+    KEY = "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"
+    marked = []
+    monkeypatch.setattr(vsmod, "mark_prefer_software_encode", lambda: marked.append(1))
+    monkeypatch.setattr(vsmod, "prefer_software_encode", lambda: bool(marked))
+    monkeypatch.delenv(KEY, raising=False)
+    ctrl = _CaptureController(object())
+    try:
+        ctrl._on_record_error(QMediaRecorder.Error.NoError, "")      # benign → ignored
+        assert marked == [] and KEY not in os.environ
+        ctrl._on_record_error(QMediaRecorder.Error.FormatError, "no profile")  # real → fall back
+        assert os.environ.get(KEY) == "" and marked == [1]
+        ctrl._on_record_error(QMediaRecorder.Error.ResourceError, "again")     # persist once
+        assert marked == [1]
+    finally:
+        os.environ.pop(KEY, None)
 
 
 def test_media_files_in_enumerates_span_media(tmp_path):

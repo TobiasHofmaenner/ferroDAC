@@ -2847,47 +2847,17 @@ def _setup_logging() -> str:
     return path
 
 
-def _vaapi_h264_encode_usable() -> bool:
-    """True if a VAAPI H.264 ENCODE profile is actually usable on this box —
-    probed via the system ffmpeg (already a soft dependency for clip
-    materialization), which drives the same system libva stack Qt's FFmpeg
-    backend uses, so it predicts Qt's result. A tiny synthetic 1-frame encode:
-    exit 0 ⇒ usable. Conservative: no ffmpeg or no DRM render node ⇒ False, so we
-    fall back to software rather than gamble on a broken encoder."""
-    import glob
-    import shutil
-    import subprocess
-
-    ffmpeg = shutil.which("ffmpeg")
-    nodes = sorted(glob.glob("/dev/dri/renderD*"))
-    if not ffmpeg or not nodes:
-        return False
-    for dev in nodes:
-        try:
-            r = subprocess.run(
-                [ffmpeg, "-hide_banner", "-loglevel", "error",
-                 "-vaapi_device", dev, "-f", "lavfi",
-                 "-i", "color=c=black:s=64x64:d=0.1",
-                 "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi",
-                 "-f", "null", "-"],
-                capture_output=True, timeout=6)
-        except Exception:                              # noqa: BLE001 — treat as unusable
-            continue
-        if r.returncode == 0:
-            return True
-    return False
-
-
 def _configure_video_encoding() -> None:
-    """Steer Qt's FFmpeg media backend to a WORKING H.264 encoder for ambient
-    video (§9.3). Qt PREFERS hardware VAAPI encoding, but many GPUs/drivers have
-    no usable H.264 encode profile — it fails ('No usable encoding profile
-    found') and segments never land. So: probe the hardware path once, and ONLY
-    if it can't encode do we steer Qt to software H.264 by emptying
-    QT_FFMPEG_ENCODING_HW_DEVICE_TYPES. Hardware stays the default when it works;
-    a user who set that var themselves (force hw / a specific device) is left
-    untouched. Must run BEFORE any Qt Multimedia object exists — Qt reads the var
-    once. Linux/VAAPI only; other platforms keep Qt's own encoder choice."""
+    """Choose the ambient-video (§9.3) H.264 encoder path. Qt's FFmpeg backend
+    PREFERS hardware VAAPI, but many GPUs/drivers have no usable H.264 encode
+    profile and Qt then fails ('No usable encoding profile found') WITHOUT falling
+    back on its own. So: try hardware by default, and fall back to software the
+    instant Qt's recorder actually reports it can't encode (camera._on_record_error
+    persists a machine-global flag). Here we only honour that persisted verdict —
+    Qt's real behaviour is the ground truth, not a proxy probe (a system-ffmpeg
+    probe both false-positived on VAAPI and would false-negative on frozen builds).
+    Must run BEFORE any Qt Multimedia object exists — Qt reads the var once. A user
+    who set QT_FFMPEG_ENCODING_HW_DEVICE_TYPES themselves always wins; Linux only."""
     import logging
     import os
     import sys
@@ -2897,12 +2867,11 @@ def _configure_video_encoding() -> None:
     if "QT_FFMPEG_ENCODING_HW_DEVICE_TYPES" in os.environ:
         return                                         # explicit user choice wins
     from ..core.videostore import prefer_software_encode
-    # software if a prior run PROVED hw broken here, or the probe can't encode now
-    if not prefer_software_encode() and _vaapi_h264_encode_usable():
-        return                                         # hardware works → let Qt use it
-    os.environ["QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"] = ""   # → software H.264
+    if not prefer_software_encode():
+        return                                         # try hardware; fall back on real failure
+    os.environ["QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"] = ""   # proven broken here → software
     logging.getLogger("ferrodac.video").info(
-        "no usable hardware H.264 encoder — ambient video will encode in software")
+        "using software H.264 — a prior run found no usable hardware encoder here")
 
 
 def main(argv=None) -> int:
@@ -2926,8 +2895,8 @@ def main(argv=None) -> int:
     _install_diagnostics(os.path.dirname(logpath) if logpath else "")
 
     # ambient video encoder selection MUST precede any Qt Multimedia init (Qt reads
-    # the hw-encoder env var once): probe hardware H.264, fall back to software only
-    # if it can't encode (§9.3 — 'No usable encoding profile found' on some GPUs).
+    # the hw-encoder env var once): default to hardware, but honour a persisted
+    # 'hardware H.264 is broken here' verdict from a prior run (§9.3).
     _configure_video_encoding()
 
     # QtWebEngine (the in-app Docs view) wants shared GL contexts set BEFORE the

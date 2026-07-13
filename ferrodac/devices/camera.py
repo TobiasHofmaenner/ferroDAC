@@ -176,6 +176,7 @@ class _CaptureController(QObject):
             rec.setMediaFormat(fmt)
             rec.setQuality(QMediaRecorder.Quality.NormalQuality)
             rec.setOutputLocation(QUrl.fromLocalFile(path))
+            rec.errorOccurred.connect(self._on_record_error)   # broken hw encoder → fall back
             self._session.setRecorder(rec)
             rec.record()
             self._recorder = rec
@@ -184,6 +185,28 @@ class _CaptureController(QObject):
             import logging
             logging.getLogger("ferrodac").warning(
                 "clip recording unavailable for %s", path, exc_info=True)
+
+    def _on_record_error(self, error, msg) -> None:
+        """Qt's recorder couldn't encode (typically hardware VAAPI H.264 with no
+        usable profile — 'No usable encoding profile found'). This is the GROUND
+        TRUTH a proxy probe can't give, so react to it: steer the FFmpeg backend
+        to software for any subsequent recorder in THIS process (best-effort — Qt
+        may have cached the choice), and PERSIST it so the next launch skips
+        straight to software. Thread-safe (env + a file write, no Qt access) — the
+        signal can arrive on a Qt encoder worker thread (§9.3)."""
+        from qtpy.QtMultimedia import QMediaRecorder
+        if error in (QMediaRecorder.Error.FormatError,
+                     QMediaRecorder.Error.ResourceError):
+            import logging
+            import os
+            from ..core.videostore import (mark_prefer_software_encode,
+                                           prefer_software_encode)
+            os.environ["QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"] = ""   # → software next recorder
+            if not prefer_software_encode():
+                mark_prefer_software_encode()
+                logging.getLogger("ferrodac.video").warning(
+                    "hardware H.264 encode failed (%s) — switching ambient video to "
+                    "software; restart if segments stay empty", msg)
 
     @Slot()
     def end_clip(self) -> None:
