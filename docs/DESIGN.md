@@ -858,6 +858,20 @@ pixel values are measurements**. The media plane must never silently degrade the
 - **Rule of thumb:** if anyone might ever put a cursor on a pixel and read a
   number, it goes through the data plane; the media plane is for human context.
 
+### 9.2 Media lives IN the project repo (decided 2026-07-13)
+
+Photos AND clips are part of the experiment, so they belong in the project git
+repo — §8 taken literally: a ferroDAC repo is an *experiment*, not a codebase,
+and experiment repos are allowed to be heavy. Docs embed media by relative path,
+so a clone renders complete; the hub's (future) read-only mirrors are thereby
+complete archives with no separate blob transport needed for durability.
+
+- Light checkouts exist when wanted: `git clone --depth 1` / `--filter=blob:none`.
+- Server bulk is accepted; trimming is a RARE DELIBERATE act and priced honestly:
+  git never forgets — cleanup means history rewrite (filter-repo + force-push +
+  re-clone everywhere), not a delete.
+- Consequence: no .gitignore for media/; `git add -A` sweeping media is CORRECT.
+
 ---
 
 ## 10. Documentation / ELN behaviours
