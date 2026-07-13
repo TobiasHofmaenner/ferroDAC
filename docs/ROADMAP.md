@@ -46,6 +46,19 @@ Explicitly **v2**: auth/roles, web components (viewer, phone capture), sample
 tracking, UI rework, live video (WebRTC), waveform/block plane, multi-station
 aggregation, community driver library.
 
+**v2 ordering (stated 2026-07-13, while v1 testing runs):**
+1. **Auth + webserver** — the token seam in every RPC is the auth anchor;
+   web scope to be pinned (read-only viewer vs phone-capture-first).
+2. **Command channel** — the reserved path end to end (driver commands →
+   hub → authz → remote UI controls); deliberately AFTER auth because
+   remote actuation needs the `command` permission (DESIGN §13/Phase 5).
+3. **Server-managed backup** — the hub materializes read-only project
+   repos on its own storage (scope confirmed below), replacing
+   client-driven backup zips as the durability story.
+
+Note: remote live camera viewing (originally staged with the web work)
+landed EARLY in v0.60.0 via the native path (WatchFrames, demand-driven).
+
 > Method (agreed): *design the best version, then scale back to a manageable
 > scope.* So every phase below only **implements** a slice — the **slots** for
 > the rest already exist in the design.
