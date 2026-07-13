@@ -207,7 +207,13 @@ class Ribbon(pg.PlotWidget):
     # zooming in shrinks the floor and you can always make a finer window.
     _MIN_WIN_FRAC = 0.03
 
-    def __init__(self, sources, cover, t0, t1, names=None):
+    # ambient-video coverage lane style (§9.3 phase 2): one violet, translucent
+    # hatch-like band per camera BELOW the scalar rows, visually distinct from the
+    # source-coloured scalar data-coverage bars.
+    _VIDEO_HUE = (151, 117, 250)         # violet — "video exists here"
+
+    def __init__(self, sources, cover, t0, t1, names=None,
+                 cameras=None, video_cover=None):
         super().__init__(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
         self.setBackground(_PANEL)
         self.setMenuEnabled(False)
@@ -220,6 +226,11 @@ class Ribbon(pg.PlotWidget):
         self._bars = []
         self._region_ref = (t0, t1)          # last-set region (for edge detection)
         self._rows = list(sources)
+        # video lanes (cameras) live in a band at NEGATIVE y below the scalar rows
+        self._video_rows = list(cameras or [])
+        self._video_cover = dict(video_cover or {})
+        self._video_bars = []
+        self._video_labels = []
         for i, key in enumerate(self._rows):
             y = len(self._rows) - 1 - i
             lab = pg.TextItem(self._names.get(key) or _label(key),
@@ -229,7 +240,8 @@ class Ribbon(pg.PlotWidget):
             lab.setZValue(25)             # keep labels above the coverage bars
             self._labels.append((lab, y + 0.4))
         self._draw_bars(cover)
-        self.setYRange(-0.5, max(1, len(self._rows)), padding=0)
+        self._draw_video_lanes()
+        self._apply_yrange()
         self.region = pg.LinearRegionItem(brush=(77, 171, 247, 40),
                                            hoverBrush=(77, 171, 247, 70))
         self.region.setZValue(10)
@@ -273,6 +285,59 @@ class Ribbon(pg.PlotWidget):
     def set_coverage(self, cover):
         self._draw_bars(cover)
 
+    # -- video lanes (§9.3 phase 2) -------------------------------------------
+    def _video_y(self, j: int) -> float:
+        """y of video lane j — a band directly below the scalar rows (negative)."""
+        return -1.0 - j
+
+    def _apply_yrange(self) -> None:
+        lo = -(len(self._video_rows) + 0.5) if self._video_rows else -0.5
+        self.setYRange(lo, max(1, len(self._rows)), padding=0)
+
+    def _video_label(self, cam: str) -> str:
+        return "📷 " + (self._names.get(f"{cam}/frame") or _label(cam))
+
+    def _draw_video_lanes(self) -> None:
+        for lab, _ in self._video_labels:
+            self.removeItem(lab)
+        self._video_labels = []
+        col = pg.mkColor(*self._VIDEO_HUE)
+        for j, cam in enumerate(self._video_rows):
+            y = self._video_y(j)
+            lab = pg.TextItem(self._video_label(cam), color=col, anchor=(0, 0.5),
+                              fill=pg.mkBrush(18, 20, 30, 220))
+            self.addItem(lab)
+            lab.setZValue(25)
+            self._video_labels.append((lab, y + 0.4))
+        self._draw_video_bars()
+
+    def _draw_video_bars(self) -> None:
+        for b in self._video_bars:
+            self.removeItem(b)
+        self._video_bars = []
+        r, g, b = self._VIDEO_HUE
+        for j, cam in enumerate(self._video_rows):
+            y = self._video_y(j)
+            for (a, b2) in self._video_cover.get(cam, []):
+                item = pg.BarGraphItem(x0=a, width=max(b2 - a, 1.0), y0=y + 0.15,
+                                       height=0.5, brush=(r, g, b, 130),
+                                       pen=pg.mkPen(r, g, b, 220))
+                self.addItem(item)
+                self._video_bars.append(item)
+
+    def set_video_coverage(self, cover: dict) -> None:
+        """Refresh the video lanes' bars (async delivery — the window guards
+        _alive before calling). New cameras extend the lane band."""
+        self._video_cover = dict(cover or {})
+        cams = list(self._video_cover)
+        if cams != self._video_rows:            # a camera appeared → relabel + resize
+            self._video_rows = cams
+            self._draw_video_lanes()
+            self._apply_yrange()
+            self._reflow()
+        else:
+            self._draw_video_bars()
+
     def set_sources(self, rows, cover, names=None):
         """Rebuild the track rows (labels + bars) for a new source set — used when
         sources appear live (e.g. a device joins the hub) while the Timeline is
@@ -291,7 +356,7 @@ class Ribbon(pg.PlotWidget):
             self.addItem(lab)
             lab.setZValue(25)             # keep labels above the coverage bars
             self._labels.append((lab, y + 0.4))
-        self.setYRange(-0.5, max(1, len(self._rows)), padding=0)
+        self._apply_yrange()              # scalar + video band
         self._draw_bars(cover)
         self._reflow()
 
@@ -368,8 +433,11 @@ class Ribbon(pg.PlotWidget):
 
     def _reflow(self, *_):
         x0, x1 = self.getPlotItem().getViewBox().viewRange()[0]
+        px = x0 + (x1 - x0) * 0.006
         for lab, y in self._labels:
-            lab.setPos(x0 + (x1 - x0) * 0.006, y)
+            lab.setPos(px, y)
+        for lab, y in self._video_labels:
+            lab.setPos(px, y)
 
 
 class _PreviewPlot(pg.PlotWidget):
@@ -388,10 +456,14 @@ class TimelineWindow(QtWidgets.QMainWindow):
     Live is just the head at now. Its own charts are a preview of the resolver."""
 
     def __init__(self, resolver, store, time_context, parent=None, names=None,
-                 sources_fn=None, lens_fn=None, reads=None, markers=None):
+                 sources_fn=None, lens_fn=None, reads=None, markers=None,
+                 video_store=None):
         super().__init__(parent)
         self._markers = markers              # MarkerModel | None — media tags on
         #                                      the ribbon (scrub-to-photo, §9b)
+        self._video_store = video_store      # VideoStore | None — §9.3 phase 2:
+        #                                      per-camera coverage lane + scrub preview
+        self._video_cover = {}
         self._reads = reads                  # async resolver facade (§21.3); the
         #                                      coverage tick + preview queries go
         #                                      through it so they never block paint.
@@ -431,6 +503,14 @@ class TimelineWindow(QtWidgets.QMainWindow):
         # in hub coverage through ReadService moments after the window is up.
         self._cover = {k: resolver.coverage(k, local_only=True)
                        for k in self._sources}
+        # video coverage seed — LOCAL disk (json/os), the video analog of the
+        # local_only scalar seed; the periodic refresh runs off the paint thread
+        if self._video_store is not None:
+            try:
+                self._video_cover = {c: self._video_store.coverage(c)
+                                     for c in self._video_store.cameras()}
+            except Exception:                # noqa: BLE001 — video optional
+                self._video_cover = {}
         now = time.time()
         lo = min((c[0][0] for c in self._cover.values() if c), default=now - 600)
         self.now = now
@@ -619,14 +699,24 @@ class TimelineWindow(QtWidgets.QMainWindow):
         scroll.setWidgetResizable(True); scroll.setWidget(cw)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.ribbon = Ribbon(self._sources, self._cover, self._view0, self._view1,
-                             names=self._names)
+                             names=self._names,
+                             cameras=list(self._video_cover),
+                             video_cover=self._video_cover)
         self.ribbon.setMinimumHeight(130)
         self.ribbon.windowPreview.connect(self._on_preview)  # dragging → live preview
         self.ribbon.windowChanged.connect(self._on_window)   # release → commit (heavy)
         self.ribbon.recenter.connect(self._recenter)
         vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        vsplit.addWidget(scroll); vsplit.addWidget(self.ribbon)
-        vsplit.setSizes([480, 150])
+        vsplit.addWidget(scroll)
+        self.video_preview = None
+        if self._video_store is not None:
+            from .videopreview import VideoPreviewPanel
+            self.video_preview = VideoPreviewPanel(
+                self._video_store, names_fn=lambda: self._names)
+            vsplit.addWidget(self.video_preview)
+        vsplit.addWidget(self.ribbon)
+        vsplit.setSizes([420, 200, 150] if self.video_preview is not None
+                        else [480, 150])
         rv.addWidget(vsplit, 1)
         rv.addLayout(self._transport())
         self.perf = PerfStrip()                              # always-on resource HUD
@@ -717,6 +807,15 @@ class TimelineWindow(QtWidgets.QMainWindow):
             return
         self.t0, self.t1 = self._preview_win
         self._refresh()                       # downsampled query — cheap
+        self._drive_video_preview()
+
+    def _drive_video_preview(self) -> None:
+        """Point the video preview at the head instant (self.t1). Paused unless the
+        transport is actually playing/live — a parked scrub shows a still frame."""
+        vp = getattr(self, "video_preview", None)
+        if vp is None:
+            return
+        vp.set_head(self.t1, playing=(self.tc.playing or self.tc.following))
 
     def _on_window(self, a, b, mode):
         """Drag RELEASED → commit to the shared clock. Tail edge → resize the back
@@ -746,6 +845,8 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._cov_ticks += 1
         if self._cov_ticks % 4 == 0:                  # coverage changes slowly (~2s)
             self._refresh_coverage()
+            self._refresh_video_coverage()
+            self._sync_video_cameras()
 
     def _refresh_coverage(self) -> None:
         """Repull coverage for the ribbon bars. Off the GUI thread via the async
@@ -766,6 +867,33 @@ class TimelineWindow(QtWidgets.QMainWindow):
                                       on_result=apply)
         else:
             apply({k: self.resolver.coverage(k) for k in srcs})
+
+    def _refresh_video_coverage(self) -> None:
+        """Repull ambient-video coverage for the ribbon's video lanes — OFF the
+        paint thread (per-camera index.json parse is O(segments); §9.3). Local
+        disk only (no network), delivered under the _alive guard."""
+        vs = self._video_store
+        if vs is None:
+            return
+
+        def work(_ctx):
+            try:
+                return {c: vs.coverage(c) for c in vs.cameras()}
+            except Exception:                # noqa: BLE001
+                return {}
+
+        def done(cov):
+            if not _alive(self.ribbon):       # window torn down mid-flight → drop
+                return
+            if cov != self._video_cover:
+                self._video_cover = cov
+                self.ribbon.set_video_coverage(cov)
+
+        try:
+            from .tasks import run_task
+            run_task(work, title="Video coverage", on_done=done)
+        except Exception:                    # noqa: BLE001 — no runner (headless)
+            done(work(None))
 
     def _recenter(self, t):
         # double-click → centre a window of the current width on t. Use park_window
@@ -866,6 +994,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
             self.ribbon.follow_view(self.t1)  # keep the live edge in view
         self._syncing = False
         self._refresh()
+        self._drive_video_preview()
         self._sync_transport()
         if self.tc.following:
             self.perf.set_play("● live · 1.0× realtime")
@@ -914,11 +1043,18 @@ class TimelineWindow(QtWidgets.QMainWindow):
         QtCore.QSettings("ferroDAC", "ferroDAC").setValue(
             "timeline/state", json.dumps({"checked": checked, "speed": self.tc.speed}))
 
+    def _sync_video_cameras(self) -> None:
+        vp = getattr(self, "video_preview", None)
+        if vp is not None:
+            vp.refresh_cameras()
+
     def closeEvent(self, ev):
         # leave the head/view exactly as-is — the dockable Player controls the
         # head independently, so closing the scrubber changes nothing.
         self._save_state()                     # remember checked sources + speed
         self._live_timer.stop(); self._preview_timer.stop()
+        if getattr(self, "video_preview", None) is not None:
+            self.video_preview.stop()
         try:
             self._tc_unsub()
         except Exception:

@@ -544,7 +544,8 @@ class MainWindow(QMainWindow):
                                  sources_fn=self._timeline_sources,
                                  lens_fn=self._curated_source_keys,
                                  reads=self.reads,
-                                 markers=self.dashboard.markers)
+                                 markers=self.dashboard.markers,
+                                 video_store=self._video_store)
             win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
             self._timeline_win = win
         self._timeline_win.show()

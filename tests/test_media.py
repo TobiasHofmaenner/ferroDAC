@@ -591,3 +591,45 @@ def test_media_files_in_enumerates_span_media(tmp_path):
     assert photo["t_end"] is None and len(photo["files"]) == 1
     # out-of-span, deleted, path-escape, and missing-file all excluded
     assert len(ents) == 2
+
+
+# -- §9.3 phase 2: timeline video lane + scrub preview (offscreen Qt glue) --------
+
+def test_ribbon_video_lane_layout(tmp_path):
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.ui.timeline import Ribbon
+    base = 1_700_000_000.0
+    r = Ribbon(["dev/p"], {"dev/p": [(base, base + 300)]}, base, base + 300,
+               names={"camA/frame": "Bench", "dev/p": "P"},
+               cameras=["camA", "camB"],
+               video_cover={"camA": [(base + 10, base + 120)],
+                            "camB": [(base + 50, base + 200)]})
+    (y0, y1) = r.getPlotItem().getViewBox().viewRange()[1]
+    assert y0 <= -2.0 and y1 >= 1.0                 # a band below the scalar row
+    assert len(r._video_bars) == 2 and len(r._video_labels) == 2
+    r.set_video_coverage({"camA": [(base, base + 300)],
+                          "camB": [(base + 50, base + 200)],
+                          "camC": [(base + 5, base + 9)]})     # a camera appeared
+    assert len(r._video_rows) == 3 and len(r._video_bars) == 3
+    assert r.getPlotItem().getViewBox().viewRange()[1][0] <= -3.0
+
+
+def test_video_preview_resolves_and_blanks(tmp_path):
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.ui.videopreview import VideoPreviewPanel
+    st = VideoStore(str(tmp_path / "video"))
+    base = 1_700_000_000.0
+    for i in range(3):
+        p = st.segment_path("camA", base + i * 60)
+        open(p, "wb").write(b"\x00" * 64)             # not decodable, but resolution
+        st.commit("camA", base + i * 60, base + (i + 1) * 60, p)   # is a pure query
+    vp = VideoPreviewPanel(st, names_fn=lambda: {"camA/frame": "Bench"})
+    assert vp.isVisible() is False or vp._cam == "camA"   # camera auto-selected
+    vp._cam = "camA"
+    vp.set_head(base + 90)                            # inside segment 1
+    assert vp._cur_path == st.segment_at("camA", base + 90)["path"]
+    vp.set_head(base + 9999)                          # a gap → cleared
+    assert vp._cur_path is None
