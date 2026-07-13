@@ -26,6 +26,7 @@ services:
     environment:
       HUB_GRPC_ADDR: "0.0.0.0:50051"
       HUB_STORE_DIR: "/data/hub.zarr"   # sync target + read tier (§12.1)
+      HUB_VIDEO_DIR: "/data/video"      # ambient-video segment sync + backfill (§9.3 ph3)
       HUB_BACKUP_DIR: "/backups"        # authoritative project backup mirror (§20); a
       #                                   server path now, a mounted Nextcloud folder later
       # transparent git dial (optional — empty GITEA_TOKEN disables it):

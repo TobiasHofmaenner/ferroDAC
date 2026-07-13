@@ -20,6 +20,9 @@ ENV PYTHONUNBUFFERED=1
 # durable Zarr store: the agents' store-and-forward sync target + read tier.
 # Mount a volume at /data (docker-compose does) so it survives restarts.
 ENV HUB_STORE_DIR=/data/hub.zarr
+# ambient-video segment store: the media-plane sync target + backfill (§9.3 ph3).
+# Under the same /data volume, so synced clips survive restarts too.
+ENV HUB_VIDEO_DIR=/data/video
 
 EXPOSE 50051
 CMD ["python", "-m", "hub.main"]
