@@ -172,6 +172,13 @@ class WorkspaceArea(QMainWindow):
         self._gears.pop(panel, None)        # child of the panel — dies with it
         dock = self._docks.pop(panel, None)
         if dock is not None:
+            # removeDockWidget FIRST: setParent(None)+deleteLater alone leaves the
+            # dock in this QMainWindow's dock accounting (deleteLater is async), so
+            # saveState() keeps serializing it as a GHOST. Those ghosts pollute the
+            # blob and, on restore, prevent Qt from rebuilding the splitter tree —
+            # real docks (e.g. the camera) anchored next to a ghost fall back to a
+            # default position. Removing it keeps saveState() in sync with _panels.
+            self.removeDockWidget(dock)
             dock.setParent(None)
             dock.deleteLater()
 
