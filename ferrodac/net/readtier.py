@@ -14,6 +14,7 @@ Qt-free; degrades to a no-op import if grpcio is missing.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import numpy as np
@@ -40,33 +41,61 @@ class HubReadTier:
         self._dtypes = None                          # cached {key: dtype} catalog
         self._cov_ttl = coverage_ttl
         self._cov_cache: dict = {}                   # series -> (monotonic_ts, intervals)
+        self._cov_inflight: set = set()              # series with a bg refresh running
+        self._cov_lock = threading.Lock()
 
     # -- tier protocol (same shape as RamTier / ZarrStore) -------------------
     def coverage(self, series) -> list:
-        """Remote coverage with a short TTL cache + stale-on-error. The resolver
-        consults EVERY tier's coverage when it partitions a window (query,
-        read_raw, knows) — often several times per user action — and each uncached
-        call here is a network round-trip with a multi-second worst case. Remote
-        coverage moves slowly (it grows as the hub ingests), so a few seconds of
-        staleness is invisible; a hub hiccup serves the last known intervals
-        instead of stalling the caller for the timeout again."""
+        """Remote coverage, non-blocking ON THE GUI THREAD. The resolver consults
+        every tier's coverage when it partitions a window (query / read_raw /
+        read_raw_trace / knows) — and that runs on the GUI thread per play tick and
+        per redraw (chartfeed.reconcile, replay._render). A synchronous GetCoverage
+        there (multi-second worst case over gRPC) freezes the UI (the watchdog
+        stalls seen with a connected hub). So on the GUI (main) thread serve the
+        cached value immediately (or [] before the first refresh) and refresh in
+        the BACKGROUND. A WORKER thread — export, the async read facade, analysis —
+        still BLOCKS for a fresh value: it needs accuracy for data trust and can
+        afford to wait. GUI correctness holds because a local tier that also covers
+        the window wins the partition regardless of the hub's stale answer (§21.2)."""
         ent = self._cov_cache.get(series)
         now = time.monotonic()
         if ent is not None and now - ent[0] < self._cov_ttl:
-            return ent[1]
+            return ent[1]                            # warm cache → both paths
+        if threading.current_thread() is not threading.main_thread():
+            return self._fetch_coverage_blocking(series, ent)   # worker → fresh, may block
+        self._refresh_coverage_async(series)         # GUI thread → stale now, refresh bg
+        return ent[1] if ent is not None else []
+
+    def _fetch_coverage_blocking(self, series, ent) -> list:
+        """The synchronous GetCoverage → cache update (the accurate path). Serves
+        the last-known intervals if the hub is unreachable rather than raising."""
         try:
             resp = self.stub.GetCoverage(
                 pb.CoverageRequest(source=str(series), token=self.token),
                 timeout=self.timeout)
             cov = [(iv.t0, iv.t1) for iv in resp.intervals]
-            self._cov_cache[series] = (now, cov)
-            return cov
-        except Exception as exc:                     # noqa: BLE001 (hub down → no cov)
+        except Exception as exc:                     # noqa: BLE001 (hub down → last known)
             log.debug("hub coverage(%s) failed: %s", series, exc)
-            # stale beats a repeat multi-second stall; negative-cache an outage too
             cov = ent[1] if ent is not None else []
-            self._cov_cache[series] = (now, cov)
-            return cov
+        self._cov_cache[series] = (time.monotonic(), cov)
+        return cov
+
+    def _refresh_coverage_async(self, series) -> None:
+        """Fetch coverage on a daemon thread + update the cache. Deduped per series
+        so a burst of GUI-thread partitions triggers ONE refresh."""
+        with self._cov_lock:
+            if series in self._cov_inflight:
+                return
+            self._cov_inflight.add(series)
+
+        def work():
+            try:
+                self._fetch_coverage_blocking(series, self._cov_cache.get(series))
+            finally:
+                with self._cov_lock:
+                    self._cov_inflight.discard(series)
+
+        threading.Thread(target=work, name="hub-cov-refresh", daemon=True).start()
 
     def query(self, series, t0, t1, max_points=2000):
         try:

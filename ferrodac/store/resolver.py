@@ -165,11 +165,13 @@ class Resolver:
         order = np.argsort(t, kind="stable")             # tier boundaries → re-order
         return t[order], v[order]
 
-    def read_raw_trace(self, series, t0, t1) -> list:
+    def read_raw_trace(self, series, t0, t1, local_only: bool = False) -> list:
         """FULL-RES trace blocks stitched across tiers that hold traces (local
         store / hub). list of (times[k], Y[k, m], x[m]). Same half-open seam rule
-        as read_raw: a scan exactly on a tier boundary must not appear twice."""
-        segs = self._partition(series, t0, t1)
+        as read_raw: a scan exactly on a tier boundary must not appear twice.
+        `local_only` skips the networked hub tier — the per-tick play/backfill path
+        must never wait on a socket (mirrors read_raw; DESIGN §21.2)."""
+        segs = self._partition(series, t0, t1, local_only=local_only)
         out = []
         for i, (a, b, tier) in enumerate(segs):
             rr = getattr(tier, "read_raw_trace", None) if tier is not None else None
@@ -183,11 +185,11 @@ class Resolver:
                     out.append((bt, by, bx))
         return out
 
-    def query_trace(self, series, t0, t1, max_scans=400) -> list:
+    def query_trace(self, series, t0, t1, max_scans=400, local_only: bool = False) -> list:
         """Display-decimated trace blocks stitched across tiers (the waterfall
         preview path) — full-res read then ~max_scans representative scans/block."""
         out = []
-        for (t, Y, x) in self.read_raw_trace(series, t0, t1):
+        for (t, Y, x) in self.read_raw_trace(series, t0, t1, local_only=local_only):
             if len(t) > max_scans:
                 idx = np.linspace(0, len(t) - 1, max_scans).astype(int)
                 t, Y = t[idx], Y[idx]

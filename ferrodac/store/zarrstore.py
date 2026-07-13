@@ -412,10 +412,12 @@ class ZarrStore:
         return out
 
     @_locked
-    def read_raw(self, uuid, t0, t1):
+    def read_raw(self, uuid, t0, t1, local_only: bool = False):
         """FULL-RESOLUTION raw samples in [t0,t1] across epochs — **no rollup,
         no downsampling** (the analysis path: downsampling would low-pass-filter
-        the physics). Returns (t, v) in time order. The window bounds memory."""
+        the physics). Returns (t, v) in time order. The window bounds memory.
+        `local_only` is accepted for a uniform store interface (a raw store has no
+        remote tier — it is always local); it is ignored here."""
         try:
             g = self._source(uuid)
         except KeyError:                             # source not in this store yet
@@ -476,9 +478,11 @@ class ZarrStore:
         eg.attrs["t0"] = float(ta[0]); eg.attrs["t1"] = float(t); eg.attrs["n"] = n0 + 1
 
     @_locked
-    def read_raw_trace(self, uuid, t0, t1) -> list:
+    def read_raw_trace(self, uuid, t0, t1, local_only: bool = False) -> list:
         """FULL-RES trace scans in [t0,t1] as per-epoch blocks (the axis differs
-        per epoch): list of (times[k], Y[k, m], x[m]). For analysis/replay."""
+        per epoch): list of (times[k], Y[k, m], x[m]). For analysis/replay.
+        `local_only` is accepted for a uniform store interface (ignored — a raw
+        store is always local)."""
         try:
             g = self._source(uuid)
         except KeyError:                             # source not in this store yet

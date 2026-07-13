@@ -136,7 +136,11 @@ class ChartFeed:
         t0, t1 = tc.window
         try:
             if replay.playback._is_trace(source_key):
-                readings = replay.playback.read_window([source_key], t0, t1)
+                # LOCAL only: this backfill is synchronous on the GUI thread, so it
+                # must not wait on the hub socket (a hub-only trace draws whole on the
+                # next render instead of blocking the click — §21.2).
+                readings = replay.playback.read_window([source_key], t0, t1,
+                                                       local_only=True)
                 if readings:
                     panel.feed(readings)
                 return

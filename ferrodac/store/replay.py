@@ -176,11 +176,14 @@ class PlaybackSource:
         self.bus = bus
         self.chunk = chunk
 
-    def read_window(self, sources, t0, t1, on_progress=None, should_stop=None) -> list:
+    def read_window(self, sources, t0, t1, on_progress=None, should_stop=None,
+                    local_only=False) -> list:
         """Read full-res raw for `sources` over [t0,t1] and return the Readings in
         global time order — the READ half of `stream`, with no emit. Also used to
         backfill a freshly-routed source into one panel (Dashboard route) without
-        touching the shared bus. `on_progress` covers the read as its first half."""
+        touching the shared bus. `on_progress` covers the read as its first half.
+        `local_only` forwards to the store so a GUI-thread per-tick caller never
+        waits on the hub socket (§21.2)."""
         srcs = list(sources)
         rows: list = []
         for i, sid in enumerate(srcs):
@@ -188,13 +191,14 @@ class PlaybackSource:
                 return []
             dev, _, src = sid.rpartition("/")        # key 'device/source' → Reading
             if self._is_trace(sid):                  # 2-D scans → Trace readings
-                for times, Y, x in self.store.read_raw_trace(sid, t0, t1):
+                for times, Y, x in self.store.read_raw_trace(sid, t0, t1,
+                                                             local_only=local_only):
                     rows.extend(
                         (float(times[j]),
                          Reading(dev, src, float(times[j]), Trace(x=x, y=Y[j])))
                         for j in range(len(times)))
             else:
-                t, v = self.store.read_raw(sid, t0, t1)  # full-res scalars
+                t, v = self.store.read_raw(sid, t0, t1, local_only=local_only)  # scalars
                 if len(t):
                     rows.extend((float(t[j]), Reading(dev, src, float(t[j]), float(v[j])))
                                 for j in range(len(t)))
@@ -204,7 +208,7 @@ class PlaybackSource:
         return [rd for _, rd in rows]
 
     def stream(self, sources, t0, t1, on_progress=None, should_stop=None,
-               pump=None) -> int:
+               pump=None, local_only=False) -> int:
         """Read full-res raw for `sources` over [t0,t1], merge by time, and emit
         through the bus in time-ordered chunks. Returns the number of readings
         emitted. `on_progress(frac)` (0..1) reports the load: the read phase is
@@ -219,7 +223,7 @@ class PlaybackSource:
         None (headless/tests/server) it falls back to the synchronous in-caller
         drain, so behaviour is byte-identical to before."""
         rows = self.read_window(sources, t0, t1, on_progress=on_progress,
-                                should_stop=should_stop)
+                                should_stop=should_stop, local_only=local_only)
         if not rows:
             if on_progress:
                 on_progress(1.0)
@@ -345,7 +349,12 @@ class ReplayController:
                     self.on_advance(seg0, seg1)      # the owner (§22 step 4)
                 # small slice → stream inline (no task, no clear) for PROCESSORS and
                 # trace displays; the play tick trims the back edge (like live).
-                self.playback.stream(list(self._sources()), seg0, seg1)
+                # LOCAL tiers only: this runs on the GUI thread per play tick, so it
+                # must never block on the hub's networked coverage/read (the freeze a
+                # trace source + a connected hub used to cause). A hub-only source
+                # advances on the next off-thread render, not point-by-point (§21.2).
+                self.playback.stream(list(self._sources()), seg0, seg1,
+                                     local_only=True)
         else:
             self._render(t0, t1)                     # discontinuous → re-render fresh
 
