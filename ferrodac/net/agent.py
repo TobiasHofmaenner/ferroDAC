@@ -25,13 +25,18 @@ class HubAgent(ReconnectingClient):
     _thread_name = "hub-agent"
     _disconnect_label = "hub"
 
-    def __init__(self, addr: str, agent_id: str = "ferrodac", on_state=None):
+    def __init__(self, addr: str, agent_id: str = "ferrodac", on_state=None,
+                 on_frame_demand=None):
         super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
         self._outq: "asyncio.Queue | None" = None
         self._lock = threading.Lock()
         self._devices: dict = {}               # uuid -> pb.DeviceDescriptor
         self._id2uuid: dict = {}               # device-id (instance_id OR data_id) -> uuid
+        # (uuid, source_id, active) — viewers started/stopped watching a camera
+        # (§9). Called on the AGENT's asyncio thread; the wirer marshals.
+        self._on_frame_demand = on_frame_demand
+        self.demanded_frames: set = set()      # {(uuid, source_id)} currently watched
 
     def _on_loop_created(self, loop) -> None:
         self._outq = asyncio.Queue()           # so _send has a queue before session 1
@@ -104,9 +109,25 @@ class HubAgent(ReconnectingClient):
             watch_connectivity(ch, self._addr, self._notify))
         try:
             call = rpc.IngestStub(ch).Session(self._outgen())
-            async for _hub_msg in call:
-                pass                           # M1: down channel unused
+            async for hub_msg in call:
+                which = hub_msg.WhichOneof("msg")
+                if which == "frame_demand":
+                    fd = hub_msg.frame_demand
+                    ref = (fd.device_uuid, fd.source_id)
+                    if fd.active:
+                        self.demanded_frames.add(ref)
+                    else:
+                        self.demanded_frames.discard(ref)
+                    if self._on_frame_demand is not None:
+                        try:
+                            self._on_frame_demand(fd.device_uuid, fd.source_id,
+                                                  fd.active)
+                        except Exception:      # noqa: BLE001 — a bad callback
+                            log.debug("frame-demand callback failed",
+                                      exc_info=True)
+                # welcome/ack: nothing to do
         finally:
+            self.demanded_frames.clear()       # a reconnect re-sends active demand
             watcher.cancel()
 
     async def _outgen(self):

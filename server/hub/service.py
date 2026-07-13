@@ -32,36 +32,64 @@ class IngestServicer(rpc.IngestServicer):
     async def Session(self, request_iterator, context):  # noqa: N802
         mine: set[str] = set()          # devices this session announced
         agent = "?"
+        # Down channel: a queue-driven push stream (the Docs-session template) so
+        # the hub can send unsolicited HubMessages (frame demand, §9) — the
+        # request iterator is consumed by a side task instead of the generator.
+        outq: asyncio.Queue = asyncio.Queue(maxsize=64)
+        done = asyncio.Event()
+
+        async def reader():
+            nonlocal agent
+            try:
+                async for msg in request_iterator:
+                    which = msg.WhichOneof("msg")
+                    if which == "hello":
+                        agent = msg.hello.agent_id or "?"
+                        cv = msg.hello.contract_version
+                        if cv and cv != CONTRACT_VERSION:   # soft check — log only
+                            log.warning(
+                                "agent %s speaks contract v%s, hub is v%s — "
+                                "proceeding; mismatched fields may be ignored",
+                                agent, cv, CONTRACT_VERSION)
+                        log.info("agent connected: %s", agent)
+                        outq.put_nowait(pb.HubMessage(welcome=pb.Welcome(
+                            session_id=_uuid.uuid4().hex,
+                            contract_version=CONTRACT_VERSION,
+                            hub_version=HUB_VERSION)))
+                    elif which == "announce":
+                        self.hub.announce(msg.announce)
+                        mine.add(msg.announce.uuid)
+                        self.hub.register_agent((msg.announce.uuid, outq))
+                        log.info("announce: %s (%s) from %s",
+                                 msg.announce.name, msg.announce.uuid, agent)
+                    elif which == "readings":
+                        self.hub.publish(msg.readings)
+                    elif which == "retire":
+                        self.hub.retire(msg.retire.device_uuid)
+                        self.hub.unregister_agent(msg.retire.device_uuid)
+                        mine.discard(msg.retire.device_uuid)
+                    elif which == "heartbeat":
+                        pass
+            finally:
+                done.set()
+
+        task = asyncio.ensure_future(reader())
         try:
-            async for msg in request_iterator:
-                which = msg.WhichOneof("msg")
-                if which == "hello":
-                    agent = msg.hello.agent_id or "?"
-                    cv = msg.hello.contract_version
-                    if cv and cv != CONTRACT_VERSION:   # soft check — log, don't reject
-                        log.warning("agent %s speaks contract v%s, hub is v%s — "
-                                    "proceeding; mismatched fields may be ignored",
-                                    agent, cv, CONTRACT_VERSION)
-                    log.info("agent connected: %s", agent)
-                    yield pb.HubMessage(welcome=pb.Welcome(
-                        session_id=_uuid.uuid4().hex,
-                        contract_version=CONTRACT_VERSION,
-                        hub_version=HUB_VERSION))
-                elif which == "announce":
-                    self.hub.announce(msg.announce)
-                    mine.add(msg.announce.uuid)
-                    log.info("announce: %s (%s) from %s",
-                             msg.announce.name, msg.announce.uuid, agent)
-                elif which == "readings":
-                    self.hub.publish(msg.readings)
-                elif which == "retire":
-                    self.hub.retire(msg.retire.device_uuid)
-                    mine.discard(msg.retire.device_uuid)
-                elif which == "heartbeat":
-                    pass
+            while True:
+                get = asyncio.ensure_future(outq.get())
+                fin = asyncio.ensure_future(done.wait())
+                await asyncio.wait({get, fin}, return_when=asyncio.FIRST_COMPLETED)
+                if get.done():
+                    fin.cancel()
+                    yield get.result()
+                else:
+                    get.cancel()
+                    break                       # agent stream ended
         finally:
+            task.cancel()
             for device_uuid in mine:    # session ended ⇒ its devices vanish
                 self.hub.retire(device_uuid)
+                self.hub.unregister_agent(device_uuid)
             log.info("agent disconnected: %s (retired %d device(s))",
                      agent, len(mine))
 
@@ -106,6 +134,24 @@ class ViewerServicer(rpc.ViewerServicer):
             pass
         finally:
             self.hub.remove_subscriber(sub)
+
+    async def WatchFrames(self, request, context):  # noqa: N802
+        """Live video for EXPLICIT refs only (§9): opening the stream is the
+        demand signal — the hub tells the owning agent to start encoding while
+        >=1 watcher holds the ref. Small queue = latest-wins conflation."""
+        if not request.sources:             # a catch-all frame watch is refused:
+            return                          # it would demand-start EVERY camera
+        refs = {(s.device_uuid, s.source_id) for s in request.sources}
+        sub = Subscriber(refs)
+        sub.queue = asyncio.Queue(maxsize=4)   # frames: drop-oldest ≈ latest-wins
+        self.hub.add_frame_watcher(sub)
+        try:
+            while True:
+                yield await sub.queue.get()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self.hub.remove_frame_watcher(sub)
 
 
 class TagsServicer(rpc.TagsServicer):

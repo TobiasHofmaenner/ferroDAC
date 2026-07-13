@@ -104,6 +104,21 @@ def _status_to_proto(status: int):
     return pb.OK if not status else pb.ERROR
 
 
+class FramePayload:
+    """A live video frame as plain bytes — the Qt-free wire form (DESIGN §9).
+    The AGENT encodes a QImage into one of these before the net layer sees it;
+    the VIEWER decodes back to a QImage before publishing locally. net/ stays
+    Qt-free. encoding: "jpeg" (documentation) | "rgb888" (raw, bit-exact)."""
+
+    __slots__ = ("data", "encoding", "width", "height")
+
+    def __init__(self, data: bytes, encoding: str, width: int, height: int):
+        self.data = data
+        self.encoding = encoding
+        self.width = int(width)
+        self.height = int(height)
+
+
 def reading_to_proto(r: Reading, device_uuid: str) -> pb.Reading:
     m = pb.Reading(device_uuid=device_uuid, source_id=r.source, t=float(r.t),
                    status=_status_to_proto(r.status), partial=bool(r.partial))
@@ -116,12 +131,20 @@ def reading_to_proto(r: Reading, device_uuid: str) -> pb.Reading:
         m.scalar = float(v)
     elif isinstance(v, str):
         m.text = v
+    elif isinstance(v, FramePayload):
+        m.frame.data = v.data
+        m.frame.encoding = v.encoding
+        m.frame.width = v.width
+        m.frame.height = v.height
     return m
 
 
 def reading_from_proto(m: pb.Reading) -> Reading:
     which = m.WhichOneof("payload")
-    if which == "trace":
+    if which == "frame":
+        value = FramePayload(bytes(m.frame.data), m.frame.encoding,
+                             m.frame.width, m.frame.height)
+    elif which == "trace":
         value = trace_from_proto(m.trace)
     elif which == "boolean":
         value = m.boolean

@@ -64,6 +64,7 @@ class HubController(QObject):
         self._agent_unsub = None
         self._tags_wired = False
         self._local: set = set()
+        self._frame_last: dict = {}     # (uuid, source) -> last doc-frame send (worker lane)
         self._link: dict = {}            # role -> live gRPC connected? (for the button)
         self.addr = ""
         # These signals are emitted from raw (non-QThread) gRPC worker threads;
@@ -161,6 +162,9 @@ class HubController(QObject):
                 on_catalog=lambda et, dev: self._catalog.emit(et, dev),
                 on_readings=self._on_readings_net,
                 on_state=self._state_cb("viewer"))
+            # live video demand follows the local routes (§9)
+            self.dashboard.ports_changed.connect(self._recompute_frame_wants)
+            self._recompute_frame_wants()
             self._viewer.start()
         # hub READ tier + backup admin: a sync channel, wired whenever connected
         # (independent of agent/viewer) — the read tier back-reads history a wiped
@@ -387,9 +391,69 @@ class HubController(QObject):
         self._emit_to_bridges(doc_id, lambda b: b.collabPresence.emit(payload))
 
     # -- agent side (GUI thread) --------------------------------------------
+    # live video wire policy (§9/§9.1): documentation = JPEG, capped; raw = as-is
+    _FRAME_DOC_MAX_PX = 960
+    _FRAME_DOC_MIN_DT = 1.0 / 8      # ≤8 fps
+    _FRAME_DOC_QUALITY = 80
+
     def _feed_agent(self, batch) -> None:
-        if self._agent is not None:
-            self._agent.feed(batch)
+        if self._agent is None:
+            return
+        out = []
+        for r in batch:
+            v = r.value
+            if hasattr(v, "isNull") and hasattr(v, "save"):     # a QImage frame
+                fr = self._encode_frame_reading(r)
+                if fr is not None:                              # demanded + enabled
+                    out.append(fr)
+                continue           # image readings NEVER pass through raw: an un-
+                #                    encoded QImage serialized as an empty payload
+                #                    and landed on viewers as a NaN scalar
+            out.append(r)
+        if out:
+            self._agent.feed(out)
+
+    def _encode_frame_reading(self, r):
+        """QImage Reading → FramePayload Reading per the camera's hub-video mode
+        (0 off / 1 documentation / 2 raw), only while a viewer holds a WatchFrames
+        ref (the hub's demand signal). Runs on the agent's conflating worker lane."""
+        ref = (r.device, r.source)             # r.device is the data-plane uuid
+        if ref not in self._agent.demanded_frames:
+            return None
+        mode = 0
+        for dev in self.manager.active_devices():
+            if getattr(dev, "data_id", None) == r.device:
+                mode = int(getattr(dev, "hub_video_mode", 0))
+                break
+        if mode == 0:
+            return None
+        from ..core.reading import Reading
+        from ..net.convert import FramePayload
+        from ..vision.ocr import qimage_to_rgb
+        img = r.value
+        if mode == 1:                          # documentation: cap rate + size, JPEG
+            import time as _t
+            now = _t.monotonic()
+            last = self._frame_last.get(ref, 0.0)
+            if now - last < self._FRAME_DOC_MIN_DT:
+                return None
+            self._frame_last[ref] = now
+            if max(img.width(), img.height()) > self._FRAME_DOC_MAX_PX:
+                from qtpy.QtCore import Qt
+                img = img.scaled(self._FRAME_DOC_MAX_PX, self._FRAME_DOC_MAX_PX,
+                                 Qt.KeepAspectRatio, Qt.FastTransformation)
+            from qtpy.QtCore import QBuffer, QByteArray
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QBuffer.WriteOnly)
+            if not img.save(buf, "JPG", self._FRAME_DOC_QUALITY):
+                return None
+            fp = FramePayload(bytes(ba.data()), "jpeg", img.width(), img.height())
+        else:                                  # raw (§9.1): bit-exact, native rate
+            arr = qimage_to_rgb(img)           # contiguous (H, W, 3) uint8
+            fp = FramePayload(arr.tobytes(), "rgb888",
+                              arr.shape[1], arr.shape[0])
+        return Reading(r.device, r.source, r.t, fp, r.status)
 
     def _on_active_changed(self) -> None:
         self._update_local()
@@ -399,13 +463,57 @@ class HubController(QObject):
     def _update_local(self) -> None:
         self._local = self.dashboard.local_uuids()
 
+    def _recompute_frame_wants(self, *_):
+        """The demand side of live video (§9): watch exactly the REMOTE cameras
+        currently routed to a local panel. Runs on every ports/routes change;
+        set_frame_refs no-ops when the set is unchanged."""
+        if self._viewer is None:
+            return
+        refs = set()
+        for key, sinks in self.dashboard._routes.items():
+            if not sinks:
+                continue
+            sp = self.dashboard._sources.get(key)
+            if sp is not None and sp.dtype == "image" and sp.kind == "remote":
+                refs.add(tuple(key.split("/", 1)))
+        self._viewer.set_frame_refs(refs)
+
     # -- viewer side ---------------------------------------------------------
     def _on_readings_net(self, readings) -> None:
         # worker thread; engine.publish is thread-safe (deque append)
+        from ..net.convert import FramePayload
         local = self._local
         for r in readings:
-            if r.device not in local:           # skip our own devices echoed back
-                self.engine.publish(r)
+            if r.device in local:               # skip our own devices echoed back
+                continue
+            if isinstance(r.value, FramePayload):
+                img = self._decode_frame(r.value)
+                if img is None:
+                    continue
+                from ..core.reading import Reading
+                r = Reading(r.device, r.source, r.t, img, r.status)
+            self.engine.publish(r)
+
+    @staticmethod
+    def _decode_frame(fp):
+        """FramePayload → QImage (viewer worker thread; QImage is GUI-safe to
+        construct off-thread — panels receive it via the normal engine drain)."""
+        from qtpy.QtGui import QImage
+        try:
+            if fp.encoding == "jpeg":
+                img = QImage.fromData(fp.data, "JPG")
+                return None if img.isNull() else img
+            if fp.encoding == "rgb888":
+                if len(fp.data) != fp.width * fp.height * 3:
+                    return None            # QImage would happily WRAP an under-
+                #                            sized buffer and read past it —
+                #                            validate before constructing
+                img = QImage(fp.data, fp.width, fp.height,
+                             fp.width * 3, QImage.Format.Format_RGB888)
+                return None if img.isNull() else img.copy()   # detach from bytes
+        except Exception:                       # noqa: BLE001 — a bad frame is
+            pass                                # dropped, never a crash
+        return None
 
     def _on_catalog_gui(self, etype, dev) -> None:
         if dev.uuid in self.dashboard.local_uuids():

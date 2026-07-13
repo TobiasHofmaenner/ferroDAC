@@ -264,3 +264,75 @@ def test_double_start_is_ignored(tmp_path):
     svc, _ = _clip_rig(tmp_path, cams)
     assert svc.on_record_start(time.time()) == 1
     assert svc.on_record_start(time.time()) == 0       # stray second start: no-op
+
+
+# -- §9 live video: the hubclient encode/decode glue -----------------------------
+
+def _encode_rig(demanded, mode, frame_last=None):
+    """A bare stand-in carrying exactly the attrs _encode_frame_reading uses —
+    the method is called unbound so no HubController construction is needed."""
+    from ferrodac.ui.hubclient import HubController
+    stub = types.SimpleNamespace(
+        _agent=types.SimpleNamespace(demanded_frames=demanded),
+        manager=types.SimpleNamespace(active_devices=lambda: [
+            types.SimpleNamespace(data_id="cam-1", hub_video_mode=mode)]),
+        _frame_last=frame_last if frame_last is not None else {},
+        _FRAME_DOC_MAX_PX=HubController._FRAME_DOC_MAX_PX,
+        _FRAME_DOC_MIN_DT=HubController._FRAME_DOC_MIN_DT,
+        _FRAME_DOC_QUALITY=HubController._FRAME_DOC_QUALITY,
+    )
+    return HubController._encode_frame_reading, stub
+
+
+def test_encode_gates_on_demand_and_mode():
+    enc, stub = _encode_rig(demanded=set(), mode=2)
+    r = _reading("cam-1/frame", _frame())
+    r.device, r.source = "cam-1", "frame"
+    assert enc(stub, r) is None                       # no demand → nothing sent
+
+    enc, stub = _encode_rig(demanded={("cam-1", "frame")}, mode=0)
+    assert enc(stub, r) is None                       # demanded but mode Off
+
+
+def test_encode_raw_is_bit_exact():
+    from ferrodac.net.convert import FramePayload
+    from ferrodac.ui.hubclient import HubController
+    enc, stub = _encode_rig(demanded={("cam-1", "frame")}, mode=2)
+    img = _frame(w=16, h=12, color="#804020")
+    r = _reading("cam-1/frame", img)
+    r.device, r.source = "cam-1", "frame"
+    out = enc(stub, r)
+    assert out is not None and isinstance(out.value, FramePayload)
+    fp = out.value
+    assert fp.encoding == "rgb888" and (fp.width, fp.height) == (16, 12)
+    img2 = HubController._decode_frame(fp)            # viewer-side decode
+    assert img2 is not None and img2.size() == img.size()
+    for x, y in ((0, 0), (8, 6), (15, 11)):
+        assert img2.pixel(x, y) == img.pixel(x, y)    # §9.1: raw = bit-exact
+
+
+def test_encode_documentation_caps_rate_and_compresses():
+    from ferrodac.net.convert import FramePayload
+    from ferrodac.ui.hubclient import HubController
+    enc, stub = _encode_rig(demanded={("cam-1", "frame")}, mode=1)
+    img = _frame(w=1280, h=720)
+    r = _reading("cam-1/frame", img)
+    r.device, r.source = "cam-1", "frame"
+    out = enc(stub, r)
+    assert out is not None
+    fp = out.value
+    assert fp.encoding == "jpeg"
+    assert max(fp.width, fp.height) <= 960            # downscaled
+    assert len(fp.data) < 1280 * 720 * 3 / 10         # actually compressed
+    img2 = HubController._decode_frame(fp)
+    assert img2 is not None and not img2.isNull()
+    assert enc(stub, r) is None                       # immediate resend → rate-capped
+
+
+def test_decode_rejects_garbage():
+    from ferrodac.net.convert import FramePayload
+    from ferrodac.ui.hubclient import HubController
+    assert HubController._decode_frame(
+        FramePayload(b"not a jpeg", "jpeg", 4, 4)) is None
+    assert HubController._decode_frame(
+        FramePayload(b"\x00" * 5, "rgb888", 4, 4)) is None   # wrong size

@@ -18,6 +18,7 @@ E2E = [
     "sync_e2e",     # sync mirror + live tail + read tier (ListSources/Coverage/Query/ReadRaw/Trace)
     "e2e",          # agent → hub → viewer: transparent remote device, subscribe, retire
     "net_e2e",      # app net layer round-trip (convert + agent/viewer), incl. Trace
+    "frames_e2e",   # §9 live video: demand-driven WatchFrames, raw bit-exact round-trip
     "docs_collab_e2e",  # live collab rooms: seed/fan-out/compaction/snapshot/persist
     "docs_net_e2e",     # app collab relay (HubDocSync) round-trip, base64 at the seam
 ]

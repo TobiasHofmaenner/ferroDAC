@@ -5,7 +5,7 @@ import warnings
 
 from ferrodac_contract.v1 import data_plane_pb2 as ferrodac__contract_dot_v1_dot_data__plane__pb2
 
-GRPC_GENERATED_VERSION = '1.81.1'
+GRPC_GENERATED_VERSION = '1.82.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -127,6 +127,11 @@ class ViewerStub:
                 request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
                 response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.FromString,
                 _registered_method=True)
+        self.WatchFrames = channel.unary_stream(
+                '/ferrodac_contract.v1.Viewer/WatchFrames',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.FromString,
+                _registered_method=True)
 
 
 class ViewerServicer:
@@ -156,6 +161,16 @@ class ViewerServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def WatchFrames(self, request, context):
+        """Live video frames for EXPLICITLY named image sources. Opening this stream
+        IS the demand signal: the hub tells the owning agent to start encoding
+        while >=1 watcher holds a ref, stop on the last close. Latest-wins
+        conflation per watcher — a slow viewer drops frames, never builds lag.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ViewerServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -176,6 +191,11 @@ def add_ViewerServicer_to_server(servicer, server):
             ),
             'Subscribe': grpc.unary_stream_rpc_method_handler(
                     servicer.Subscribe,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.SerializeToString,
+            ),
+            'WatchFrames': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchFrames,
                     request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.FromString,
                     response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.SerializeToString,
             ),
@@ -286,6 +306,33 @@ class Viewer:
             request,
             target,
             '/ferrodac_contract.v1.Viewer/Subscribe',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchFrames(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ferrodac_contract.v1.Viewer/WatchFrames',
             ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
             ferrodac__contract_dot_v1_dot_data__plane__pb2.ReadingBatch.FromString,
             options,

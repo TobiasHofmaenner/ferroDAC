@@ -135,6 +135,21 @@ message MediaRef {
   string mime_type = 2;
 }
 
+// A LIVE video frame on the wire (remote camera viewing, DESIGN §9).
+// encoding "jpeg"    — documentation quality (webcam at a gauge): compressed,
+//                      downscaled, rate-capped by the agent.
+// encoding "rgb888"  — RAW mode (§9.1: pixels can be data): bit-exact as the
+//                      camera pipeline carried it, native rate/size — the
+//                      scientific-camera-on-10GbE case. Row-major, 3 B/px.
+// Frames NEVER ride the general Subscribe stream: they flow only on
+// Viewer.WatchFrames (explicit refs), which doubles as the demand signal.
+message Frame {
+  bytes data = 1;
+  string encoding = 2;           // "jpeg" | "rgb888"
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
 message Reading {
   string device_uuid = 1;        // identity: (device_uuid, source_id)
   string source_id = 2;
@@ -148,6 +163,7 @@ message Reading {
     Trace trace = 13;
     Waveform waveform = 14;
     MediaRef media = 15;
+    Frame frame = 16;            // live video (WatchFrames only)
   }
 }
 
@@ -210,11 +226,20 @@ message AgentMessage {
 }
 
 // Down the Session stream (hub -> agent).
+// Hub -> agent: viewers want (or stopped wanting) live frames of one camera.
+// Sent on the Ingest session's down channel; re-sent after an agent reconnect.
+message FrameDemand {
+  string device_uuid = 1;
+  string source_id = 2;
+  bool active = 3;
+}
+
 message HubMessage {
   oneof msg {
     Welcome welcome = 1;         // handshake reply
     Ack ack = 2;
     Command command = 3;         // RESERVED — unused in milestone 1
+    FrameDemand frame_demand = 4;
   }
 }
 
@@ -267,6 +292,11 @@ service Viewer {
   rpc GetCatalog(CatalogRequest) returns (Catalog);
   rpc WatchCatalog(CatalogRequest) returns (stream CatalogEvent);
   rpc Subscribe(SubscribeRequest) returns (stream ReadingBatch);
+  // Live video frames for EXPLICITLY named image sources. Opening this stream
+  // IS the demand signal: the hub tells the owning agent to start encoding
+  // while >=1 watcher holds a ref, stop on the last close. Latest-wins
+  // conflation per watcher — a slow viewer drops frames, never builds lag.
+  rpc WatchFrames(SubscribeRequest) returns (stream ReadingBatch);
 }
 
 // --------------------------------------------------------------------------- //

@@ -254,6 +254,14 @@ class CameraDevice(BaseDevice):
             # documentation clip (media/*.mp4 + a span media tag)
             Option(key="clips", name="Clip on ● Record",
                    choices=((0, "Off"), (1, "On")), value=0),
+            # §9/§9.1 live video on the hub — encoding when a REMOTE viewer
+            # watches this camera (demand-driven; idle = zero traffic):
+            # Documentation = JPEG ≤960px ≤8fps (webcam at a gauge);
+            # Raw = bit-exact frames at native rate/size (pixels are data —
+            # the scientific-camera-on-10GbE case; plan the bandwidth).
+            Option(key="hub_video", name="Hub video",
+                   choices=((0, "Off"), (1, "Documentation (JPEG)"),
+                            (2, "Raw (lossless)")), value=1),
         ]
         super().__init__(
             instance_id=instance_id,
@@ -334,6 +342,11 @@ class CameraDevice(BaseDevice):
     @property
     def clips_enabled(self) -> bool:
         return bool(self._option_values.get("clips", 0))
+
+    @property
+    def hub_video_mode(self) -> int:
+        """0 off · 1 documentation (JPEG, capped) · 2 raw (bit-exact) — §9.1."""
+        return int(self._option_values.get("hub_video", 0))
 
     def start_clip(self, path: str) -> bool:
         """Queue clip recording into `path` (best-effort — the service verifies

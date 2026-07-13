@@ -97,6 +97,9 @@ class Hub:
         self.gitea = gitea                          # transparent dial: auto-provision repos
         self._devices: dict[str, pb.DeviceDescriptor] = {}
         self._subs: set[Subscriber] = set()
+        self._frame_subs: set[Subscriber] = set()   # WatchFrames watchers (§9)
+        self._frame_demand: dict = {}               # (uuid, source) -> watcher count
+        self._agent_outq: dict = {}                 # device uuid -> Ingest out-queue
         self._watchers: set[asyncio.Queue] = set()
         # Tags (DESIGN §7.3): a durable, reliable store keyed by id, merged
         # last-write-wins on version, tombstones kept so deletes propagate.
@@ -170,7 +173,21 @@ class Hub:
         self._subs.discard(sub)
 
     def publish(self, batch: pb.ReadingBatch) -> None:
-        """Fan one ingest batch out to every interested subscriber."""
+        """Fan one ingest batch out to every interested subscriber. FRAME
+        payloads are split off to the explicit WatchFrames watchers (§9 —
+        video never rides the catch-all Subscribe stream)."""
+        frames = [r for r in batch.readings if r.WhichOneof("payload") == "frame"]
+        if frames:
+            plain = [r for r in batch.readings
+                     if r.WhichOneof("payload") != "frame"]
+            for sub in self._frame_subs:
+                wanted = [r for r in frames
+                          if sub.wants(r.device_uuid, r.source_id)]
+                if wanted:
+                    _offer(sub.queue, pb.ReadingBatch(readings=wanted))
+            if not plain:
+                return
+            batch = pb.ReadingBatch(readings=plain)
         if not self._subs:
             return
         for sub in self._subs:
@@ -181,6 +198,47 @@ class Hub:
                           if sub.wants(r.device_uuid, r.source_id)]
                 if wanted:
                     _offer(sub.queue, pb.ReadingBatch(readings=wanted))
+
+    # -- live video: frame watchers + demand (§9) ------------------------------
+    # WatchFrames streams register here; the count of explicit refs per
+    # (uuid, source) IS the demand signal, forwarded to the owning agent's
+    # Ingest session so cameras encode only while somebody watches.
+    def register_agent(self, agent_uuid_outq) -> None:
+        """An Ingest session announces (uuid -> its out-queue). Re-sends any
+        ACTIVE demand so an agent reconnect resumes running streams."""
+        uuid, outq = agent_uuid_outq
+        self._agent_outq[uuid] = outq
+        for (du, sid), n in self._frame_demand.items():
+            if du == uuid and n > 0:
+                _offer(outq, pb.HubMessage(frame_demand=pb.FrameDemand(
+                    device_uuid=du, source_id=sid, active=True)))
+
+    def unregister_agent(self, uuid: str) -> None:
+        self._agent_outq.pop(uuid, None)
+
+    def add_frame_watcher(self, sub: Subscriber) -> None:
+        self._frame_subs.add(sub)
+        for ref in (sub.refs or ()):
+            n = self._frame_demand.get(ref, 0)
+            self._frame_demand[ref] = n + 1
+            if n == 0:
+                self._signal_demand(ref, True)
+
+    def remove_frame_watcher(self, sub: Subscriber) -> None:
+        self._frame_subs.discard(sub)
+        for ref in (sub.refs or ()):
+            n = self._frame_demand.get(ref, 0) - 1
+            if n <= 0:
+                self._frame_demand.pop(ref, None)
+                self._signal_demand(ref, False)
+            else:
+                self._frame_demand[ref] = n
+
+    def _signal_demand(self, ref, active: bool) -> None:
+        outq = self._agent_outq.get(ref[0])
+        if outq is not None:
+            _offer(outq, pb.HubMessage(frame_demand=pb.FrameDemand(
+                device_uuid=ref[0], source_id=ref[1], active=active)))
 
     # -- tag persistence (JSON backend; SQLite/Postgres-CNPG later) ----------
     def _load_tags(self) -> None:

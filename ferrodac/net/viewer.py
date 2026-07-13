@@ -5,6 +5,11 @@ both to callbacks. The Qt side turns catalog events into device ports (§6.1
 'bind REMOTE') and feeds the readings into the Engine, so remote devices render
 exactly like local ones. Runs grpc.aio in its own thread; callbacks fire on that
 thread (marshal to the GUI thread on the Qt side).
+
+Live VIDEO (§9) rides a separate explicit stream: `set_frame_refs({(uuid,
+source_id), ...})` opens/replaces a WatchFrames subscription for exactly the
+cameras routed to a local panel — opening it is the demand signal that makes
+the remote agent start encoding, closing it stops the camera's wire traffic.
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ import logging
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 from ferrodac_contract.v1 import data_plane_pb2_grpc as rpc
 
-from . import convert, watch_connectivity
+from . import call_soon_safe, convert, watch_connectivity
 from .session import ReconnectingClient
 
 log = logging.getLogger("hub.viewer")
@@ -29,21 +34,73 @@ class HubViewer(ReconnectingClient):
                  on_state=None):
         super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._on_catalog = on_catalog          # (event_type: str, pb.DeviceDescriptor)
-        self._on_readings = on_readings        # (list[app Reading])
+        self._on_readings = on_readings        # (list[app Reading]) — also frames
+        self._frame_refs: set = set()          # wanted {(uuid, source_id)}
+        self._frames_task = None               # the live WatchFrames task
+        self._stub = None                      # this session's ViewerStub
 
+    # -- public API (any thread) ----------------------------------------------
+    def set_frame_refs(self, refs: set) -> None:
+        """Replace the watched camera set. Thread-safe; a no-op when unchanged.
+        The stream restarts with the new refs (grpc has no re-subscribe on a
+        live stream); an empty set just closes it."""
+        refs = {(str(u), str(s)) for (u, s) in refs}
+        call_soon_safe(self._loop, self._apply_frame_refs, refs)
+
+    # -- session ---------------------------------------------------------------
     async def _run_session(self, ch) -> None:
         v = rpc.ViewerStub(ch)
+        self._stub = v
         # REAL link from the channel state (not 'we opened a channel'); watch the
         # catalog + subscribe to readings until any ends (disconnect) or we stop.
         conn = asyncio.create_task(watch_connectivity(ch, self._addr, self._notify))
         watch = asyncio.create_task(self._watch(v))
         sub = asyncio.create_task(self._subscribe(v))
         stopper = asyncio.create_task(self._stop.wait())
-        await asyncio.wait({conn, watch, sub, stopper},
-                           return_when=asyncio.FIRST_COMPLETED)
-        for t in (conn, watch, sub, stopper):
-            t.cancel()
-        await asyncio.gather(conn, watch, sub, stopper, return_exceptions=True)
+        if self._frame_refs:                   # resume watched cameras on reconnect
+            self._start_frames()
+        try:
+            await asyncio.wait({conn, watch, sub, stopper},
+                               return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            self._stub = None
+            tasks = [conn, watch, sub, stopper]
+            if self._frames_task is not None:
+                tasks.append(self._frames_task)
+                self._frames_task = None
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _apply_frame_refs(self, refs: set) -> None:
+        if refs == self._frame_refs:
+            return
+        self._frame_refs = refs
+        self._start_frames()
+
+    def _start_frames(self) -> None:
+        """(Re)open the WatchFrames stream for the current refs (loop thread)."""
+        if self._frames_task is not None:
+            self._frames_task.cancel()
+            self._frames_task = None
+        if not self._frame_refs or self._stub is None:
+            return
+        req = pb.SubscribeRequest(sources=[
+            pb.SourceRef(device_uuid=u, source_id=s)
+            for (u, s) in sorted(self._frame_refs)])
+        self._frames_task = asyncio.ensure_future(self._frames(self._stub, req))
+
+    async def _frames(self, v, req) -> None:
+        try:
+            async for batch in v.WatchFrames(req):
+                if self._on_readings is not None and batch.readings:
+                    self._on_readings(
+                        [convert.reading_from_proto(r) for r in batch.readings])
+        except asyncio.CancelledError:
+            raise
+        except Exception:                      # noqa: BLE001 — stream died; the
+            log.debug("WatchFrames ended", exc_info=True)   # next reconnect (or
+        #                                        set_frame_refs) reopens it
 
     async def _watch(self, v) -> None:
         async for ev in v.WatchCatalog(pb.CatalogRequest()):
