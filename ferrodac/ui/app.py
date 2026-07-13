@@ -2000,7 +2000,8 @@ class MainWindow(QMainWindow):
         try:
             export_window(dest, self.dashboard.export_sources(), self.resolver,
                           m.t, m.t_end, tags=self.dashboard.markers.to_list(),
-                          store=self.store_writer.store if self.store_writer else None)
+                          store=self.store_writer.store if self.store_writer else None,
+                          media_root=self._project_root())
             csv = os.path.join(dest, "data.csv")
             if os.path.exists(csv):
                 files.append({"name": "data.csv", "abspath": csv, "kind": "csv"})
@@ -2052,6 +2053,10 @@ class MainWindow(QMainWindow):
                                   self._materialize_clips(mid, a, b))
 
     # -- ambient video clips (§9.3) -------------------------------------------
+    def _project_root(self):
+        p = self._project_mgr.active if getattr(self, "_project_mgr", None) else None
+        return p.path if p is not None else None
+
     def _clip_materializer(self):
         from ..core.media import ClipMaterializer
         return ClipMaterializer(
@@ -2085,18 +2090,43 @@ class MainWindow(QMainWindow):
             return out
 
         def done(out):
+            new_tags = []
             for key, label, res in out:
-                self.dashboard.markers.add(
+                mid = self.dashboard.markers.add(
                     t0, t_end=t1, kind="media", label=f"🎬 {label}",
                     payload={"file": res["file"], "files": res["files"],
                              "source": key, "format": "mp4",
                              "clip": "documentation", "rec_mid": rec_mid})
+                new_tags.append(self.dashboard.markers.get(mid))
             if out:
                 self.statusBar().showMessage(
                     f"🎬 saved {len(out)} clip(s) to media/", 5000)
+                self._bundle_clips_into_run(rec_mid, t0, t1, new_tags)
 
         run_task(work, title="Saving clips", exclusive=f"clip:{rec_mid}",
                  on_done=done)
+
+    def _bundle_clips_into_run(self, rec_mid, t0, t1, tags) -> None:
+        """Copy freshly-materialized clips into the recording's ALREADY-exported
+        run bundle (the auto-export ran at Stop, before the clips landed). Off the
+        GUI thread; no-op if the recording was never exported to a run dir."""
+        m = self.dashboard.markers.get(rec_mid)
+        run_dir = getattr(m, "run_dir", None) if m is not None else None
+        root = self._project_root()
+        if not run_dir or not root:
+            return
+        from ..core.markers import marker_to_dict
+        dicts = [marker_to_dict(t) for t in tags]
+
+        def work(_ctx):
+            from ..store import append_media_to_bundle
+            try:
+                return append_media_to_bundle(run_dir, dicts, t0, t1, root)
+            except Exception:                        # noqa: BLE001
+                return 0
+
+        run_task(work, title="Adding clips to the run bundle",
+                 exclusive=f"bundle-clip:{rec_mid}")
 
     def _rematerialize_clips_for(self, mid: str) -> None:
         """A RECORDING marker moved → re-slice its clips from ambient over the
@@ -2177,6 +2207,7 @@ class MainWindow(QMainWindow):
         tags = self.dashboard.markers.to_list()
         writer = self.store_writer if flush else None
         store = self.store_writer.store if self.store_writer else None
+        root = self._project_root()          # media_root: clips+photos into the bundle
 
         def work(ctx):
             if writer is not None:
@@ -2184,7 +2215,8 @@ class MainWindow(QMainWindow):
                     writer.flush_all()               # a clean stop loses nothing
                 except Exception:                    # noqa: BLE001
                     pass
-            return export_window(dest, sources, resolver, t0, t1, tags=tags, store=store)
+            return export_window(dest, sources, resolver, t0, t1, tags=tags,
+                                 store=store, media_root=root)
 
         def fail(msg):
             if on_fail is not None:

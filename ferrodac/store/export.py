@@ -63,7 +63,7 @@ def _u_column(name: str, unit: str) -> str:
 
 
 def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = False,
-                  tags: list = None, store=None) -> dict:
+                  tags: list = None, store=None, media_root: str = None) -> dict:
     """Export ``[t0,t1]`` for `sources` ({key: {name, unit, dtype}}) via `reader`.
     Writes the bundle described in the module docstring; returns the manifest.
     `tags` (marker dicts) overlapping the window are written to `tags.csv`.
@@ -71,7 +71,12 @@ def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = Fal
     When `store` is given, each scalar source that has a declared σ model gets a GUM
     companion column ``u(name) [unit]`` right after its value column (DESIGN §19.0) —
     the standard uncertainty reconstructed over the window from the change-log; the
-    manifest records the column, k=1, and the model for reproducibility."""
+    manifest records the column, k=1, and the model for reproducibility.
+
+    When `media_root` (the project root) is given, the span's PHOTOS and video
+    CLIPS (kind="media" tags whose files live under media_root) are copied into
+    ``<dest>/media/`` and recorded in ``manifest["media"]`` — so an exported run
+    is self-contained: data + tags + video (DESIGN §9.3 phase 2)."""
     os.makedirs(dest_dir, exist_ok=True)
     t0, t1 = float(t0), float(t1)
     manifest = {
@@ -143,9 +148,80 @@ def export_window(dest_dir: str, sources: dict, reader, t0, t1, fill: bool = Fal
     if n_tags:
         manifest["tags_file"] = "tags.csv"
         manifest["tags"] = n_tags
+    if media_root:
+        media = _write_media(dest_dir, tags or [], t0, t1, media_root)
+        if media:
+            manifest["media_dir"] = "media"
+            manifest["media"] = media
     with open(os.path.join(dest_dir, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)
     return manifest
+
+
+def _write_media(dest_dir: str, tags: list, t0: float, t1: float,
+                 media_root: str, used: set = None) -> list:
+    """Copy the span's photos + clips into ``<dest>/media/`` and return manifest
+    entries. Enumeration (span filter, containment, multi-part) is done Qt-free by
+    MediaService.media_files_in; here we only copy + name. `used` dedupes bundle
+    filenames across repeated calls (append_media_to_bundle)."""
+    from ..core.media import MediaService
+    import shutil
+    entries = MediaService.media_files_in(tags, t0, t1, media_root)
+    if not entries:
+        return []
+    mdir = os.path.join(dest_dir, "media")
+    os.makedirs(mdir, exist_ok=True)
+    used = used if used is not None else set(os.listdir(mdir))
+    out = []
+    for e in entries:
+        bundled = []
+        for src in e["files"]:
+            fname = _unique(os.path.basename(src), used)
+            try:
+                shutil.copyfile(src, os.path.join(mdir, fname))
+            except OSError:
+                continue                            # a vanished file ≠ fatal
+            bundled.append(fname)
+        if not bundled:
+            continue
+        out.append({"kind": e["kind"], "label": e["label"], "format": e["format"],
+                    "source": e["source"], "t": e["t"], "t_end": e["t_end"],
+                    "rec_mid": e["rec_mid"], "files": bundled})
+    return out
+
+
+def append_media_to_bundle(dest_dir: str, tags: list, t0: float, t1: float,
+                           media_root: str) -> int:
+    """Add media to an ALREADY-written run bundle + patch its manifest.json — for
+    clips that land AFTER the recording's auto-export ran (§9.3: clips finalize
+    ~seconds after Stop). Idempotent-ish: filenames are deduped against what's
+    already in <dest>/media/, and manifest media entries are replaced for the
+    same (source, t, files) so a re-slice refreshes rather than piles up.
+    Returns the number of media items now in the bundle."""
+    mpath = os.path.join(dest_dir, "manifest.json")
+    try:
+        with open(mpath, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except Exception:                               # noqa: BLE001 — no bundle → nothing
+        return 0
+    existing = manifest.get("media", [])
+    # drop prior entries for the (kind, source) we're refreshing (a re-slice
+    # supersedes) — key on the ENTRY kind (clip|photo, derived from format), the
+    # same kind _write_media stores, not the tag's "media" kind
+    def _ekind(d):
+        return "clip" if (d.get("payload") or {}).get("format") == "mp4" else "photo"
+    fresh = {(_ekind(d), (d.get("payload") or {}).get("source"))
+             for d in tags if d.get("kind") == "media" and not d.get("deleted")}
+    kept = [m for m in existing if (m.get("kind"), m.get("source")) not in fresh]
+    used = set(os.listdir(os.path.join(dest_dir, "media"))) \
+        if os.path.isdir(os.path.join(dest_dir, "media")) else set()
+    added = _write_media(dest_dir, tags, t0, t1, media_root, used=used)
+    manifest["media"] = kept + added
+    if manifest["media"]:
+        manifest["media_dir"] = "media"
+    with open(mpath, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    return len(manifest["media"])
 
 
 def _unique(fname: str, used: set) -> str:

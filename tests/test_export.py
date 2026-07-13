@@ -167,3 +167,88 @@ def test_only_sources_with_data_in_window():
     man = export_window(os.path.join(d, "empty"), _sources(), res, BASE - 100, BASE - 50)
     assert man["sources"] == []
     assert not os.path.exists(os.path.join(d, "empty", "data.csv"))
+
+
+def test_export_carries_span_media(tmp_path):
+    """§9.3 phase 2: photos + clips in the span are copied into <dest>/media/ and
+    listed in manifest['media']; out-of-span, deleted, and escaping payloads are
+    excluded, a missing file is skipped, multi-part clips carry all parts."""
+    from ferrodac.store import export_window
+    from ferrodac.store import Resolver, RamTier, ZarrStore
+    from ferrodac.core.history import HistoryBuffer
+    import os
+    proj = tmp_path / "proj"
+    (proj / "media").mkdir(parents=True)
+    for n, data in (("a.png", b"PNG"), ("c.part1.mp4", b"C1"), ("c.part2.mp4", b"C2")):
+        (proj / "media" / n).write_bytes(data)
+    st = ZarrStore(os.path.join(str(tmp_path), "s.zarr"))
+    import numpy as np
+    gt = BASE + np.arange(10) * 1.0
+    st.add_source("dev/p", name="P", unit="mbar")
+    st.append("dev/p", gt, 1e-6 + 0 * gt, epoch="e0")
+    res = Resolver([RamTier(HistoryBuffer()), st])
+    sources = {"dev/p": {"name": "P", "unit": "mbar", "dtype": "float"}}
+    tags = [
+        {"id": "p1", "kind": "media", "t": BASE + 2, "payload":
+         {"file": "media/a.png", "format": "png", "source": "cam/frame"}},
+        {"id": "c1", "kind": "media", "t": BASE + 1, "t_end": BASE + 8, "payload":
+         {"file": "media/c.part1.mp4", "files": ["media/c.part1.mp4", "media/c.part2.mp4"],
+          "format": "mp4", "source": "cam/frame", "rec_mid": "R1"}},
+        {"id": "x1", "kind": "media", "t": BASE + 999, "payload":
+         {"file": "media/a.png", "format": "png"}},                     # out of span
+        {"id": "x2", "kind": "media", "t": BASE + 2, "deleted": True,
+         "payload": {"file": "media/a.png", "format": "png"}},          # deleted
+        {"id": "x3", "kind": "media", "t": BASE + 2,
+         "payload": {"file": "../../etc/passwd", "format": "png"}},     # escape
+        {"id": "x4", "kind": "media", "t": BASE + 2,
+         "payload": {"file": "media/gone.png", "format": "png"}},       # missing
+    ]
+    dest = tmp_path / "out"
+    man = export_window(str(dest), sources, res, BASE - 1, BASE + 30,
+                        tags=tags, media_root=str(proj))
+    assert man["media_dir"] == "media"
+    bundled = sorted(os.listdir(str(dest / "media")))
+    assert bundled == ["a.png", "c.part1.mp4", "c.part2.mp4"]           # 1 photo + 2 parts
+    kinds = sorted(m["kind"] for m in man["media"])
+    assert kinds == ["clip", "photo"]
+    clip = next(m for m in man["media"] if m["kind"] == "clip")
+    assert len(clip["files"]) == 2 and clip["rec_mid"] == "R1"
+
+
+def test_append_media_to_bundle_patches_manifest(tmp_path):
+    """A clip landing AFTER the auto-export copies into the existing run bundle +
+    patches manifest.json; a re-slice of the same source replaces, not piles up."""
+    from ferrodac.store import append_media_to_bundle, export_window
+    from ferrodac.store import Resolver, RamTier, ZarrStore
+    from ferrodac.core.history import HistoryBuffer
+    import json
+    import numpy as np
+    import os
+    proj = tmp_path / "proj"
+    (proj / "media").mkdir(parents=True)
+    (proj / "media" / "clip.mp4").write_bytes(b"V1")
+    st = ZarrStore(os.path.join(str(tmp_path), "s.zarr"))
+    gt = BASE + np.arange(5) * 1.0
+    st.add_source("dev/p", name="P", unit="mbar"); st.append("dev/p", gt, 0*gt+1, epoch="e0")
+    res = Resolver([RamTier(HistoryBuffer()), st])
+    dest = tmp_path / "run"
+    export_window(str(dest), {"dev/p": {"name": "P", "unit": "mbar", "dtype": "float"}},
+                  res, BASE - 1, BASE + 10, tags=[], media_root=str(proj))  # no media yet
+    assert "media" not in json.load(open(str(dest / "manifest.json")))
+
+    clip_tag = [{"id": "c1", "kind": "media", "t": BASE + 1, "t_end": BASE + 5,
+                 "payload": {"file": "media/clip.mp4", "files": ["media/clip.mp4"],
+                             "format": "mp4", "source": "cam/frame", "rec_mid": "R1"}}]
+    n = append_media_to_bundle(str(dest), clip_tag, BASE - 1, BASE + 10, str(proj))
+    assert n == 1
+    man = json.load(open(str(dest / "manifest.json")))
+    assert man["media"][0]["kind"] == "clip" and os.path.exists(str(dest / "media" / "clip.mp4"))
+
+    # re-slice: a bigger clip replaces the same source's entry (not duplicate)
+    (proj / "media" / "clip2.mp4").write_bytes(b"V2-longer")
+    clip_tag[0]["payload"]["files"] = ["media/clip2.mp4"]
+    clip_tag[0]["payload"]["file"] = "media/clip2.mp4"
+    n2 = append_media_to_bundle(str(dest), clip_tag, BASE - 1, BASE + 10, str(proj))
+    man2 = json.load(open(str(dest / "manifest.json")))
+    assert n2 == 1 and len(man2["media"]) == 1                          # replaced, not piled
+    assert man2["media"][0]["files"] == ["clip2.mp4"]
