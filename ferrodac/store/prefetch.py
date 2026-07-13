@@ -81,20 +81,23 @@ class PrefetchCache:
 
     # -- ingest (the prefetcher worker writes) -------------------------------
     def add_scalar(self, series, t, v, a, b) -> None:
-        """Merge fetched scalars + mark [a,b] fetched (even if t is empty, so an
-        empty span isn't re-requested)."""
+        """Merge fetched scalars + mark [a,b] fetched. The O(n log n) merge/sort runs
+        OFF the lock: only the prefetch worker writes, so the snapshot is stable
+        between the read and the swap, and a GUI-thread read never waits on the sort
+        (§21.2 — this was a measured play-tick stall)."""
         t = np.asarray(t, dtype="f8")
         v = np.asarray(v, dtype="f8")
-        with self._lock:
-            self._dt[series] = "scalar"
+        with self._lock:                                  # brief: grab current arrays
             old = self._sc.get(series)
-            if old is not None and len(old[0]):
-                t = np.concatenate([old[0], t])
-                v = np.concatenate([old[1], v])
-                order = np.argsort(t, kind="stable")
-                t, v = t[order], v[order]
-                keep = np.concatenate(([True], np.diff(t) > 0))   # drop exact-t dups
-                t, v = t[keep], v[keep]
+        if old is not None and len(old[0]):               # merge/sort OUTSIDE the lock
+            t = np.concatenate([old[0], t])
+            v = np.concatenate([old[1], v])
+            order = np.argsort(t, kind="stable")
+            t, v = t[order], v[order]
+            keep = np.concatenate(([True], np.diff(t) > 0))   # drop exact-t dups
+            t, v = t[keep], v[keep]
+        with self._lock:                                  # brief: swap + coverage
+            self._dt[series] = "scalar"
             self._sc[series] = (t, v)
             self._mark_locked(series, a, b)
 

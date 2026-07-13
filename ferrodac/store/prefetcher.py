@@ -26,7 +26,10 @@ import logging
 import threading
 import time as _time
 
+import numpy as np
+
 from .intervals import intersect as _intersect
+from .intervals import merge as _merge
 from .intervals import subtract as _subtract
 
 log = logging.getLogger("ferrodac.prefetch")
@@ -48,6 +51,7 @@ class PlaybackPrefetcher:
         self._buffer_rt = float(buffer_realtime_s)   # seconds of realtime runway ahead
         self._chunk = float(chunk_s)
         self._watermark: "float | None" = None
+        self._wm_nav = -1                 # the tc.nav the watermark was computed for
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: "threading.Thread | None" = None
@@ -78,7 +82,13 @@ class PlaybackPrefetcher:
         self._wake.set()
 
     def buffered_until(self) -> "float | None":
-        """The gate reads this on the GUI thread — a plain float read, never blocks."""
+        """The gate reads this on the GUI thread — a plain field read, never blocks.
+        If a navigation happened since the watermark was computed (a scrub) OR no
+        pass has run yet, the old value is meaningless — return the CURRENT head so
+        the gate HOLDS there (never free-runs into unbuffered hub data, §12.1)
+        until the next pass recomputes a fresh watermark for this nav."""
+        if self._wm_nav != self.tc.nav:
+            return self.tc.head
         return self._watermark
 
     # -- worker --------------------------------------------------------------
@@ -104,17 +114,21 @@ class PlaybackPrefetcher:
         hi = min(hi, self._now())
         sources = list(self.sources_fn() or [])
         if not sources or hi <= lo:
-            self._watermark = None
+            self._watermark = None            # nothing to prefetch → no gating
+            self._wm_nav = nav
             return
         filled = False
         marks = []
         for src in sources:
-            if self.tc.nav != nav:            # navigated → this target is stale
-                return
+            if self.tc.nav != nav:            # navigated → this target is stale; leave
+                return                        # _wm_nav behind so the gate keeps holding
             got = self._fill_source(src, head, lo, hi, nav)
             filled = filled or got[0]
             marks.append(got[1])
+        if self.tc.nav != nav:
+            return
         self._watermark = min(marks) if marks else None
+        self._wm_nav = nav                    # watermark is fresh for this position
         if filled:
             self._deliver(self._on_filled)    # debounced: one redraw per pass
 
@@ -137,27 +151,64 @@ class PlaybackPrefetcher:
                 if self.tc.nav != nav:                 # scrubbed away mid-fill → stop
                     break
                 d = min(c + self._chunk, b)
-                self._fetch_chunk(src, dtype, c, d)
-                did = True
+                did = self._fetch_chunk(src, dtype, c, d) or did
                 c = d
             if self.tc.nav != nav:
                 break
-        # watermark: nearest hub gap after the head that is STILL not local
-        local2 = self.resolver.coverage(src, local_only=True)
-        rem = [iv for iv in _subtract(_intersect(hub_cov, [(head, hi)]), local2)
-               if iv[1] > head + 1e-6]
-        return did, (hi if not rem else max(head, min(a for a, _b in rem)))
+        local2 = self.resolver.coverage(src, local_only=True)   # now incl. what we filled
+        return did, self._source_watermark(head, hub_cov, local2)
 
-    def _fetch_chunk(self, src, dtype, a, b) -> None:
+    def _source_watermark(self, head, hub_cov, local_cov):
+        """How far play may safely advance for this source: the nearest point after
+        `head` that the HUB covers but the LOCAL tiers (incl. the cache) do not — an
+        unfilled gap. None ahead → free (capped at now). But if hub_cov is EMPTY we
+        can't confirm there's nothing ahead (a coverage-refresh failure looks the
+        same as genuinely-no-data), so we hold at the LOCAL data edge rather than
+        free-run — safe against the §12.1 silent-skip."""
+        unfilled = [iv for iv in _subtract(hub_cov, local_cov) if iv[1] > head]
+        if unfilled:
+            return max(head, min(a for a, _b in unfilled))
+        if not hub_cov:
+            return self._local_end(local_cov, head)
+        return self._now()                    # confirmed nothing to fetch ahead → free
+
+    @staticmethod
+    def _local_end(local_cov, head):
+        """The end of the contiguous local coverage from `head` (how far local data
+        runs without a gap)."""
+        end = head
+        for a, b in _merge(local_cov):
+            if b <= end:
+                continue
+            if a <= end + 1e-6:               # contiguous with what we have
+                end = max(end, b)
+            else:
+                break                         # a real gap between `end` and this interval
+        return end
+
+    def _fetch_chunk(self, src, dtype, a, b) -> bool:
+        """Fetch [a,b] from the hub into the cache. Returns True iff data actually
+        landed. An EMPTY result is NOT marked covered — HubReadTier returns [] on a
+        timeout WITHOUT raising, and a range within hub coverage is dense, so empty
+        means the fetch failed. Marking it would mask real hub data on every path
+        (display, replay, EXPORT) and let the watermark skip it (§12.1). Left
+        unmarked → retried next pass; a genuinely-empty range drops out of hub_cov
+        on the next coverage refresh, so this never spins forever."""
         try:
             if dtype == "trace":
-                self.cache.add_trace(src, self.hub.read_raw_trace(src, a, b), a, b)
-            else:
-                t, v = self.hub.read_raw(src, a, b)
-                self.cache.add_scalar(src, t, v, a, b)
-        except Exception:                             # noqa: BLE001
+                blocks = self.hub.read_raw_trace(src, a, b)
+                if not any(len(bt) for (bt, _y, _x) in (blocks or ())):
+                    return False
+                self.cache.add_trace(src, blocks, a, b)
+                return True
+            t, v = self.hub.read_raw(src, a, b)
+            if not len(t):
+                return False
+            self.cache.add_scalar(src, t, v, a, b)
+            return True
+        except Exception:                             # noqa: BLE001 — transient → retry
             log.debug("prefetch %s[%.1f,%.1f] failed", src, a, b, exc_info=True)
-            self.cache.add_scalar(src, [], [], a, b)  # mark fetched (empty) → don't respin
+            return False
 
     def _dtype(self, src) -> str:
         f = getattr(self.hub, "source_dtype", None)
@@ -191,18 +242,51 @@ class PlaybackPrefetcher:
 
     def _pin_source(self, src, t0, t1, epoch) -> bool:
         store, dtype = self.store, self._dtype(src)
-        if dtype == "trace":
-            blocks = self.hub.read_raw_trace(src, t0, t1)
-            if not blocks:
-                return False
-            store.add_source(src, dtype="trace")
-            for (bt, by, bx) in blocks:
-                for i in range(len(bt)):
-                    store.append_trace(src, float(bt[i]), bx, by[i], epoch=epoch)
-            return True
-        t, v = self.hub.read_raw(src, t0, t1)
-        if not len(t):
+        # only pin what the DURABLE store LACKS — idempotent (a re-pin finds it
+        # already durable and fetches nothing) and never duplicates an overlapping
+        # local epoch (ZarrStore.read_raw concatenates epochs with no dedup).
+        try:
+            have = store.coverage(src)
+        except Exception:                             # noqa: BLE001 — unknown source → all new
+            have = []
+        need = _subtract([(float(t0), float(t1))], have)
+        if not need:
             return False
+
+        def _fresh(t):                                # samples NOT already in the store —
+            keep = np.ones(len(t), dtype=bool)        # a gap endpoint IS a real sample the
+            for lo, hi in have:                       # hub re-reads, so filter it out
+                keep &= ~((t >= lo) & (t <= hi))
+            return keep
+
+        wrote = False
+        if dtype == "trace":
+            store.add_source(src, dtype="trace")
+            for a, b in need:
+                # each hub block is one config-epoch (its own swept axis); write each
+                # under an epoch keyed by that axis, so append_trace never drops a
+                # differing-bin block or binds one axis's scans to another's (§7.4).
+                gen, last_x = 0, None
+                for (bt, by, bx) in self.hub.read_raw_trace(src, a, b):
+                    bt = np.asarray(bt, dtype="f8")
+                    bx = np.asarray(bx, dtype="f8")
+                    if last_x is None or last_x.shape != bx.shape \
+                            or not np.allclose(last_x, bx, rtol=1e-4, atol=1e-6):
+                        gen += 1
+                        last_x = bx
+                    ep = f"{epoch}__t{gen}"
+                    keep = _fresh(bt)
+                    for i in range(len(bt)):
+                        if keep[i]:
+                            store.append_trace(src, float(bt[i]), bx, by[i], epoch=ep)
+                            wrote = True
+            return wrote
         store.add_source(src)
-        store.append(src, t, v, epoch=epoch)
-        return True
+        for a, b in need:
+            t, v = self.hub.read_raw(src, a, b)
+            if len(t):
+                m = _fresh(np.asarray(t, dtype="f8"))
+                if m.any():
+                    store.append(src, np.asarray(t)[m], np.asarray(v)[m], epoch=epoch)
+                    wrote = True
+        return wrote

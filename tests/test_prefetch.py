@@ -10,7 +10,8 @@ import types
 
 import numpy as np
 
-from ferrodac.store import Resolver, TimeContext
+from ferrodac.core.history import HistoryBuffer
+from ferrodac.store import RamTier, Resolver, TimeContext
 from ferrodac.store.intervals import intersect, subtract
 from ferrodac.store.prefetch import PrefetchCache
 from ferrodac.store.prefetcher import PlaybackPrefetcher
@@ -115,6 +116,87 @@ def test_prefetcher_pin_writes_hub_data_into_the_durable_store(tmp_path):
     assert pf._pin_source("s", 100.0, 110.0, "pin-1")
     t, v = store.read_raw("s", 100.0, 110.0)
     assert len(t) > 0 and np.allclose(v, t * 10.0)    # durable now (survives restart)
+
+
+# -- review regressions: never silently skip hub data (§12.1) ----------------
+def test_empty_hub_read_is_not_marked_covered_and_is_retried():
+    """A hub read that returns empty (a timeout returns [] WITHOUT raising) must NOT
+    mark the range fetched — else it masks real hub data on every path and the
+    watermark skips it. It must be retried."""
+    class _Flaky(_FakeHub):
+        fail = True
+
+        def read_raw(self, s, t0, t1):
+            if self.fail:
+                return np.array([]), np.array([])       # simulate a socket blip
+            return super().read_raw(s, t0, t1)
+
+    cache = PrefetchCache()
+    resolver = Resolver([])
+    resolver.set_prefetch(cache)
+    hub = _Flaky()
+    resolver.set_remote(hub)
+    pf = PlaybackPrefetcher(resolver=resolver, hub=hub, cache=cache,
+                            tc=_fake_tc(500.0), sources_fn=lambda: ["s"],
+                            now_fn=lambda: 1000.0)
+    pf._pass()
+    assert not cache.has("s")                            # the blip is NOT cached as empty
+    hub.fail = False
+    pf._pass()
+    assert cache.has("s")                                # recovers on retry
+    assert len(resolver.read_raw("s", 492.0, 498.0, local_only=True)[0]) > 0
+
+
+def test_watermark_holds_after_a_scrub_until_recomputed():
+    """A nav bump (scrub) makes the old watermark meaningless; the gate must HOLD at
+    the head, not gate against the pre-scrub value (which let play skip hub data)."""
+    pf, _cache, _res = _wired(head=500.0, playing=True, speed=1.0)
+    pf._pass()
+    assert pf.buffered_until() is not None               # fresh for nav=0
+    pf.tc.nav = 1                                         # a scrub happened
+    assert pf.buffered_until() == pf.tc.head              # stale → HOLD at head
+    pf._pass()                                            # recompute for nav=1
+    assert pf.buffered_until() is not None                # fresh again
+
+
+def test_watermark_holds_at_local_edge_when_hub_coverage_is_empty():
+    """Hub coverage transiently returning [] (a refresh failure) must NOT free-run
+    (it looks identical to genuinely-no-data) — hold at the local data edge."""
+    class _NoCov(_FakeHub):
+        def coverage(self, s):
+            return []
+
+    cache = PrefetchCache()
+    resolver = Resolver([RamTier(HistoryBuffer())])
+    resolver.set_prefetch(cache)
+    hub = _NoCov()
+    resolver.set_remote(hub)
+    t = np.arange(400.0, 481.0)
+    cache.add_scalar("s", t, t, 400.0, 480.0)            # local data runs to 480
+    pf = PlaybackPrefetcher(resolver=resolver, hub=hub, cache=cache,
+                            tc=_fake_tc(450.0, playing=True), sources_fn=lambda: ["s"],
+                            now_fn=lambda: 1000.0)
+    pf._pass()
+    assert abs(pf.buffered_until() - 480.0) < 1.0        # held at the local edge, not now
+
+
+def test_pin_only_fetches_what_the_store_lacks_no_duplication(tmp_path):
+    """Pin must subtract the durable coverage (idempotent, no boundary dup) — else
+    an overlap duplicates every sample in the permanent record."""
+    from ferrodac.store import ZarrStore
+    store = ZarrStore(str(tmp_path / "pin.zarr"))
+    store.add_source("s")
+    lt = np.arange(100.0, 151.0)
+    store.append("s", lt, lt * 10.0, epoch="local")      # [100,150] already durable
+    pf = PlaybackPrefetcher(resolver=Resolver([]), hub=_FakeHub(),
+                            cache=PrefetchCache(), tc=_fake_tc(500.0),
+                            sources_fn=lambda: ["s"], store=store)
+    assert pf._pin_source("s", 100.0, 200.0, "pin-1")    # pins only the [150,200] gap
+    t, _v = store.read_raw("s", 100.0, 200.0)
+    assert len(t) == len(np.unique(t))                   # NO duplicate rows
+    n = len(t)
+    assert pf._pin_source("s", 100.0, 200.0, "pin-2") is False   # re-pin: idempotent no-op
+    assert len(store.read_raw("s", 100.0, 200.0)[0]) == n
 
 
 # -- the tick gate -----------------------------------------------------------
