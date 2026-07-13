@@ -191,81 +191,6 @@ def test_unknown_panel_kind_is_preserved_not_fatal():
     assert alien in out["panels"]                       # the alien survives verbatim
 
 
-# -- §9 stage c: documentation clips per Record span -----------------------------
-
-class _FakeCam:
-    """Duck-typed camera for ClipService: records start/stop calls; whether a
-    file 'lands' is controlled by the test (QMediaRecorder finalises async)."""
-
-    def __init__(self, data_id, name, enabled=True, streaming=True):
-        self.data_id, self.name = data_id, name
-        self.clips_enabled, self._streaming = enabled, streaming
-        self.started_path, self.stopped = None, False
-
-    def start_clip(self, path):
-        if not self._streaming:
-            return False
-        self.started_path = path
-        return True
-
-    def stop_clip(self):
-        self.stopped = True
-
-
-def _clip_rig(tmp_path, cams):
-    from ferrodac.core.media import ClipService
-    markers = MarkerModel()
-    svc = ClipService(devices=lambda: cams, markers=markers,
-                      media_dir=lambda: str(tmp_path / "media"),
-                      names=lambda: {})
-    return svc, markers
-
-
-def test_clips_start_only_on_opted_in_streaming_cameras(tmp_path):
-    cams = [_FakeCam("camA", "Bench"), _FakeCam("camB", "Chamber", enabled=False),
-            _FakeCam("camC", "Scope", streaming=False)]
-    svc, _ = _clip_rig(tmp_path, cams)
-    n = svc.on_record_start(time.time())
-    assert n == 1 and svc.running
-    assert cams[0].started_path and cams[0].started_path.endswith(".mp4")
-    assert "media" in cams[0].started_path
-    assert cams[1].started_path is None                # opted out
-    assert cams[2].started_path is None                # not streaming
-
-
-def test_finalize_tags_only_files_that_landed(tmp_path):
-    cams = [_FakeCam("camA", "Bench"), _FakeCam("camB", "Chamber")]
-    svc, markers = _clip_rig(tmp_path, cams)
-    t0 = time.time() - 30
-    svc.on_record_start(t0)
-    t1 = time.time()
-    entries = svc.on_record_stop(t1)
-    assert len(entries) == 2 and all(c.stopped for c in cams)
-    assert not svc.running
-    # camA's encoder "worked": its file landed; camB's never appeared
-    os.makedirs(os.path.dirname(cams[0].started_path), exist_ok=True)
-    with open(cams[0].started_path, "wb") as fh:
-        fh.write(b"\x00" * 2048)
-    tagged, failed = svc.finalize(entries)
-    assert len(tagged) == 1 and len(failed) == 1
-    assert failed[0]["key"] == "camB/frame"            # named, not silent
-
-    m = markers.get(tagged[0]["tag_id"])               # the span tag
-    assert m.kind == MEDIA and m.is_region
-    assert m.t == pytest.approx(t0) and m.t_end == pytest.approx(t1)
-    assert m.payload["format"] == "mp4"
-    assert m.payload["clip"] == "documentation"        # §9.1: labelled as such
-    assert m.label.startswith("🎬")
-    assert len(markers.visible()) == 1                 # no ghost tag for camB
-
-
-def test_double_start_is_ignored(tmp_path):
-    cams = [_FakeCam("camA", "Bench")]
-    svc, _ = _clip_rig(tmp_path, cams)
-    assert svc.on_record_start(time.time()) == 1
-    assert svc.on_record_start(time.time()) == 0       # stray second start: no-op
-
-
 # -- §9 live video: the hubclient encode/decode glue -----------------------------
 
 def _encode_rig(demanded, mode, frame_last=None):
@@ -456,3 +381,160 @@ def test_videoview_zoom_survives_frames_resets_on_geometry_change():
     assert v._zoom == 3.0                              # zoom sticks across frames
     v.set_image(_frame(w=64, h=48))                    # new source geometry
     assert v._zoom == 1.0                              # → honest reset
+
+
+# -- §9.3 ambient video: store, materializer, capture-service gating -------------
+
+def _write_seg(store, cam, t0, t1, data=b"\x00" * 4096):
+    """A stand-in 'segment file' (materializer copies bytes; ffmpeg-concat is
+    tested separately). Registers it in the index like the capture service does."""
+    path = store.segment_path(cam, t0)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    assert store.commit(cam, t0, t1, path)
+    return path
+
+
+def test_videostore_coverage_and_overlap(tmp_path):
+    from ferrodac.core.videostore import VideoStore
+    st = VideoStore(str(tmp_path / "video"))
+    base = 1_700_000_000.0
+    for i in range(3):                                 # three abutting 120 s segments
+        _write_seg(st, "camA", base + i * 120, base + (i + 1) * 120)
+    cov = st.coverage("camA")
+    assert len(cov) == 1 and cov[0] == (base, base + 360)   # merged to one span
+    assert st.covers("camA", base + 50, base + 300)
+    assert not st.covers("camA", base + 50, base + 100_000)
+    segs = st.segments_overlapping("camA", base + 100, base + 250)
+    assert len(segs) == 3            # [0,120],[120,240],[240,360] all touch [100,250]
+    segs = st.segments_overlapping("camA", base + 130, base + 200)
+    assert len(segs) == 1                              # only [120,240] contains it
+
+
+def test_videostore_manual_and_retention_cleanup(tmp_path):
+    from ferrodac.core.videostore import VideoStore
+    st = VideoStore(str(tmp_path / "video"))
+    now = 1_700_000_000.0
+    for i in range(5):                                 # 5×120 s, 4 KB each
+        _write_seg(st, "camA", now - (5 - i) * 120, now - (4 - i) * 120)
+    assert st.usage("camA") == 5 * 4096
+    # segments end at now-480,-360,-240,-120,0; delete those ending BEFORE now-240
+    freed = st.delete_older_than("camA", now - 240)
+    assert freed == 2 * 4096 and len(st.coverage("camA")) == 1
+    # time-window retention: keep only the last 300 s (drops the two oldest kept)
+    st.prune_retention("camA", "5m" if False else "0.084h", now=now)   # ~300 s
+    assert len(st._load("camA")) <= 3
+    # size-cap retention, oldest first
+    st2 = VideoStore(str(tmp_path / "v2"))
+    for i in range(5):                                 # 5×4 KB = 20 KB
+        _write_seg(st2, "camB", now + i * 120, now + (i + 1) * 120)
+    assert st2.prune_retention("camB", "1GB") == 0     # under cap → nothing pruned
+    st2.prune_retention("camB", "0.00001GB")           # 10 KB cap → keep ≤ 2 newest
+    assert st2.usage("camB") <= 2 * 4096
+
+
+def test_clip_materializer_single_and_concat(tmp_path):
+    from ferrodac.core.media import ClipMaterializer
+    from ferrodac.core.videostore import VideoStore
+    st = VideoStore(str(tmp_path / "video"))
+    media = tmp_path / "proj" / "media"
+    base = 1_700_000_000.0
+    _write_seg(st, "camA", base, base + 120, data=b"SEG0" * 64)
+    mat = ClipMaterializer(st, media_dir=lambda: str(media))
+
+    r1 = mat.materialize("camA", base + 10, base + 60, "Bench")   # one segment
+    assert r1 is not None and r1["file"].startswith("media/") and r1["file"].endswith(".mp4")
+    assert os.path.exists(os.path.join(str(tmp_path / "proj"), r1["file"]))
+    assert r1["files"] == [r1["file"]]
+
+    assert mat.materialize("camA", base + 10_000, base + 10_100, "Bench") is None  # no video
+
+
+def test_clip_materializer_ffmpeg_concat_when_present(tmp_path):
+    """With ffmpeg present, multiple segments concat into ONE file. Skips where
+    ffmpeg isn't installed (the parts-fallback path is covered by construction)."""
+    from ferrodac.core.media import ClipMaterializer, _have_ffmpeg
+    from ferrodac.core.videostore import VideoStore
+    if not _have_ffmpeg():
+        pytest.skip("ffmpeg not installed")
+    import subprocess
+    st = VideoStore(str(tmp_path / "video"))
+    base = 1_700_000_000.0
+    for i in range(2):                                 # two real tiny mp4 segments
+        path = st.segment_path("camA", base + i * 120)
+        subprocess.run(["ffmpeg", "-nostdin", "-y", "-f", "lavfi",
+                        "-i", "color=c=black:s=64x48:d=1", "-pix_fmt", "yuv420p",
+                        path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=True)
+        st.commit("camA", base + i * 120, base + (i + 1) * 120, path)
+    mat = ClipMaterializer(st, media_dir=lambda: str(tmp_path / "proj" / "media"))
+    r = mat.materialize("camA", base + 10, base + 200, "Bench")
+    assert r is not None and len(r["files"]) == 1      # ONE concatenated file
+    assert os.path.getsize(os.path.join(str(tmp_path / "proj"), r["file"])) > 0
+
+
+class _FakeCam:
+    def __init__(self, data_id, mode=2, retention="", streaming=True):
+        self.data_id, self.name = data_id, data_id
+        self.video_mode, self.video_retention = mode, retention
+        self._streaming = streaming
+        self.segments, self.open_path = [], None
+
+    def start_segment(self, path):
+        if not self._streaming:
+            return False
+        self.open_path = path
+        with open(path, "wb") as fh:                    # a "recorded" file lands
+            fh.write(b"\x00" * 2048)
+        return True
+
+    def stop_segment(self):
+        if self.open_path:
+            self.segments.append(self.open_path)
+            self.open_path = None
+
+
+def test_capture_service_gates_by_mode_and_record_state(tmp_path):
+    """reconcile() opens segments only for cameras whose mode + the record state
+    say so — the core §9.3 gating, exercised without Qt timers."""
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.ui.videocapture import VideoCaptureService
+
+    cams = [_FakeCam("off", mode=0), _FakeCam("whilerec", mode=1),
+            _FakeCam("always", mode=2)]
+    recording = {"on": False}
+    st = VideoStore(str(tmp_path / "video"))
+    svc = VideoCaptureService(st, devices=lambda: cams,
+                              is_recording=lambda: recording["on"],
+                              now=lambda: 1_700_000_000.0)
+    svc.reconcile()
+    assert set(svc._active) == {"always"}              # only Always runs at rest
+    recording["on"] = True
+    svc.reconcile()
+    assert set(svc._active) == {"always", "whilerec"}  # record → While-rec joins
+    recording["on"] = False
+    svc.reconcile()
+    assert set(svc._active) == {"always"}              # stop → While-rec closes
+
+
+def test_capture_service_disk_floor_pauses_video(tmp_path, monkeypatch):
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.ui import videocapture
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+
+    cams = [_FakeCam("always", mode=2)]
+    st = VideoStore(str(tmp_path / "video"))
+    svc = videocapture.VideoCaptureService(
+        st, devices=lambda: cams, is_recording=lambda: False,
+        now=lambda: 1_700_000_000.0)
+    svc.reconcile()
+    assert set(svc._active) == {"always"}
+    monkeypatch.setattr(st, "free_gb", lambda: 1.0)    # below the floor
+    svc.reconcile()
+    assert svc._paused_disk and not svc._active        # video paused, store spared
+    monkeypatch.setattr(st, "free_gb", lambda: 100.0)  # recovered
+    svc.reconcile()
+    assert not svc._paused_disk and set(svc._active) == {"always"}

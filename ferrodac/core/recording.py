@@ -37,6 +37,8 @@ class RecordingController:
         self._commit = commit or (lambda msg: None)               # §8.2 boundary commit
         self._now = now
         self._open_mid = None              # the open REC marker id, or None
+        self.last_closed_mid = None        # the marker id the last Stop closed (§9.3
+        #                                    clip materialization keys off it)
 
     @property
     def recording(self) -> bool:
@@ -59,6 +61,7 @@ class RecordingController:
         t0 = m.t if m else self._now()
         t1 = self._now()
         self._markers.update(mid, t_end=t1)        # close the region
+        self.last_closed_mid = mid
         self.finalize(mid, t0, t1)
         return "stopped"
 

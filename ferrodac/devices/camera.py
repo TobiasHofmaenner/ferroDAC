@@ -250,10 +250,16 @@ class CameraDevice(BaseDevice):
                 choices=tuple((i, lbl) for i, (_f, lbl) in enumerate(formats)),
                 value=idx,
             ),
-            # §9 stage c: opt-in per camera — ● Record also captures a
-            # documentation clip (media/*.mp4 + a span media tag)
-            Option(key="clips", name="Clip on ● Record",
-                   choices=((0, "Off"), (1, "On")), value=0),
+            # §9.3 ambient video: capture rotating segments so a clip is a
+            # SELECTION over always-on video (movable REC markers re-materialize
+            # the clip). 0 off · 1 only while recording · 2 always · 3 always
+            # with retention (opt-in pruning — set video_retention).
+            Option(key="video", name="Video capture",
+                   choices=((0, "Off"), (1, "While recording"),
+                            (2, "Always"), (3, "Always (with retention)")),
+                   value=0),
+            # retention policy for mode 3 (e.g. "48h", "7d", "20GB") — blank = keep
+            Option(key="video_retention", name="Video retention", kind="text"),
             # §9/§9.1 live video on the hub — encoding when a REMOTE viewer
             # watches this camera (demand-driven; idle = zero traffic):
             # Documentation = JPEG ≤960px ≤8fps (webcam at a gauge);
@@ -338,19 +344,24 @@ class CameraDevice(BaseDevice):
             QMetaObject.invokeMethod(self._controller, "end", Qt.QueuedConnection)
         self._emit = None
 
-    # -- documentation clips (§9 stage c; called by the media ClipService) ----
+    # -- ambient video (§9.3; driven by the VideoCaptureService) --------------
     @property
-    def clips_enabled(self) -> bool:
-        return bool(self._option_values.get("clips", 0))
+    def video_mode(self) -> int:
+        """0 off · 1 while recording · 2 always · 3 always+retention."""
+        return int(self._option_values.get("video", 0))
+
+    @property
+    def video_retention(self) -> str:
+        return str(self._option_values.get("video_retention", "") or "")
 
     @property
     def hub_video_mode(self) -> int:
         """0 off · 1 documentation (JPEG, capped) · 2 raw (bit-exact) — §9.1."""
         return int(self._option_values.get("hub_video", 0))
 
-    def start_clip(self, path: str) -> bool:
-        """Queue clip recording into `path` (best-effort — the service verifies
-        the file on disk before tagging). False = not streaming right now."""
+    def start_segment(self, path: str) -> bool:
+        """Queue video recording into `path` — one ambient segment (§9.3), or a
+        legacy clip. Best-effort; False = not streaming right now."""
         if self._controller is None:
             return False
         self._controller._pending_clip_path = str(path)   # cross-binding safe
@@ -358,7 +369,7 @@ class CameraDevice(BaseDevice):
                                  Qt.QueuedConnection)     # (no Q_ARG in PySide6)
         return True
 
-    def stop_clip(self) -> None:
+    def stop_segment(self) -> None:
         if self._controller is not None:
             QMetaObject.invokeMethod(self._controller, "end_clip",
                                      Qt.QueuedConnection)

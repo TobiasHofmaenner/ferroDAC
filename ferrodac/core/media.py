@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import time
 
 from .tag import MEDIA
@@ -140,83 +141,86 @@ class MediaService:
         return path if os.path.exists(path) else None
 
 
-class ClipService:
-    """Documentation clips per Record span (DESIGN §9 stage c / §9.1).
+class ClipMaterializer:
+    """Turn a recording SPAN into a clip file (DESIGN §9.3): a clip is a
+    SELECTION over the ambient VideoStore's segments, re-materialized whenever
+    its recording markers move. Qt-free — the VideoStore does the indexing, this
+    concatenates the overlapping segments into the project's media/.
 
-    On Record start, every ACTIVE camera device that opted in (its `clips`
-    option) starts encoding into the project's media/; on Stop the recorders
-    stop, and — because QMediaRecorder finalises its file ASYNCHRONOUSLY — the
-    span tags are only created by `finalize()`, which the app calls after a
-    grace delay and which verifies each file actually exists on disk. A failed
-    encode (missing backend/codec) therefore never produces a tag pointing at
-    nothing; it is reported instead. Qt-free: devices are duck-typed
-    (`clips_enabled`, `start_clip(path)`, `stop_clip()`, `data_id`, `name`).
+    Concatenation prefers the ffmpeg CLI (concat demuxer, STREAM COPY — lossless,
+    fast, one clean .mp4). Without ffmpeg it degrades honestly: a single covering
+    segment is copied as-is; multiple segments are copied as parts and the tag's
+    payload lists them (`files`), `file` pointing at the first so single-file
+    consumers still work. Segment-boundary slop (~2 min) at the edges is accepted
+    (§9.3); the tag carries the exact requested t0/t1.
     """
 
-    def __init__(self, devices, markers, media_dir, names=None):
-        self._devices = devices          # () -> live device objects
-        self._markers = markers
-        self._media_dir = media_dir      # () -> abs path (project's media/)
-        self._names = names or (lambda: {})
-        self._running: list = []         # [{key, path, relpath, t0, label}]
+    def __init__(self, store, media_dir):
+        self._store = store              # VideoStore
+        self._media_dir = media_dir      # () -> abs path (active project's media/)
 
-    @property
-    def running(self) -> bool:
-        return bool(self._running)
-
-    def on_record_start(self, t0: float) -> int:
-        """Start a clip on every opted-in, streaming camera. Returns how many."""
-        if self._running:                # a stray double-start: keep the first
-            return 0
+    def materialize(self, cam_uuid: str, t0: float, t1: float,
+                    label: str) -> "dict | None":
+        """Concatenate the segments overlapping [t0,t1] into media/. Returns
+        {"file", "files", "path"} or None (no ambient video for the span)."""
+        segs = self._store.segments_overlapping(cam_uuid, t0, t1)
+        segs = [e for e in segs
+                if os.path.exists(e["path"]) and os.path.getsize(e["path"]) > 0]
+        if not segs:
+            return None
         mdir = self._media_dir()
         if not mdir:
-            return 0
+            return None
         os.makedirs(mdir, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(t0))
-        for dev in self._devices():
-            if not getattr(dev, "clips_enabled", False):
-                continue
-            key = f"{dev.data_id}/frame"
-            label = self._names().get(key) or getattr(dev, "name", key)
-            relpath, path = MediaService.unique_path(
-                mdir, f"{stamp}_{_safe(label)}", ext="mp4")
+        base = f"{stamp}_{_safe(label)}"
+
+        if len(segs) == 1:               # one segment covers → copy it (§9.3 slop)
+            rel, path = MediaService.unique_path(mdir, base, ext="mp4")
+            shutil.copyfile(segs[0]["path"], path)
+            return {"file": rel, "files": [rel], "path": path}
+
+        if _have_ffmpeg():               # many → concat to one clean file
+            rel, path = MediaService.unique_path(mdir, base, ext="mp4")
+            if _ffmpeg_concat([e["path"] for e in segs], path):
+                return {"file": rel, "files": [rel], "path": path}
+            # ffmpeg hiccup → fall through to the parts fallback
+
+        files, first_abs = [], None      # no ffmpeg: copy parts, list them
+        for i, e in enumerate(segs, 1):
+            rel, path = MediaService.unique_path(mdir, f"{base}.part{i}", ext="mp4")
+            shutil.copyfile(e["path"], path)
+            files.append(rel)
+            first_abs = first_abs or path
+        return {"file": files[0], "files": files, "path": first_abs}
+
+
+def _have_ffmpeg() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def _ffmpeg_concat(parts: list, out_path: str) -> bool:
+    """Lossless concat via the ffmpeg concat demuxer (stream copy). True on
+    success. Best-effort: any failure returns False for the caller's fallback."""
+    import subprocess
+    import tempfile
+    listf = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            listf = fh.name
+            for pth in parts:
+                fh.write(f"file '{os.path.abspath(pth)}'\n")
+        r = subprocess.run(
+            ["ffmpeg", "-nostdin", "-y", "-f", "concat", "-safe", "0",
+             "-i", listf, "-c", "copy", out_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        return r.returncode == 0 and os.path.exists(out_path) \
+            and os.path.getsize(out_path) > 0
+    except Exception:                    # noqa: BLE001
+        return False
+    finally:
+        if listf and os.path.exists(listf):
             try:
-                if not dev.start_clip(path):
-                    continue             # not streaming right now
-            except Exception:            # noqa: BLE001 — one camera ≠ no clips
-                continue
-            self._running.append({"key": key, "path": path, "relpath": relpath,
-                                  "t0": float(t0), "label": label})
-        return len(self._running)
-
-    def on_record_stop(self, t1: float) -> list:
-        """Stop all running clip recorders; returns the entries for finalize()
-        (files are still finalising asynchronously at this point)."""
-        entries, self._running = self._running, []
-        for e in entries:
-            e["t1"] = float(t1)
-            for dev in self._devices():
-                if f"{dev.data_id}/frame" == e["key"]:
-                    try:
-                        dev.stop_clip()
-                    except Exception:     # noqa: BLE001
-                        pass
-        return entries
-
-    def finalize(self, entries: list) -> tuple[list, list]:
-        """Create the span media tags — ONLY for clips whose file actually
-        landed (call after a grace delay; see the class docstring). Returns
-        (tagged_entries, failed_entries)."""
-        tagged, failed = [], []
-        for e in entries:
-            path = e.get("path", "")
-            if not (path and os.path.exists(path) and os.path.getsize(path) > 0):
-                failed.append(e)
-                continue
-            e["tag_id"] = self._markers.add(
-                e["t0"], t_end=e.get("t1"), kind=MEDIA,
-                label=f"🎬 {e['label']}",
-                payload={"file": e["relpath"], "source": e["key"],
-                         "format": "mp4", "clip": "documentation"})
-            tagged.append(e)
-        return tagged, failed
+                os.remove(listf)
+            except OSError:
+                pass

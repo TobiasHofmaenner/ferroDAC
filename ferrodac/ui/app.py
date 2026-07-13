@@ -40,6 +40,7 @@ from ._common import color_for, fmt
 from .hubclient import ConnectHubDialog, HubController
 from .logview import LogPanel, QtLogHandler, SyncStatusWidget
 from .panels import PANEL_TYPES
+from .tasks import run_task
 from .workspace import Dashboard, WorkspaceArea
 # View widgets/dialogs live in docks.py; re-exported here so the shell
 # (and existing imports/tests) can reach them unchanged.
@@ -120,6 +121,8 @@ class MainWindow(QMainWindow):
         # restart and a span can be recorded retroactively. Degrades to the RAM
         # ring if zarr/disk is unavailable.
         self.store_writer = None
+        self._video_store = None         # §9.3 ambient video segment store
+        self._video_capture = None       # the rotation service
         self.resolver = None
         self.reads = None                  # async resolver facade (§21.3)
         self.time_context = None
@@ -235,6 +238,26 @@ class MainWindow(QMainWindow):
         self.dashboard.set_gap_provider(self._chart_coverage)
         self.dashboard.set_media_provider(self._resolve_media)   # photo tile (§9)
         self.dashboard.set_snapshot_handler(lambda key: self._snap([key]))
+        # §9.3 ambient video: a segment store next to store.zarr + a rotation
+        # service gated by each camera's mode + record state + a disk floor.
+        try:
+            from ..core.videostore import VideoStore
+            from .videocapture import VideoCaptureService
+            self._video_store = VideoStore(os.path.join(self._app_dir(), "video"))
+            self._video_capture = VideoCaptureService(
+                self._video_store,
+                devices=self.manager.active_devices,
+                is_recording=lambda: (self._recording.recording
+                                      if getattr(self, "_recording", None) else False),
+                now=time.time,
+                on_status=lambda msg, timeout=0: self.statusBar().showMessage(
+                    msg, timeout))
+            self._video_capture.start()
+            self.manager.active_changed.connect(self._video_capture.reconcile)
+            self.dashboard.markers.tag_changed.connect(self._rematerialize_clips_for)
+        except Exception:                            # noqa: BLE001 — video is optional
+            logging.getLogger("ferrodac").warning(
+                "ambient video unavailable", exc_info=True)
         self.dashboard.on_chart_zoom = self.chart_feed.on_chart_zoom   # zoom → re-query (Fix B)
 
         # recording lifecycle (start/stop span → auto-export, crash recovery) lives
@@ -437,6 +460,8 @@ class MainWindow(QMainWindow):
         filemenu.addSeparator()
         filemenu.addAction("Back up project…", self._backup_project)
         filemenu.addAction("Set hub backup folder…", self._set_hub_backup_folder)
+        filemenu.addSeparator()
+        filemenu.addAction("Manage video storage…", self._open_video_cleanup)
         filemenu.addAction("Download project copy…", self._download_project_copy)
 
         projmenu = self.menuBar().addMenu("&Project")
@@ -812,6 +837,16 @@ class MainWindow(QMainWindow):
         if proj is None or marker is None:
             return None
         return MediaService.resolve(marker, proj.path)
+
+    def _open_video_cleanup(self) -> None:
+        """§9.3 manual cleanup: per-camera ambient-video usage + delete-older-than
+        (the deliberate alternative to silent retention)."""
+        if self._video_store is None:
+            self.statusBar().showMessage("Ambient video is unavailable", 4000)
+            return
+        from .videocleanup import VideoCleanupDialog
+        VideoCleanupDialog(self._video_store, self.dashboard.source_names(),
+                           self).exec()
 
     def _open_media_tag(self, mid: str) -> None:
         """Events dock 🖼: open the photo in the system viewer."""
@@ -1999,49 +2034,122 @@ class MainWindow(QMainWindow):
         return out
 
     def _toggle_record(self):
-        """Start/stop a recording — the lifecycle lives in RecordingController; here
-        we just flip the toolbar button to match (and ride the clip service along,
-        §9 stage c: opted-in cameras record documentation clips over the span)."""
-        state = self._recording.toggle()
+        """Start/stop a recording. The scalar lifecycle lives in
+        RecordingController; video rides along (§9.3): capture reconciles to the
+        record state, and on stop the span's ambient segments are materialized
+        into clips (after a grace delay so the tail segment has landed)."""
+        rec = self._recording
+        state = rec.toggle()
         self.record_action.setText("■ Stop" if state == "started" else "● Record")
-        try:
-            if state == "started":
-                n = self._clip_service().on_record_start(time.time())
-                if n:
-                    self.statusBar().showMessage(f"🎬 {n} camera clip(s) recording", 4000)
-            else:
-                entries = self._clip_service().on_record_stop(time.time())
-                if entries:
-                    # QMediaRecorder finalises its file ASYNC — verify + tag after
-                    # a grace period so a failed encode never yields a ghost tag
-                    QTimer.singleShot(2000, lambda e=entries: self._finalize_clips(e))
-        except Exception:                              # noqa: BLE001 — clips must never
-            logging.getLogger("ferrodac").warning(     # break the recording lifecycle
-                "clip service failed", exc_info=True)
+        if self._video_capture is not None:
+            self._video_capture.reconcile()           # While-recording mode gate
+        if state == "stopped" and self._video_store is not None:
+            mid = rec.last_closed_mid
+            m = self.dashboard.markers.get(mid) if mid else None
+            if m is not None:
+                QTimer.singleShot(3000,
+                                  lambda mid=mid, a=m.t, b=m.t_end:
+                                  self._materialize_clips(mid, a, b))
 
-    def _clip_service(self):
-        # ONE instance — it carries the running-clip state across start → stop
-        # (collaborators are late-bound callables, so project switches are fine)
-        svc = getattr(self, "_clips", None)
-        if svc is None:
-            from ..core.media import ClipService
-            svc = self._clips = ClipService(
-                devices=self.manager.active_devices,
-                markers=self.dashboard.markers,
-                media_dir=lambda: (self._project_mgr.active.media_dir
-                                   if self._project_mgr.active else ""),
-                names=self.dashboard.source_names,
-            )
-        return svc
+    # -- ambient video clips (§9.3) -------------------------------------------
+    def _clip_materializer(self):
+        from ..core.media import ClipMaterializer
+        return ClipMaterializer(
+            self._video_store,
+            media_dir=lambda: (self._project_mgr.active.media_dir
+                               if self._project_mgr.active else ""))
 
-    def _finalize_clips(self, entries: list) -> None:
-        tagged, failed = self._clip_service().finalize(entries)
-        if tagged:
-            self.statusBar().showMessage(
-                f"🎬 saved {len(tagged)} clip(s) to media/", 5000)
-        for e in failed:
-            self.statusBar().showMessage(
-                f"🎬 {e['label']}: clip not written (encoder unavailable?)", 6000)
+    def _materialize_clips(self, rec_mid: str, t0: float, t1: float) -> None:
+        """Clip every camera with ambient video over [t0,t1] into the project +
+        a MEDIA span tag linked to the recording marker (rec_mid) so a later
+        marker MOVE re-materializes it. ffmpeg runs OFF the GUI thread; the tags
+        are added back on it."""
+        if self._video_store is None or t0 is None or t1 is None:
+            return
+        mat = self._clip_materializer()
+        names = self.dashboard.source_names()
+        jobs = [(cam, f"{cam}/frame", names.get(f"{cam}/frame") or cam)
+                for cam in self._video_store.cameras()]
+        if not jobs:
+            return
+
+        def work(_ctx):
+            out = []
+            for cam, key, label in jobs:
+                try:
+                    res = mat.materialize(cam, t0, t1, label)
+                except Exception:                      # noqa: BLE001
+                    res = None
+                if res is not None:
+                    out.append((key, label, res))
+            return out
+
+        def done(out):
+            for key, label, res in out:
+                self.dashboard.markers.add(
+                    t0, t_end=t1, kind="media", label=f"🎬 {label}",
+                    payload={"file": res["file"], "files": res["files"],
+                             "source": key, "format": "mp4",
+                             "clip": "documentation", "rec_mid": rec_mid})
+            if out:
+                self.statusBar().showMessage(
+                    f"🎬 saved {len(out)} clip(s) to media/", 5000)
+
+        run_task(work, title="Saving clips", exclusive=f"clip:{rec_mid}",
+                 on_done=done)
+
+    def _rematerialize_clips_for(self, mid: str) -> None:
+        """A RECORDING marker moved → re-slice its clips from ambient over the
+        new span (the §9.3 promise: the clip follows the marker). Debounced per
+        marker; ffmpeg runs off the GUI thread."""
+        if self._video_store is None:
+            return
+        m = self.dashboard.markers.get(mid)
+        if m is None or m.kind != "recording" or m.t_end is None:
+            return
+        pend = self.__dict__.setdefault("_clip_rematerialize_pending", {})
+        t = pend.get(mid)
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(lambda mid=mid: self._do_rematerialize(mid))
+            pend[mid] = t
+        t.start(700)                                   # coalesce a drag's edits
+
+    def _do_rematerialize(self, mid: str) -> None:
+        m = self.dashboard.markers.get(mid)
+        if m is None or m.t_end is None or self._video_store is None:
+            return
+        mat = self._clip_materializer()
+        jobs = []
+        for tag in list(self.dashboard.markers.all()):
+            if tag.kind == "media" and (tag.payload or {}).get("rec_mid") == mid:
+                cam = (tag.payload.get("source", "") or "").rsplit("/", 1)[0]
+                jobs.append((tag.id, cam, dict(tag.payload)))
+        if not jobs:
+            return
+        a, b = m.t, m.t_end
+
+        def work(_ctx):
+            out = []
+            for tag_id, cam, payload in jobs:
+                try:
+                    res = mat.materialize(cam, a, b, payload.get("source", cam))
+                except Exception:                      # noqa: BLE001
+                    res = None
+                if res is not None:
+                    out.append((tag_id, payload, res))
+            return out
+
+        def done(out):
+            for tag_id, payload, res in out:
+                self.dashboard.markers.update(
+                    tag_id, t=a, t_end=b,
+                    payload={**payload, "file": res["file"],
+                             "files": res["files"]})
+
+        run_task(work, title="Re-slicing clips", exclusive=f"reclip:{mid}",
+                 on_done=done)
 
     def _run_recording_export(self, dest, sources, t0, t1, *, flush, exclusive,
                               on_ok, on_fail):
@@ -2569,6 +2677,8 @@ class MainWindow(QMainWindow):
         #                                              owned envelopes / go-live history
 
     def closeEvent(self, event):  # noqa: N802
+        if getattr(self, "_video_capture", None) is not None:
+            self._video_capture.stop()            # close + commit open segments
         if getattr(self, "_recording", None) is not None:
             self._recording.close_open_marker()   # store_writer.stop() below flushes it
         if self._autosave_on:
