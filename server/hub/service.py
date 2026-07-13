@@ -506,3 +506,86 @@ class BackupServicer(rpc.BackupServicer):
                     yield pb.FileChunk(data=chunk)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+
+_VIDEO_SLICE = 1 << 20        # 1 MiB per streamed segment message (matches Backup)
+
+
+class VideoStoreServicer(rpc.VideoStoreServicer):
+    """Ambient video segments (DESIGN §9.3 phase 3): store-and-forward + on-demand
+    backfill, a thin wrapper over the hub's VideoStore. Blocking file I/O runs in
+    the thread-pool executor (like StoreServicer) so a multi-MB segment transfer
+    never stalls the single event loop that also carries every live stream. Auth
+    is the reserved token seam (allow-all)."""
+
+    def __init__(self, video_store):
+        self.store = video_store
+
+    @staticmethod
+    async def _run(fn):
+        return await asyncio.get_running_loop().run_in_executor(None, fn)
+
+    async def GetVideoState(self, request, context):  # noqa: N802
+        if self.store is None:
+            return pb.VideoState()
+
+        def work():
+            return pb.VideoState(have=[
+                pb.VideoHaveKey(cam=cam, key=key)
+                for (cam, key) in self.store.have()])
+        return await self._run(work)
+
+    async def PushSegment(self, request_iterator, context):  # noqa: N802
+        cam = None
+        t0 = t1 = 0.0
+        buf = bytearray()
+        async for msg in request_iterator:               # header on the first message
+            if cam is None:
+                cam, t0, t1 = msg.cam, msg.t0, msg.t1
+            buf += msg.data
+        if self.store is None or cam is None or not buf:
+            return pb.VideoSegmentAck(bytes=0)
+        data = bytes(buf)
+        n = await self._run(lambda: self.store.import_segment(cam, t0, t1, data))
+        return pb.VideoSegmentAck(bytes=n)
+
+    async def ListVideoCameras(self, request, context):  # noqa: N802
+        if self.store is None:
+            return pb.VideoCameras()
+        return await self._run(lambda: pb.VideoCameras(cams=self.store.cameras()))
+
+    async def GetVideoCoverage(self, request, context):  # noqa: N802
+        if self.store is None:
+            return pb.Coverage()
+
+        def work():
+            try:
+                return pb.Coverage(intervals=[
+                    pb.Interval(t0=a, t1=b)
+                    for (a, b) in self.store.coverage(request.source)])
+            except Exception:                            # noqa: BLE001 — unknown camera
+                return pb.Coverage()
+        return await self._run(work)
+
+    async def PullSegment(self, request, context):  # noqa: N802
+        if self.store is None:
+            return
+
+        def work():
+            e = self.store.segment_entry_at(request.cam, request.t)
+            if e is None:
+                return None
+            data = self.store.read_segment_bytes(request.cam, e["t0"])
+            return None if data is None else (e["t0"], e["t1"], data)
+        got = await self._run(work)
+        if got is None:                                  # a gap the hub also lacks → empty stream
+            return
+        t0, t1, data = got
+        first = True
+        for i in range(0, len(data), _VIDEO_SLICE):
+            sl = data[i:i + _VIDEO_SLICE]
+            if first:
+                yield pb.VideoSegment(cam=request.cam, t0=t0, t1=t1, data=sl)
+                first = False
+            else:
+                yield pb.VideoSegment(data=sl)

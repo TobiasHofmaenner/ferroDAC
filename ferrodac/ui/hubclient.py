@@ -39,12 +39,13 @@ class HubController(QObject):
     #                                       offline + detail (drives the button colour)
 
     def __init__(self, dashboard, engine, manager, parent=None, store=None,
-                 resolver=None):
+                 resolver=None, video_store=None):
         super().__init__(parent)
         self.dashboard = dashboard
         self.engine = engine
         self.manager = manager
         self._store = store              # local durable ZarrStore (for hub sync)
+        self._video_store = video_store  # local ambient-video store (§9.3 ph3 sync)
         self._resolver = resolver        # local read resolver (gets a hub READ tier)
         self._read_chan = None           # sync channel for the hub read tier
         self._backup_client = None       # hub Backup service client (§20)
@@ -61,6 +62,8 @@ class HubController(QObject):
         self._project_mgr = None         # set post-construction (after _setup_projects)
         self._on_projects = None         # () -> refresh the Projects dock
         self._sync = None                # store-and-forward SyncRunner (agent role)
+        self._videosync = None           # ambient-video segment sync (§9.3 phase 3)
+        self._video_backfill = None      # hub-backed VideoSyncEngine for scrub pulls
         self._agent_unsub = None
         self._tags_wired = False
         self._local: set = set()
@@ -156,6 +159,14 @@ class HubController(QObject):
                     self._store, addr,
                     on_status=lambda s, d: self.sync_status.emit(s, d))
                 self._sync.start()
+            # the media-plane twin: upload ambient video segments the hub lacks
+            # (store-and-forward, backfills offline captures — §9.3 phase 3).
+            if self._video_store is not None:
+                from ..net.videosync import VideoSyncRunner
+                self._videosync = VideoSyncRunner(
+                    self._video_store, addr,
+                    on_status=lambda s, d: self.sync_status.emit(s, d))
+                self._videosync.start()
         if as_viewer:
             self._viewer = HubViewer(
                 addr,
@@ -183,6 +194,11 @@ class HubController(QObject):
                 tier = HubReadTier(self._read_chan)
                 self._resolver.set_remote(tier)
                 self._hub_sources = tier.sources()    # one ListSources for the catalog
+            # video read side: an engine that pulls the hub's segment covering a
+            # scrubbed instant the local store lacks (§9.3 phase 3 backfill).
+            if self._video_store is not None:
+                from ..net.videosync import backfill_engine
+                self._video_backfill = backfill_engine(self._video_store, self._read_chan)
         # Tags ride their own channel and are role-independent — sync them
         # whenever connected, regardless of agent/viewer (DESIGN §7.3).
         self._tagsync = HubTagSync(addr, agent_id=aid,
@@ -216,6 +232,12 @@ class HubController(QObject):
         self.status.emit(f"ferroDAC Cloud: connecting to {addr} …")
         self.connection_changed.emit(True)
 
+    @property
+    def video_backfill(self):
+        """The hub-backed VideoSyncEngine for on-demand scrub pulls (§9.3 phase 3),
+        or None when not connected / there is no local video store."""
+        return self._video_backfill
+
     def disconnect(self) -> None:
         if self._agent_unsub is not None:
             self._agent_unsub()
@@ -233,9 +255,13 @@ class HubController(QObject):
             self._read_chan.close()
             self._read_chan = None
         self._hub_sources = []
+        self._video_backfill = None
         if self._sync is not None:
             self._sync.stop()
             self._sync = None
+        if self._videosync is not None:
+            self._videosync.stop()
+            self._videosync = None
         if self._agent is not None:
             self._agent.stop()
             self._agent = None

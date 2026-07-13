@@ -596,6 +596,69 @@ def test_reads_do_not_create_camera_dirs(tmp_path):
     assert not os.path.exists(os.path.join(str(tmp_path / "video"), "ghost"))
 
 
+# -- §9.3 phase 3: hub segment sync + on-demand backfill --------------------------
+
+def test_video_sync_uploads_missing_and_is_idempotent(tmp_path):
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.core.videosync import LocalVideoTransport, VideoSyncEngine
+    local = VideoStore(str(tmp_path / "local"))
+    hub = VideoStore(str(tmp_path / "hub"))
+    base = 1_700_000_000.0
+    for i in range(3):
+        _write_seg(local, "camA", base + i * 120, base + (i + 1) * 120)
+    eng = VideoSyncEngine(local, LocalVideoTransport(hub))
+
+    assert eng.sync_once() == 3                         # all three uploaded
+    assert hub.have() == local.have()                  # the hub now mirrors local
+    assert all(e["synced"] for e in local.segments("camA"))   # marked hub-confirmed
+    assert eng.sync_once() == 0                         # idempotent once caught up
+    assert hub.read_segment_bytes("camA", base) == \
+        local.read_segment_bytes("camA", base)         # byte-identical copy
+
+    _write_seg(local, "camA", base + 360, base + 480)  # a fourth lands
+    assert eng.sync_once() == 1                         # only the new one uploads
+
+
+def test_video_sync_backfills_a_wiped_hub(tmp_path):
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.core.videosync import LocalVideoTransport, VideoSyncEngine
+    local = VideoStore(str(tmp_path / "local"))
+    base = 1_700_000_000.0
+    _write_seg(local, "camA", base, base + 120)
+    VideoSyncEngine(local, LocalVideoTransport(VideoStore(str(tmp_path / "hub")))).sync_once()
+    # a fresh hub reports nothing → everything re-uploads (remote is the truth)
+    hub2 = VideoStore(str(tmp_path / "hub2"))
+    n = VideoSyncEngine(local, LocalVideoTransport(hub2)).sync_once()
+    assert n == 1 and hub2.have() == local.have()
+
+
+def test_video_backfill_pulls_a_missing_segment_on_demand(tmp_path):
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.core.videosync import LocalVideoTransport, VideoSyncEngine
+    local = VideoStore(str(tmp_path / "local"))
+    hub = VideoStore(str(tmp_path / "hub"))
+    base = 1_700_000_000.0
+    _write_seg(hub, "camA", base, base + 120, data=b"HUBSEG" * 100)   # only on the hub
+    eng = VideoSyncEngine(local, LocalVideoTransport(hub))
+
+    assert local.segment_entry_at("camA", base + 60) is None          # not local yet
+    e = eng.backfill_at("camA", base + 60)                            # pull on demand
+    assert e is not None and e["t0"] == base
+    assert local.read_segment_bytes("camA", base) == b"HUBSEG" * 100  # byte-exact import
+    assert eng.backfill_at("camA", base + 9999) is None               # gap the hub lacks too
+    assert eng.backfill_at("camA", base + 30)["t0"] == base           # already-local: cheap
+
+
+def test_import_segment_is_idempotent(tmp_path):
+    from ferrodac.core.videostore import VideoStore
+    st = VideoStore(str(tmp_path / "v"))
+    base = 1_700_000_000.0
+    assert st.import_segment("camA", base, base + 120, b"X" * 50) == 50
+    assert st.import_segment("camA", base, base + 120, b"X" * 50) == 0   # dup skipped
+    assert st.import_segment("camA", base, base + 120, b"") == 0         # empty rejected
+    assert len(st.segments("camA")) == 1
+
+
 def test_media_files_in_enumerates_span_media(tmp_path):
     from ferrodac.core.media import MediaService
     proj = tmp_path / "proj"
@@ -705,6 +768,28 @@ def test_video_preview_drops_stale_frame_after_switch(tmp_path):
     vp._cur_path = "seg.mp4"                            # a source is now loaded
     vp._on_frame(frame)
     assert len(painted) == 1                            # and it paints
+
+
+def test_video_preview_requests_backfill_on_a_local_gap(tmp_path):
+    """When the head lands where the local store has no segment, the preview asks
+    its miss handler to pull from the hub — but not while footage is local (§9.3 ph3)."""
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])           # noqa: F841
+    from ferrodac.core.videostore import VideoStore
+    from ferrodac.ui.videopreview import VideoPreviewPanel
+    st = VideoStore(str(tmp_path / "video"))
+    base = 1_700_000_000.0
+    p = st.segment_path("camA", base)
+    open(p, "wb").write(b"\x00" * 64)
+    st.commit("camA", base, base + 60, p)
+    vp = VideoPreviewPanel(st, names_fn=lambda: {})
+    vp._cam = "camA"
+    misses = []
+    vp.set_miss_handler(lambda cam, t: misses.append((cam, t)))
+    vp.set_head(base + 30)                             # inside a local segment → no pull
+    assert misses == []
+    vp.set_head(base + 9999)                           # a gap → backfill requested
+    assert misses == [("camA", base + 9999)]
 
 
 def test_clips_bundle_waits_for_the_export_to_finish(tmp_path, monkeypatch):

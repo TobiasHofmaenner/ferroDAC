@@ -16,6 +16,7 @@ grpc = pytest.importorskip("grpc")
 # server/tests scripts on the path (see conftest); each has async def main()→int.
 E2E = [
     "sync_e2e",     # sync mirror + live tail + read tier (ListSources/Coverage/Query/ReadRaw/Trace)
+    "video_sync_e2e",  # §9.3 ph3: segment sync mirror + live tail + on-demand backfill (byte-exact)
     "e2e",          # agent → hub → viewer: transparent remote device, subscribe, retire
     "net_e2e",      # app net layer round-trip (convert + agent/viewer), incl. Trace
     "frames_e2e",   # §9 live video: demand-driven WatchFrames, raw bit-exact round-trip

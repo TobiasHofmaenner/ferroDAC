@@ -464,6 +464,7 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._video_store = video_store      # VideoStore | None — §9.3 phase 2:
         #                                      per-camera coverage lane + scrub preview
         self._video_cover = {}
+        self._video_backfill = None          # hub pull engine (§9.3 ph3), set by app
         self._reads = reads                  # async resolver facade (§21.3); the
         #                                      coverage tick + preview queries go
         #                                      through it so they never block paint.
@@ -1042,6 +1043,49 @@ class TimelineWindow(QtWidgets.QMainWindow):
                    if self._src_list.item(i).checkState() == QtCore.Qt.Checked]
         QtCore.QSettings("ferroDAC", "ferroDAC").setValue(
             "timeline/state", json.dumps({"checked": checked, "speed": self.tc.speed}))
+
+    def set_video_backfill(self, engine) -> None:
+        """Install (or clear) the hub backfill engine and reset the miss dedup so a
+        fresh connection re-attempts prior gaps. A scrub to an instant the local
+        store lacks then pulls the covering segment from the hub (§9.3 phase 3)."""
+        self._video_backfill = engine
+        self.__dict__.pop("_vbackfill_seen", None)
+        vp = getattr(self, "video_preview", None)
+        if vp is not None:
+            vp.set_miss_handler(self._video_backfill_miss if engine is not None else None)
+
+    def _video_backfill_miss(self, cam, t) -> None:
+        """The preview head landed where the local store has no segment: pull the
+        covering one from the hub OFF the paint thread, then re-drive the preview.
+        Coalesced per ~segment bucket; a bucket the hub also lacks isn't retried."""
+        eng = self._video_backfill
+        if eng is None or cam is None:
+            return
+        bucket = (cam, int(float(t) // 120.0))       # ~one 2-min segment region
+        pend = self.__dict__.setdefault("_vbackfill_pending", set())
+        seen = self.__dict__.setdefault("_vbackfill_seen", set())
+        if bucket in pend or bucket in seen:         # in flight, or already resolved
+            return
+        pend.add(bucket)
+
+        def work(_ctx):
+            try:
+                return eng.backfill_at(cam, float(t)) is not None
+            except Exception:                        # noqa: BLE001
+                return False
+
+        def cb(ok):
+            pend.discard(bucket)
+            seen.add(bucket)                         # imported OR hub-lacks-it → don't hammer
+            if ok and _alive(self):
+                self._drive_video_preview()          # now local → re-resolve the head
+
+        try:
+            from .tasks import run_task
+            run_task(work, title="Fetching video from the hub",
+                     exclusive=f"vbackfill:{cam}:{bucket[1]}", on_done=cb)
+        except Exception:                            # noqa: BLE001 — no runner (headless)
+            cb(work(None))
 
     def _sync_video_cameras(self) -> None:
         vp = getattr(self, "video_preview", None)

@@ -1110,6 +1110,251 @@ class Store:
             _registered_method=True)
 
 
+class VideoStoreStub:
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.GetVideoState = channel.unary_unary(
+                '/ferrodac_contract.v1.VideoStore/GetVideoState',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoStateRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoState.FromString,
+                _registered_method=True)
+        self.PushSegment = channel.stream_unary(
+                '/ferrodac_contract.v1.VideoStore/PushSegment',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegment.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegmentAck.FromString,
+                _registered_method=True)
+        self.ListVideoCameras = channel.unary_unary(
+                '/ferrodac_contract.v1.VideoStore/ListVideoCameras',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoCamerasRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoCameras.FromString,
+                _registered_method=True)
+        self.GetVideoCoverage = channel.unary_unary(
+                '/ferrodac_contract.v1.VideoStore/GetVideoCoverage',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CoverageRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Coverage.FromString,
+                _registered_method=True)
+        self.PullSegment = channel.unary_stream(
+                '/ferrodac_contract.v1.VideoStore/PullSegment',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoPullRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegment.FromString,
+                _registered_method=True)
+
+
+class VideoStoreServicer:
+    """Missing associated documentation comment in .proto file."""
+
+    def GetVideoState(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PushSegment(self, request_iterator, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListVideoCameras(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetVideoCoverage(self, request, context):
+        """reuses Store's Coverage
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PullSegment(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_VideoStoreServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'GetVideoState': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetVideoState,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoStateRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoState.SerializeToString,
+            ),
+            'PushSegment': grpc.stream_unary_rpc_method_handler(
+                    servicer.PushSegment,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegment.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegmentAck.SerializeToString,
+            ),
+            'ListVideoCameras': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListVideoCameras,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoCamerasRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoCameras.SerializeToString,
+            ),
+            'GetVideoCoverage': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetVideoCoverage,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.CoverageRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Coverage.SerializeToString,
+            ),
+            'PullSegment': grpc.unary_stream_rpc_method_handler(
+                    servicer.PullSegment,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoPullRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegment.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'ferrodac_contract.v1.VideoStore', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('ferrodac_contract.v1.VideoStore', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class VideoStore:
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def GetVideoState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.VideoStore/GetVideoState',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoStateRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoState.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PushSegment(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_unary(
+            request_iterator,
+            target,
+            '/ferrodac_contract.v1.VideoStore/PushSegment',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegment.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegmentAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListVideoCameras(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.VideoStore/ListVideoCameras',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoCamerasRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoCameras.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetVideoCoverage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.VideoStore/GetVideoCoverage',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.CoverageRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.Coverage.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PullSegment(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ferrodac_contract.v1.VideoStore/PullSegment',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoPullRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.VideoSegment.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class BackupStub:
     """Missing associated documentation comment in .proto file."""
 

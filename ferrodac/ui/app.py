@@ -274,7 +274,7 @@ class MainWindow(QMainWindow):
         self.hub = HubController(
             self.dashboard, engine, manager, self,
             store=self.store_writer.store if self.store_writer is not None else None,
-            resolver=self.resolver)
+            resolver=self.resolver, video_store=self._video_store)
         # All three fire from hub worker threads (gRPC / sync) — force
         # QueuedConnection so the slots run on the GUI thread (see hubclient).
         # A bound method (not a lambda) gives the queued call an explicit
@@ -548,6 +548,8 @@ class MainWindow(QMainWindow):
                                  video_store=self._video_store)
             win.destroyed.connect(lambda: setattr(self, "_timeline_win", None))
             self._timeline_win = win
+        # scrub-to-preview backfill: a hub-only instant pulls its segment (§9.3 ph3)
+        self._timeline_win.set_video_backfill(self.hub.video_backfill)
         self._timeline_win.show()
         self._timeline_win.raise_()
         self._timeline_win.activateWindow()
@@ -733,6 +735,8 @@ class MainWindow(QMainWindow):
         self.dashboard.refresh_ports()
         self._refresh_explorer()                # enable/disable the “On the hub…” item
         self._refresh_doc_collab()              # offer/retire the Collaborate toggle
+        if getattr(self, "_timeline_win", None) is not None:   # (dis)connect → (un)wire
+            self._timeline_win.set_video_backfill(self.hub.video_backfill)   # video backfill
 
     def _on_hub_link(self, state: str, detail: str) -> None:
         """Recolour the Cloud button from the ACTUAL gRPC link state, so it reflects

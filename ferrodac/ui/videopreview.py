@@ -30,6 +30,7 @@ class VideoPreviewPanel(QWidget):
         self._cam = None                 # selected camera uuid
         self._cur_path = None            # the segment file currently loaded
         self._cameras = []
+        self._miss_cb = None             # (cam, t) → ask the hub to backfill (§9.3 ph3)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
@@ -78,6 +79,12 @@ class VideoPreviewPanel(QWidget):
             self._cam = cams[0]
             self._combo.setCurrentIndex(0)
 
+    def set_miss_handler(self, cb) -> None:
+        """Install a callback invoked when the head lands where the LOCAL store has
+        no segment: `cb(cam, t)` pulls it from the hub off-thread (§9.3 phase 3).
+        None disables backfill (a gap then just reads 'no video at this instant')."""
+        self._miss_cb = cb
+
     def _on_pick(self, idx: int) -> None:
         if 0 <= idx < len(self._cameras):
             self._cam = self._cameras[idx]
@@ -97,11 +104,15 @@ class VideoPreviewPanel(QWidget):
             seg = self._store.segment_at(self._cam, float(t))
         except Exception:                # noqa: BLE001
             seg = None
-        if seg is None:                  # a gap / outside coverage → blank
+        if seg is None:                  # a gap / outside coverage → blank; maybe backfill
             self._cur_path = None
             self._player.stop()
             self.view.set_image(None)
-            self.view.set_placeholder("no video at this instant")
+            if self._miss_cb is not None:
+                self._miss_cb(self._cam, float(t))   # pull from the hub (off-thread)
+                self.view.set_placeholder("fetching video from the hub…")
+            else:
+                self.view.set_placeholder("no video at this instant")
             return
         if seg["path"] != self._cur_path:
             self._cur_path = seg["path"]

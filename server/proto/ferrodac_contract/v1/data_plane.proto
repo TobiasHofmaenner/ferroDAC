@@ -623,6 +623,46 @@ service Store {
 }
 
 // --------------------------------------------------------------------------- //
+//  VideoStore — ambient video segments (DESIGN §9.3 phase 3): the media-plane
+//  twin of Store. Store-and-forward of ~2-min H.264 segment FILES + on-demand
+//  backfill. One segment = one file, keyed by (cam, start-ms).
+//    * SYNC (agent -> hub): GetVideoState = the (cam, key) set the hub already
+//        holds (the reconciliation truth); PushSegment streams a missing file up.
+//    * BACKFILL (client -> hub): GetVideoCoverage (reuses Coverage) lets the
+//        ribbon show hub-held footage; PullSegment streams down the segment
+//        covering a scrubbed instant the local store lacks.
+// --------------------------------------------------------------------------- //
+
+message VideoHaveKey { string cam = 1; int64 key = 2; }  // key = int(round(t0*1000))
+message VideoStateRequest { string token = 1; }
+message VideoState { repeated VideoHaveKey have = 1; }
+
+// A segment file, STREAMED (an mp4 is several MB). The FIRST message carries the
+// header (cam/t0/t1/token); EVERY message carries a `data` slice, concatenated in
+// order. Used both up (PushSegment) and down (PullSegment).
+message VideoSegment {
+  string cam = 1;
+  double t0 = 2;
+  double t1 = 3;
+  bytes data = 4;
+  string token = 5;
+}
+message VideoSegmentAck { int64 bytes = 1; }
+
+message VideoCamerasRequest { string token = 1; }
+message VideoCameras { repeated string cams = 1; }
+
+message VideoPullRequest { string cam = 1; double t = 2; string token = 3; }
+
+service VideoStore {
+  rpc GetVideoState(VideoStateRequest) returns (VideoState);
+  rpc PushSegment(stream VideoSegment) returns (VideoSegmentAck);
+  rpc ListVideoCameras(VideoCamerasRequest) returns (VideoCameras);
+  rpc GetVideoCoverage(CoverageRequest) returns (Coverage);   // reuses Store's Coverage
+  rpc PullSegment(VideoPullRequest) returns (stream VideoSegment);
+}
+
+// --------------------------------------------------------------------------- //
 //  Backup — the hub is the AUTHORITATIVE project-backup writer (DESIGN §20).
 // --------------------------------------------------------------------------- //
 // The hub mirrors each project folder one-way + incrementally into a backend dir

@@ -28,6 +28,13 @@ def _safe(name: str) -> str:
     return re.sub(r"[^\w.-]+", "-", str(name)).strip("-") or "camera"
 
 
+def seg_key(t0: float) -> int:
+    """A segment's stable cross-peer identity: the integer ms of its start (the
+    same value that names the file, seg_<key>.mp4). Two stores agree on it, so
+    sync reconciles on it without float drift (§9.3 phase 3)."""
+    return int(round(float(t0) * 1000))
+
+
 class VideoStore:
     def __init__(self, root: str):
         self.root = root                    # <app_dir>/video
@@ -118,21 +125,86 @@ class VideoStore:
                 for e in self._load(cam_uuid)
                 if e["t1"] > t0 and e["t0"] < t1]
 
+    def segment_entry_at(self, cam_uuid: str, t: float) -> "dict | None":
+        """The raw index entry (t0/t1/file/size/synced) whose [t0,t1] contains
+        instant `t`; the later segment wins at a rotation boundary. None in a gap
+        or outside coverage. The selection kernel behind segment_at + backfill."""
+        best = None
+        for e in self._load(cam_uuid):
+            if e["t0"] <= t < e["t1"] and (best is None or e["t0"] >= best["t0"]):
+                best = e
+        return best
+
     def segment_at(self, cam_uuid: str, t: float) -> "dict | None":
         """POINT query for the scrub preview (§9.3 phase 2): the segment whose
         [t0,t1] contains instant `t`, as {"path", "offset"} where offset is the
         seek position within the file (seconds). None when `t` lands in a gap or
         outside coverage. If two segments touch at a rotation boundary the later
         one wins (its offset ≈ 0), matching 'newest at-or-covering the head'."""
-        d = self.cam_dir(cam_uuid)
-        best = None
-        for e in self._load(cam_uuid):
-            if e["t0"] <= t < e["t1"] and (best is None or e["t0"] >= best["t0"]):
-                best = e
+        best = self.segment_entry_at(cam_uuid, t)
         if best is None:
             return None
-        return {"path": os.path.join(d, best["file"]),
+        return {"path": os.path.join(self.cam_dir(cam_uuid), best["file"]),
                 "offset": max(0.0, float(t) - float(best["t0"]))}
+
+    # -- hub sync + backfill (§9.3 phase 3): store-and-forward for segments -------
+    def segments(self, cam_uuid: str) -> list:
+        """The camera's raw index entries, time-ordered — what a sync pass walks."""
+        return self._load(cam_uuid)
+
+    def have(self) -> set:
+        """{(cam, seg_key)} for every stored segment — the reconciliation truth a
+        peer syncs against (the video twin of ZarrStore.epoch_lengths, §12.1)."""
+        return {(cam, seg_key(e["t0"]))
+                for cam in self.cameras() for e in self._load(cam)}
+
+    def mark_synced(self, cam_uuid: str, t0: float, synced: bool = True) -> bool:
+        """Flag a segment hub-confirmed — enables the §9.3 'prune only synced'
+        retention notch (never drop footage the hub hasn't archived). Returns
+        whether a matching segment was found."""
+        key = seg_key(t0)
+        entries = self._load(cam_uuid)
+        hit = False
+        for e in entries:
+            if seg_key(e["t0"]) == key:
+                e["synced"] = bool(synced)
+                hit = True
+        if hit:
+            self._save(cam_uuid, entries)
+        return hit
+
+    def read_segment_bytes(self, cam_uuid: str, t0: float) -> "bytes | None":
+        """The raw mp4 bytes of the segment at t0 (for upload/serve). None if the
+        file has vanished (skipped by the sync, not fatal)."""
+        key = seg_key(t0)
+        for e in self._load(cam_uuid):
+            if seg_key(e["t0"]) == key:
+                try:
+                    with open(os.path.join(self.cam_dir(cam_uuid), e["file"]),
+                              "rb") as fh:
+                        return fh.read()
+                except OSError:
+                    return None
+        return None
+
+    def import_segment(self, cam_uuid: str, t0: float, t1: float,
+                       data: bytes) -> int:
+        """Write a received/pulled segment's bytes to disk + index it. Idempotent:
+        a segment already held at t0 is left untouched (returns 0). Used by the hub
+        (PushSegment) and by local on-demand backfill (PullSegment). Returns bytes
+        written."""
+        if not data:
+            return 0
+        key = seg_key(t0)
+        if any(seg_key(e["t0"]) == key for e in self._load(cam_uuid)):
+            return 0                                     # already have it
+        path = self.segment_path(cam_uuid, t0)           # creates the camera dir
+        with open(path, "wb") as fh:
+            fh.write(data)
+        if not self.commit(cam_uuid, t0, t1, path):      # index + keep time order
+            return 0
+        self.mark_synced(cam_uuid, t0)                   # it exists on the peer
+        return len(data)
 
     def covers(self, cam_uuid: str, t0: float, t1: float,
                slack: float = None) -> bool:

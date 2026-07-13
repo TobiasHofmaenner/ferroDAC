@@ -22,6 +22,7 @@ from .service import (
     ProjectsServicer,
     StoreServicer,
     TagsServicer,
+    VideoStoreServicer,
     ViewerServicer,
 )
 
@@ -41,10 +42,39 @@ def _open_store(store_dir):
         return None
 
 
-def build_server(hub: "Hub | None" = None, store=None
+def _video_dir():
+    """Where the hub keeps synced ambient-video segments (§9.3 phase 3):
+    HUB_VIDEO_DIR, else a `video/` sibling of the Zarr store (mirroring the app's
+    <app_dir>/video next to store.zarr). None disables the VideoStore service."""
+    v = os.environ.get("HUB_VIDEO_DIR")
+    if v:
+        return v
+    store = os.environ.get("HUB_STORE_DIR")
+    if store:
+        return os.path.join(os.path.dirname(os.path.abspath(store.rstrip("/"))),
+                            "video")
+    return None
+
+
+def _open_video_store(video_dir):
+    """The hub's ambient-video segment store: sync target + backfill source. None
+    disables the VideoStore service (it reports empty / accepts nothing)."""
+    if not video_dir:
+        return None
+    try:
+        from ferrodac.core.videostore import VideoStore
+        return VideoStore(video_dir)
+    except Exception as exc:                          # noqa: BLE001
+        log.warning("hub video store disabled (%s): %s", video_dir, exc)
+        return None
+
+
+def build_server(hub: "Hub | None" = None, store=None, video_store=None
                  ) -> "tuple[grpc.aio.Server, Hub]":
     """Wire a gRPC server around a Hub (shared by main and the e2e test). `store`
-    is the hub's durable ZarrStore (sync target + read tier); may be None."""
+    is the hub's durable ZarrStore (sync target + read tier); `video_store` is the
+    ambient-video segment store (§9.3 phase 3 sync target + backfill); both may be
+    None."""
     hub = hub or Hub()
     # Match the clients' lifted message cap (ferrodac.net.GRPC_CHANNEL_OPTIONS): the
     # default 4 MiB is too small for a backlogged store-sync chunk or a full-res
@@ -69,6 +99,7 @@ def build_server(hub: "Hub | None" = None, store=None
     rpc.add_ProjectsServicer_to_server(ProjectsServicer(hub), server)
     rpc.add_DocsServicer_to_server(DocsServicer(hub), server)
     rpc.add_StoreServicer_to_server(StoreServicer(store), server)
+    rpc.add_VideoStoreServicer_to_server(VideoStoreServicer(video_store), server)
     rpc.add_BackupServicer_to_server(BackupServicer(hub), server)
     return server, hub
 
@@ -130,7 +161,9 @@ async def _backup_loop(hub, interval: float = 30.0) -> None:
 async def serve() -> None:
     hub = Hub(tags_path=_tags_path(), projects_dir=_projects_dir(), gitea=_gitea(),
               backup_dir=_backup_dir())
-    server, _ = build_server(hub=hub, store=_open_store(os.environ.get("HUB_STORE_DIR")))
+    server, _ = build_server(
+        hub=hub, store=_open_store(os.environ.get("HUB_STORE_DIR")),
+        video_store=_open_video_store(_video_dir()))
     addr = os.environ.get("HUB_GRPC_ADDR", "0.0.0.0:50051")
     server.add_insecure_port(addr)
     await server.start()
