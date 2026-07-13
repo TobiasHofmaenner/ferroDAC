@@ -113,8 +113,8 @@ class Resolver:
                 return True
         return False
 
-    def query(self, series, t0, t1, max_points=2000):
-        segs = self._partition(series, t0, t1)
+    def query(self, series, t0, t1, max_points=2000, local_only: bool = False):
+        segs = self._partition(series, t0, t1, local_only=local_only)
         owned = [(a, b, tier) for a, b, tier in segs if tier is not None]
         if not owned:
             return np.array([]), np.array([])

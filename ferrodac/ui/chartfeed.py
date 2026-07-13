@@ -212,15 +212,14 @@ class ChartFeed:
         """Draw each chart's stored SCALAR curves from a pixel-budgeted store query
         (a min/max envelope) rather than the full-res re-stream fanned into the
         CurveBuffer — one uniform reduction, no old→new fidelity gradient, and zoom
-        re-resolves (Fix B). The re-stream still runs for PROCESSORS; derived /
-        trace / not-yet-recorded curves stay on the feed path.
+        re-resolves. The re-stream still runs for PROCESSORS; derived / trace /
+        not-yet-recorded curves stay on the feed path.
 
-        The query is SYNCHRONOUS on purpose: this runs from on_reset, which fires
-        BEFORE the re-stream (_load) starts, so the bounded rollup query (~10 ms
-        even over millions of samples) never contends with the re-stream for the
-        store lock — the chart updates immediately on a select. An async read would
-        be starved behind a huge re-stream. Zoom stays async (it can fire while a
-        re-stream is in flight)."""
+        SYNCHRONOUS by §22: runs from on_reset (before the re-stream), so the chart
+        updates immediately on a select. Reads LOCAL tiers only so this GUI-thread
+        redraw can never block on the hub's networked query (the window-change
+        freeze). Hub-only history is served by prefetching it into the local store
+        first (the agreed §12.1 direction) — the display layer stays local+sync."""
         resolver, replay = self._resolver(), self._replay()
         if resolver is None or replay is None:
             return
@@ -231,14 +230,14 @@ class ChartFeed:
             try:
                 keys = [k for k in panel.curve_keys()
                         if not replay.playback._is_trace(k)        # scalars only
-                        and resolver.knows(k)]                     # in a tier (not derived); O(1)
+                        and resolver.knows(k, local_only=True)]    # in a LOCAL tier; O(1)
                 if not keys:
                     continue
                 panel.set_query_owned(keys if owned else ())
                 mp = max(400, int(panel.plot.width()) * 2)
                 for key in keys:
                     try:
-                        x, y = resolver.query(key, t0, t1, mp)
+                        x, y = resolver.query(key, t0, t1, mp, local_only=True)
                         panel.set_window_curve(key, x, y)
                     except Exception:                # noqa: BLE001 — one bad curve ≠ blank chart
                         log.debug("window query failed for %s", key, exc_info=True)
