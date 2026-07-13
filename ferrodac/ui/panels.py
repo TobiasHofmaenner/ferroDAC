@@ -1749,13 +1749,23 @@ class VideoView(QWidget):
         self._img: QImage | None = None
         self._overlays: list = []     # (text, roi, color, ok) — detector regions
         self._placeholder_text = "no video — route a camera here"
+        self._zoom = 1.0              # 1 = aspect-fit; wheel zooms, drag pans
+        self._pan = [0.0, 0.0]        # px offset from the centered position
+        self._drag_at = None
         self.setMinimumSize(160, 120)
+        self.setToolTip("wheel: zoom · drag: pan · double-click: reset")
 
     def set_placeholder(self, text: str) -> None:
         self._placeholder_text = text
         self.update()
 
     def set_image(self, img) -> None:
+        # keep zoom/pan across frames (zooming INTO a live feed is the point);
+        # reset only when the source geometry changes (new camera/format)
+        if (img is not None and self._img is not None
+                and not img.isNull() and not self._img.isNull()
+                and img.size() != self._img.size()):
+            self._zoom, self._pan = 1.0, [0.0, 0.0]
         self._img = img
         self.update()
 
@@ -1780,15 +1790,86 @@ class VideoView(QWidget):
                      int(w * sx), int(h * sy))
 
     def content_rect(self) -> QRect:
-        """The rectangle the image currently occupies (centred, aspect-fit)."""
+        """The rectangle the image currently occupies: aspect-fit × zoom, panned
+        and edge-clamped. Overlay/ROI mapping goes through here, so detector
+        boxes track zoom automatically."""
         if self._img is None or self._img.isNull():
             return self.rect()
         iw, ih = self._img.width(), self._img.height()
         if iw == 0 or ih == 0:
             return self.rect()
-        scale = min(self.width() / iw, self.height() / ih)
+        scale = min(self.width() / iw, self.height() / ih) * self._zoom
         w, h = int(iw * scale), int(ih * scale)
-        return QRect((self.width() - w) // 2, (self.height() - h) // 2, w, h)
+        x = self._clamped(self._pan[0], self.width(), w)
+        y = self._clamped(self._pan[1], self.height(), h)
+        return QRect(int(x), int(y), w, h)
+
+    @staticmethod
+    def _clamped(pan: float, view: int, content: int) -> float:
+        if content <= view:
+            return (view - content) / 2          # smaller than the view → centered
+        return max(view - content, min(0.0, (view - content) / 2 + pan))
+
+    def set_zoom(self, zoom: float, anchor=None) -> None:
+        """Zoom about `anchor` (widget coords; default: center) — the image point
+        under the anchor stays put. zoom is clamped to [1, 16]; 1 recenters."""
+        zoom = max(1.0, min(16.0, float(zoom)))
+        if self._img is None or self._img.isNull() or zoom == self._zoom:
+            self._zoom = zoom
+            if zoom == 1.0:
+                self._pan = [0.0, 0.0]
+            self.update()
+            return
+        r0 = self.content_rect()
+        ax = self.width() / 2 if anchor is None else anchor.x()
+        ay = self.height() / 2 if anchor is None else anchor.y()
+        fx = (ax - r0.x()) / max(1, r0.width())      # image fraction under anchor
+        fy = (ay - r0.y()) / max(1, r0.height())
+        self._zoom = zoom
+        iw, ih = self._img.width(), self._img.height()
+        scale = min(self.width() / iw, self.height() / ih) * zoom
+        w, h = iw * scale, ih * scale
+        # solve pan so the anchored image point stays under the cursor
+        self._pan[0] = (ax - fx * w) - (self.width() - w) / 2
+        self._pan[1] = (ay - fy * h) - (self.height() - h) / 2
+        if zoom == 1.0:
+            self._pan = [0.0, 0.0]
+        self.update()
+
+    def wheelEvent(self, ev):  # noqa: N802
+        if self._img is None or self._img.isNull():
+            return
+        steps = ev.angleDelta().y() / 120.0
+        self.set_zoom(self._zoom * (1.25 ** steps), anchor=ev.position())
+        ev.accept()
+
+    def mousePressEvent(self, ev):  # noqa: N802
+        if ev.button() == Qt.LeftButton and self._zoom > 1.0:
+            self._drag_at = ev.position()
+            self.setCursor(Qt.ClosedHandCursor)
+        else:
+            super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):  # noqa: N802
+        if self._drag_at is not None:
+            d = ev.position() - self._drag_at
+            self._drag_at = ev.position()
+            self._pan[0] += d.x()
+            self._pan[1] += d.y()
+            self.update()
+        else:
+            super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):  # noqa: N802
+        if self._drag_at is not None:
+            self._drag_at = None
+            self.setCursor(Qt.ArrowCursor)
+        else:
+            super().mouseReleaseEvent(ev)
+
+    def mouseDoubleClickEvent(self, ev):  # noqa: N802
+        self.set_zoom(1.0)
+        ev.accept()
 
     def paintEvent(self, _ev):  # noqa: N802
         p = QPainter(self)
@@ -1799,6 +1880,13 @@ class VideoView(QWidget):
             return
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.drawImage(self.content_rect(), self._img)
+        if self._zoom > 1.001:                       # discoverable zoom state
+            txt = f"×{self._zoom:.1f}"
+            p.fillRect(QRect(6, self.height() - 22, 
+                             p.fontMetrics().horizontalAdvance(txt) + 10, 16),
+                       QColor(20, 26, 34, 200))
+            p.setPen(QColor("#cdd6e0"))
+            p.drawText(11, self.height() - 10, txt)
         for text, roi, color, ok in self._overlays:
             r = self._roi_to_widget(roi)
             col = QColor(color)

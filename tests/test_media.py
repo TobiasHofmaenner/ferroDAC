@@ -386,3 +386,73 @@ def test_events_dock_shows_media_thumbnails(tmp_path):
     thumbs[0].click()
     assert opened == [res["tag_id"]]                     # thumbnail opens the photo
     panel.deleteLater()
+
+
+# -- UX: zoom/pan in the camera view + photo tile (one VideoView serves both) -----
+
+def test_videoview_zoom_geometry_and_reset():
+    from qtpy.QtWidgets import QApplication
+    from qtpy.QtCore import QPointF
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.ui.panels import VideoView
+    v = VideoView()
+    v.resize(200, 120)                                 # == the widget's minimum
+    v.set_image(_frame(w=100, h=60))
+    r = v.content_rect()
+    assert (r.width(), r.height()) == (200, 120)      # aspect-fit fills the view
+
+    v.set_zoom(2.0)                                    # center-anchored zoom
+    r = v.content_rect()
+    assert (r.width(), r.height()) == (400, 240)
+    assert r.x() == -100 and r.y() == -60              # still centered
+
+    v._pan[0] += 10_000                                # pan clamps at the edge
+    r = v.content_rect()
+    assert r.x() == 0                                  # left edge never detaches
+
+    v.set_zoom(1.0)                                    # reset recenters
+    r = v.content_rect()
+    assert (r.x(), r.y(), r.width(), r.height()) == (0, 0, 200, 120)
+
+    v.set_zoom(999)                                    # clamped ceiling
+    assert v._zoom == 16.0
+    v.set_zoom(1.0)                                    # back to fit
+    v.set_zoom(2.0)
+    r0 = v.content_rect()
+    ax, ay = 30.0, 30.0                                # anchored zoom invariant:
+    fx = (ax - r0.x()) / r0.width()                    # the image point under the
+    fy = (ay - r0.y()) / r0.height()                   # anchor must stay put
+    v.set_zoom(4.0, anchor=QPointF(ax, ay))
+    r2 = v.content_rect()
+    assert r2.x() + fx * r2.width() == pytest.approx(ax, abs=1.5)
+    assert r2.y() + fy * r2.height() == pytest.approx(ay, abs=1.5)
+
+
+def test_videoview_overlays_track_zoom():
+    """Detector ROI boxes map through content_rect, so they must follow zoom."""
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.ui.panels import VideoView
+    v = VideoView()
+    v.resize(200, 120)
+    v.set_image(_frame(w=100, h=60))
+    roi = (25, 15, 50, 30)                             # centered quarter of the image
+    r1 = v._roi_to_widget(roi)
+    v.set_zoom(2.0)
+    r2 = v._roi_to_widget(roi)
+    assert r2.width() == r1.width() * 2                # box scales with the view
+    assert r2.center().x() == pytest.approx(r1.center().x(), abs=2)  # same center
+
+
+def test_videoview_zoom_survives_frames_resets_on_geometry_change():
+    from qtpy.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from ferrodac.ui.panels import VideoView
+    v = VideoView()
+    v.resize(200, 120)
+    v.set_image(_frame(w=100, h=60))
+    v.set_zoom(3.0)
+    v.set_image(_frame(w=100, h=60, color="#222222"))  # next live frame
+    assert v._zoom == 3.0                              # zoom sticks across frames
+    v.set_image(_frame(w=64, h=48))                    # new source geometry
+    assert v._zoom == 1.0                              # → honest reset
