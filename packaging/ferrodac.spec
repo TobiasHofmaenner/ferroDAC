@@ -57,6 +57,10 @@ hiddenimports += collect_submodules(
 # Windows one (serial.tools.list_ports_windows) is invisible to static analysis;
 # pull every serial submodule in or the frozen app can't list COM ports at all.
 hiddenimports += collect_submodules("serial")
+# segno (phone-pairing QR) is imported lazily inside qr_pixmap() and picks its PNG
+# writer by name at runtime, so static analysis misses the writer submodule — pull
+# the whole package in or the frozen app silently falls back to a text QR.
+hiddenimports += collect_submodules("segno")
 hiddenimports += [
     "PySide6.QtMultimedia",          # camera capture
     "PySide6.QtMultimediaWidgets",

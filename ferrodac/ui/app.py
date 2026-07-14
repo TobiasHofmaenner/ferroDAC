@@ -521,6 +521,7 @@ class MainWindow(QMainWindow):
         netmenu = self.menuBar().addMenu("&Cloud")
         self.hub_action = netmenu.addAction("ferroDAC Cloud…", self._open_hub)
         netmenu.addAction("External Control…", self._open_connections)
+        netmenu.addAction("Connect a phone…", self._connect_phone)
 
         extmenu = self.menuBar().addMenu("E&xtensions")
         extmenu.addAction("Manage extensions…", self._open_extensions)
@@ -2448,6 +2449,9 @@ class MainWindow(QMainWindow):
         self._control_surface = None
         self._connectors = None
         self._localapi = None
+        self._companion = None           # phone companion (LAN) server
+        self._phone_cid = None           # the phone's preshared connector id
+        self._phone_win = None           # the "Connect a phone" dialog
         try:
             from ..core.connectors import ConnectorRegistry
             from .appcontrol import build_control_surface
@@ -2518,6 +2522,72 @@ class MainWindow(QMainWindow):
         self._conn_win.show()
         self._conn_win.raise_()
         self._conn_win.activateWindow()
+
+    def _connect_phone(self):
+        """Start the LAN phone-companion server + show a QR to pair a phone (uploads
+        photos into the active project over the shared control surface)."""
+        if getattr(self, "_phone_win", None) is not None:      # already open
+            self._phone_win.show()
+            self._phone_win.raise_()
+            self._phone_win.activateWindow()
+            return
+        if self._control_surface is None or self._connectors is None:
+            self.statusBar().showMessage("Control API unavailable", 4000)
+            return
+        from .. import __version__
+        from ..net.companion import CompanionServer
+        from .phonepair import PairPhoneDialog, lan_ip
+
+        def _active_name():
+            pm = getattr(self, "_project_mgr", None)
+            return pm.active.name if pm is not None and pm.active else ""
+
+        # mint the phone's preshared key AFTER we commit to starting — and revoke it
+        # on any failure so a live control-scope credential never leaks un-torn-down.
+        conn, psk = self._connectors.rotate_preshared("phone", scope="control")
+        self._phone_cid = conn.id
+        try:
+            self._companion = CompanionServer(
+                self._control_surface, self._connectors, host="0.0.0.0",
+                version=__version__, get_project=_active_name)
+            self._companion.start()
+        except Exception as exc:              # noqa: BLE001
+            self._connectors.revoke(self._phone_cid)
+            self._phone_cid = None
+            if getattr(self, "_companion", None) is not None:
+                self._companion.stop()
+            self._companion = None
+            self.statusBar().showMessage(f"Phone companion failed to start: {exc}", 8000)
+            return
+        url = f"http://{lan_ip()}:{self._companion.port}"
+
+        def _regen():
+            c, p = self._connectors.rotate_preshared("phone", scope="control")
+            self._phone_cid = c.id
+            return p
+
+        def _revoke():
+            if self._phone_cid:
+                self._connectors.revoke(self._phone_cid)
+                self._phone_cid = None
+
+        def _teardown(*_):
+            if getattr(self, "_companion", None) is not None:
+                self._companion.stop()
+                self._companion = None
+            if self._phone_cid:
+                self._connectors.revoke(self._phone_cid)   # kill the link on close
+                self._phone_cid = None
+            self._phone_win = None
+
+        dlg = PairPhoneDialog(self, url=url, psk=psk,
+                              on_regenerate=_regen, on_revoke=_revoke)
+        dlg.finished.connect(_teardown)
+        self._phone_win = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        self.statusBar().showMessage(f"Phone companion on {url}", 6000)
 
     def _open_source_config(self, source_key: str) -> None:
         """The ⚙ on a source card → open its owning device's config/control section.
@@ -2967,6 +3037,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):  # noqa: N802
         if getattr(self, "_localapi", None) is not None:
             self._localapi.stop()                 # close the control-API port cleanly
+        if getattr(self, "_companion", None) is not None:
+            self._companion.stop()                # close the phone-companion LAN port
         if getattr(self, "_video_capture", None) is not None:
             self._video_capture.stop()            # close + commit open segments
         if getattr(self, "_recording", None) is not None:

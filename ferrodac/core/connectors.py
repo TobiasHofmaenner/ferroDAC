@@ -157,6 +157,44 @@ class ConnectorRegistry:
             self._save()
         return True
 
+    # -- pre-shared connectors (phone companion; no pairing handshake) -------
+    def create_preshared(self, name: str, scope: str = "control") -> "tuple[Connector, str]":
+        """Mint a PRE-APPROVED connector for a pre-shared-key client (the phone
+        companion): no pairing/approval popup — the app already trusts the device it
+        hands the link to. Stores only the token HASH; returns the plaintext psk ONCE
+        (it lives in the /enter link + the phone's cookie, never on disk)."""
+        tok = "fdc_" + secrets.token_urlsafe(32)
+        with self._lock:
+            c = Connector(id=secrets.token_hex(8), name=(str(name) or "phone")[:64],
+                          scope=scope if scope in SCOPES else "control",
+                          token_hash=_hash_token(tok), created=_now())
+            self._conns[c.id] = c
+            self._save()
+        return c, tok
+
+    def find_preshared(self, name: str) -> "Connector | None":
+        """The live (non-revoked) pre-shared connector of this name, or None."""
+        with self._lock:
+            for c in self._conns.values():
+                if not c.revoked and c.name == name:
+                    return c
+        return None
+
+    def rotate_preshared(self, name: str, scope: str = "control") -> "tuple[Connector, str]":
+        """'Get a new phone link': revoke every existing connector of this name and mint
+        a fresh pre-shared one — the old QR/URL (and its cookie) stops working at once."""
+        with self._lock:
+            for c in self._conns.values():
+                if not c.revoked and c.name == name:
+                    c.revoked = True
+            tok = "fdc_" + secrets.token_urlsafe(32)
+            c = Connector(id=secrets.token_hex(8), name=(str(name) or "phone")[:64],
+                          scope=scope if scope in SCOPES else "control",
+                          token_hash=_hash_token(tok), created=_now())
+            self._conns[c.id] = c
+            self._save()
+        return c, tok
+
     # -- persistence (owner-only file) --------------------------------------
     def _expire(self) -> None:
         now = _now()

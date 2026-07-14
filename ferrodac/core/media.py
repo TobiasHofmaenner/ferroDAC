@@ -40,6 +40,18 @@ def _safe(name: str) -> str:
     return re.sub(r"[^\w.-]+", "-", str(name)).strip("-") or "camera"
 
 
+# Photo file types a companion (phone) upload may carry — a phone camera JPEG is
+# already compressed, so we store it VERBATIM (§9.1) rather than re-encode.
+PHOTO_EXTS = ("jpg", "jpeg", "png", "webp")
+
+
+def _clean_ext(ext) -> str:
+    """A safe photo extension: strip a leading dot, lowercase, and only allow the
+    known image types (default 'jpg' — the phone-camera case)."""
+    e = str(ext or "").lstrip(".").lower()
+    return e if e in PHOTO_EXTS else "jpg"
+
+
 class MediaService:
     """Turns "take a photo" into a lossless file + a media tag.
 
@@ -104,6 +116,44 @@ class MediaService:
             except MediaError as exc:
                 errors.append((key, str(exc)))
         return results, errors
+
+    def add_photo(self, data: bytes, *, label: str = "", comment: str = "",
+                  category: str = "generic", source: str = "phone",
+                  t: "float | None" = None, ext: str = "jpg") -> dict:
+        """Store an ALREADY-ENCODED photo (a phone upload) VERBATIM as a media
+        file + an immutable media tag — the human-context path (DESIGN §9.1). The
+        bytes are written bit-for-bit (``open(...,'wb')``, NOT ``QImage.save`` — a
+        phone JPEG is already compressed and re-encoding would bloat + degrade it).
+
+        Returns ``{"tag_id","path","relpath","t","category","file"}``. Raises
+        MediaError when there is no active project to store into (like snapshot)
+        or the data is empty. ``category``/``comment``/``source`` ride the tag
+        payload; ``ext`` is sanitized to a known image type (default jpg). ``t``
+        defaults to now.
+        """
+        if not data:
+            raise MediaError("no image data to store")
+        mdir = self._media_dir()
+        if not mdir:
+            raise MediaError("no active project to store media in")
+        os.makedirs(mdir, exist_ok=True)          # the service owns its directory
+        ext = _clean_ext(ext)
+        t = time.time() if t is None else float(t)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(t))
+        base = f"{stamp}.{int((t % 1) * 1000):03d}_{_safe(label or category or source)}"
+        relpath, path = self.unique_path(mdir, base, ext=ext)
+
+        with open(path, "wb") as fh:              # VERBATIM — not re-encoded (§9.1)
+            fh.write(data)
+
+        # markers.add resolves immutable=None -> True for a MEDIA tag (a captured
+        # instant is fixed); the label/comment stay editable.
+        tag_id = self._markers.add(
+            t, label=label or f"📷 {category}", kind=MEDIA,
+            payload={"file": relpath, "source": source, "format": ext,
+                     "category": category, "comment": comment})
+        return {"tag_id": tag_id, "path": path, "relpath": relpath, "t": t,
+                "category": category, "file": relpath}
 
     # -- helpers ---------------------------------------------------------------
     @staticmethod

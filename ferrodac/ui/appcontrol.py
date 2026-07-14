@@ -10,11 +10,18 @@ devices, layout, projects, replay, tags, hub — reusing methods that already ex
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import time
 
 from ..core.control import ControlError, ControlSurface
+from ..core.media import MediaError
 from ..core.tag import SEVERITIES, marker_to_dict
+
+# The photo categories a companion (phone) upload can be filed under — a fixed,
+# closed set ('generic' is the catch-all). Shared with the companion server.
+MEDIA_CATEGORIES = ("setup", "sample", "result", "generic")
 
 
 # -- serializers (verbs must return JSON-able results) ----------------------
@@ -775,5 +782,51 @@ def build_control_surface(app) -> ControlSurface:
                params={"dir": {"type": "string", "enum": ["back", "forward"]},
                        "forward": {"type": "boolean"}},
                returns="the transport snapshot")
+
+    # -- media (phone-companion uploads; rides the same file+tag substrate) ---
+    # A photo is a FILE (written VERBATIM) + an immutable media tag. GUI-wrapped:
+    # markers.add emits Qt signals; the byte write is small. Reuses the app's
+    # _media_service() (built against the ACTIVE project, app.py:921). Accepts
+    # raw 'data' bytes (the in-process companion path) OR base64 'data_b64' (HTTP).
+    def _media_add_photo(p):
+        data = p.get("data")
+        if data is None:
+            b64 = p.get("data_b64")
+            if not b64:
+                raise ControlError("media.add_photo needs 'data' (bytes) or 'data_b64'")
+            try:
+                data = base64.b64decode(b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ControlError(f"media.add_photo: invalid base64 ({exc})") from exc
+        if not isinstance(data, (bytes, bytearray)):
+            raise ControlError("media.add_photo: 'data' must be raw bytes")
+        category = str(p.get("category") or "generic")
+        if category not in MEDIA_CATEGORIES:
+            raise ControlError(
+                f"media.add_photo: unknown category {category!r} "
+                f"(one of {list(MEDIA_CATEGORIES)})")
+        try:
+            return app._media_service().add_photo(
+                bytes(data), category=category, label=str(p.get("label", "")),
+                comment=str(p.get("comment", "")), ext=str(p.get("ext", "jpg")))
+        except MediaError as exc:                 # no active project / empty data
+            raise ControlError(str(exc)) from exc
+    s.register("media.add_photo", gui(_media_add_photo),
+               description="Add a photo to the ACTIVE project (the phone companion's "
+                           "upload path): store the image VERBATIM as a media file plus an "
+                           "immutable media tag — bytes written as-is, NOT re-encoded. Give "
+                           "'data_b64' (base64) or raw 'data' bytes. 'category' is one of "
+                           "setup/sample/result/generic (default generic); 'label'/'comment' "
+                           "annotate the tag; 'ext' is the image type (jpg/jpeg/png/webp).",
+               params={"data_b64": {"type": "string"}, "data": {"type": "any"},
+                       "category": {"type": "string", "enum": list(MEDIA_CATEGORIES)},
+                       "label": {"type": "string"}, "comment": {"type": "string"},
+                       "ext": {"type": "string"}},
+               returns="{tag_id, path, relpath, t, category, file}")
+
+    s.query("media.categories", lambda _: list(MEDIA_CATEGORIES),
+            description="The photo categories a media upload can be filed under "
+                        "(setup/sample/result/generic).",
+            returns="[category, ...]")
 
     return s
