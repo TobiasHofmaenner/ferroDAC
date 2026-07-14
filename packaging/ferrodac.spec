@@ -79,6 +79,13 @@ datas = collect_data_files("pyqtgraph")
 # Bundle the window/taskbar icon so the running app can load it.
 datas += [(os.path.join(ROOT, "ferrodac", "assets", "app.png"), "ferrodac/assets")]
 
+# Guidance playbooks (markdown) — the GuidanceLibrary os.listdir(BUILTIN_DIR)s these
+# at runtime; without them in datas, guidance.list is silently empty in the frozen app.
+_GUIDE = os.path.join(ROOT, "ferrodac", "guidance")
+for _f in os.listdir(_GUIDE):
+    if _f.endswith(".md"):
+        datas += [(os.path.join(_GUIDE, _f), "ferrodac/guidance")]
+
 # The in-app document view (Docs / editor / live collaboration) is a QtWebEngine
 # page that loads the OFFLINE web bundle under ferrodac/ui/web/dist (built by
 # esbuild, committed — no CDN at runtime). Ship the whole tree (HTML/JS/CSS + the

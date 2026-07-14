@@ -833,4 +833,30 @@ def build_control_surface(app) -> ControlSurface:
                         "(setup/sample/result/generic).",
             returns="[category, ...]")
 
+    # -- guidance (procedural playbooks — the HOW, alongside /describe's WHAT) --
+    # Qt-free plain text: like doc.*, register DIRECTLY (off the GUI thread).
+    from ..guidance import GuidanceLibrary
+    _guide = GuidanceLibrary()
+
+    s.query("guidance.list", lambda _: _guide.list(),
+            description="List the procedural PLAYBOOKS the app ships (the HOW to "
+                        "/describe's WHAT): each is a step-by-step recipe over existing "
+                        "verbs. Returns the index only — call guidance.get for a body. "
+                        "CONSULT THIS before attempting any multi-step task.",
+            returns="[{id, title, when_to_use, tags, source}]")
+
+    def _guidance_get(p):
+        pid = p.get("id")
+        if not pid:
+            raise ControlError("guidance.get needs 'id'")
+        pb = _guide.get(str(pid))
+        if pb is None:
+            raise ControlError(f"no such playbook: {pid!r}")
+        return pb
+    s.query("guidance.get", _guidance_get,
+            description="Get ONE playbook in full: its steps, verbs_used, and a "
+                        "copy-pasteable skeleton. Get the id from guidance.list.",
+            params={"id": {"type": "string", "required": True}},
+            returns="{id, title, when_to_use, tags, verbs_used, body, source}")
+
     return s

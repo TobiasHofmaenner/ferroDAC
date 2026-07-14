@@ -40,6 +40,10 @@ a scientist at their bench; some verbs move REAL lab hardware.
 - OBSERVE BEFORE ACTING. Before any command, query the relevant state
   (device.list, hub.status, time.window, layout.get, project.list, tag.list) so
   you act on ground truth, not assumptions.
+- CONSULT /guidance FOR MULTI-STEP TASKS. Before a multi-step workflow (set up a
+  readout, document the bench, annotate a run, plot external data), call
+  guidance.list and guidance.get {id} — the app ships step-by-step PLAYBOOKS over
+  these same verbs. They are advisory READ-scope text, not new capabilities.
 - VERIFY BY READBACK, NOT BY THE ACK. A command returning {ok:true} means the
   request was accepted, NOT that the physical effect happened. After a device
   write, query the device's source values to confirm the real reading changed.
