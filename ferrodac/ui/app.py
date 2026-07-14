@@ -17,7 +17,7 @@ import time
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
 
-from qtpy.QtCore import QByteArray, QSettings, Qt, QTimer
+from qtpy.QtCore import QByteArray, QSettings, Qt, QTimer, Signal
 from qtpy.QtGui import QColor, QIcon, QPalette
 from qtpy.QtWidgets import (
     QApplication,
@@ -87,6 +87,10 @@ def _editor_args(command: str, path: str) -> list:
 #  Main window — dockable shell
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
+    # a pairing request arrives on the API server thread → hop to the GUI to pop the
+    # approval dialog (external control surface).
+    _pairing_request = Signal(object)
+
     def __init__(self, manager: DeviceManager, engine: Engine, parent=None,
                  restore_last: bool = True, extensions=None):
         super().__init__(parent)
@@ -459,6 +463,7 @@ class MainWindow(QMainWindow):
             "Scanning for devices…  ·  open “Devices” to add one"
         )
         self.manager.start()
+        self._setup_control_api()
         if self._restore_last:
             self._init_session_persistence()    # restores markers, then recovers
 
@@ -515,6 +520,7 @@ class MainWindow(QMainWindow):
 
         netmenu = self.menuBar().addMenu("&Cloud")
         self.hub_action = netmenu.addAction("ferroDAC Cloud…", self._open_hub)
+        netmenu.addAction("External Control…", self._open_connections)
 
         extmenu = self.menuBar().addMenu("E&xtensions")
         extmenu.addAction("Manage extensions…", self._open_extensions)
@@ -2435,6 +2441,84 @@ class MainWindow(QMainWindow):
         if dirty:
             self.manager.active_changed.emit()
 
+    # -- external control surface (self-describing API for connectors) -------
+    def _setup_control_api(self):
+        """Build the control-surface registry + connector auth. The loopback server
+        stays OFF until the user enables it in Connections — no port opens on startup."""
+        self._control_surface = None
+        self._connectors = None
+        self._localapi = None
+        try:
+            from ..core.connectors import ConnectorRegistry
+            from .appcontrol import build_control_surface
+            self._control_surface = build_control_surface(self)
+            self._connectors = ConnectorRegistry()
+            self._connectors.set_pairing_notifier(
+                lambda p: self._pairing_request.emit(p))     # → GUI thread (queued)
+            self._pairing_request.connect(self._on_pairing_request, Qt.QueuedConnection)
+        except Exception:                    # noqa: BLE001 — never block startup on this
+            logging.getLogger("ferrodac").warning("control API setup failed", exc_info=True)
+
+    def _on_pairing_request(self, pairing):
+        from .connections import PairingDialog
+        if self._connectors is None:
+            return
+        dlg = PairingDialog(pairing, self)
+        dlg.exec()
+        decision = dlg.decision
+        if decision and decision[0]:
+            self._connectors.approve(pairing.id, scope=decision[1])
+            self.statusBar().showMessage(
+                f"Control connector “{pairing.name}” approved ({decision[1]})", 6000)
+        else:
+            self._connectors.deny(pairing.id)
+
+    def _control_api_running(self) -> bool:
+        return self._localapi is not None
+
+    def _control_api_port(self) -> int:
+        return self._localapi.port if self._localapi is not None else 0
+
+    def _enable_control_api(self, on: bool):
+        if on and self._localapi is None and self._control_surface is not None:
+            from .. import __version__
+            from ..net.localapi import LocalApiServer
+            self._localapi = LocalApiServer(
+                self._control_surface, self._connectors, version=__version__,
+                on_audit=self._on_control_audit)
+            try:
+                self._localapi.start()
+                self.statusBar().showMessage(
+                    f"Local control API on 127.0.0.1:{self._localapi.port}", 6000)
+            except Exception as exc:         # noqa: BLE001
+                self._localapi = None
+                self.statusBar().showMessage(f"Control API failed to start: {exc}", 8000)
+        elif not on and self._localapi is not None:
+            self._localapi.stop()
+            self._localapi = None
+            self.statusBar().showMessage("Local control API stopped", 4000)
+
+    def _on_control_audit(self, name, verb, ok, detail):
+        logging.getLogger("ferrodac.control").info(
+            "connector %s: %s %s%s", name, verb, "ok" if ok else "FAIL",
+            f" ({detail})" if detail else "")
+
+    def _open_connections(self):
+        if getattr(self, "_conn_win", None) is None:
+            if self._connectors is None:
+                self.statusBar().showMessage("Control API unavailable", 4000)
+                return
+            from .connections import ConnectionsWindow
+            win = ConnectionsWindow(
+                self._connectors, is_running=self._control_api_running,
+                on_toggle=self._enable_control_api, get_port=self._control_api_port,
+                parent=self)
+            win.destroyed.connect(lambda: setattr(self, "_conn_win", None))
+            self._conn_win = win
+        self._conn_win.show()
+        self._conn_win.raise_()
+        self._conn_win.activateWindow()
+
     def _open_source_config(self, source_key: str) -> None:
         """The ⚙ on a source card → open its owning device's config/control section.
         Local devices open the ConfigDialog; hub-remote devices open the
@@ -2881,6 +2965,8 @@ class MainWindow(QMainWindow):
         #                                              owned envelopes / go-live history
 
     def closeEvent(self, event):  # noqa: N802
+        if getattr(self, "_localapi", None) is not None:
+            self._localapi.stop()                 # close the control-API port cleanly
         if getattr(self, "_video_capture", None) is not None:
             self._video_capture.stop()            # close + commit open segments
         if getattr(self, "_recording", None) is not None:

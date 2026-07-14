@@ -86,6 +86,25 @@ def test_events_fan_out_and_unsubscribe():
     assert len(got) == 1                                # no delivery after unsubscribe
 
 
+def test_build_control_surface_registers_the_cheap_tier():
+    """The app adapter exposes the cheap-tier verbs with the right scopes/kinds
+    (built without a full MainWindow — it only needs _gui_bridge at build time)."""
+    import types
+
+    from ferrodac.ui.appcontrol import build_control_surface
+
+    app = types.SimpleNamespace(
+        _gui_bridge=types.SimpleNamespace(post_and_wait=lambda fn: fn()))
+    s = build_control_surface(app)
+    by = {v["name"]: v for v in s.describe("admin")["verbs"]}
+    assert {"device.list", "device.add", "device.set_sink", "hub.connect",
+            "hub.disconnect", "layout.add_panel", "time.park_window", "tag.add",
+            "project.switch", "project.list", "time.window", "hub.status"} <= set(by)
+    assert by["device.list"]["kind"] == "query" and by["device.list"]["scope"] == "read"
+    assert by["device.set_sink"]["scope"] == "control"        # a control command
+    assert by["hub.connect"]["params"]["addr"]["required"]    # self-describing params
+
+
 # -- ConnectorRegistry (pairing + auth) --------------------------------------
 def _registry(tmp):
     return ConnectorRegistry(path=os.path.join(tmp, "connectors.json"))
