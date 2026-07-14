@@ -138,3 +138,127 @@ class ShellyConfigWidget(DeviceConfigWidget):
         mark = "✓" if ok else "✗"
         self._status.setStyleSheet(f"color:{color}; font-size:11px;")
         self._status.setText(f"{mark}  {getattr(result, 'summary', 'Check failed.')}")
+
+
+# --------------------------------------------------------------------------- #
+#  Python source: an in-app editor for the driver's poll(ctx) body.
+# --------------------------------------------------------------------------- #
+from qtpy.QtWidgets import QPlainTextEdit  # noqa: E402
+
+_PY_SOURCE_HINT = (
+    "Runs in-app on the poll thread — arbitrary Python, same trust as an extension "
+    "(no sandbox). Define poll(ctx) -> value | dict; optional setup(ctx) and a "
+    "SOURCES declaration.")
+
+
+@register_config_widget("python_source")
+class PythonSourceConfigWidget(DeviceConfigWidget):
+    """A "Python source" device runs a block of user Python on its poll thread; the
+    code lives in an ``Option(key="code")``. The single-line option row the dialog
+    renders for a normal Option can't hold a code block, so this panel *owns the
+    options* (``owns_options = True`` → ConfigDialog skips its auto-rendered rows) and
+    edits the code in a real multi-line editor.
+
+    "Save & reload" commits the buffer via ``controller.set_option("code", …)`` — which
+    recompiles/hot-swaps the code on the device (async_config). "Check / run once" runs
+    the device's ``check()`` (poll once on the SAVED code) and shows the ``CheckResult``.
+    ``last_error`` from the descriptor is surfaced so a compile/poll failure is visible
+    without opening the log. ``refresh`` never clobbers an in-progress edit: it only
+    resets the buffer when the editor isn't focused (so the LLM/config_set path and
+    other external edits still land).
+    """
+
+    driver = "python_source"
+    owns_options = True                 # ConfigDialog suppresses the generic option rows
+
+    def __init__(self, controller, parent=None):
+        super().__init__(controller, parent)
+        self._shown_error = ""          # last last_error we surfaced (dedupe refreshes)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 6, 0, 0)
+        lay.setSpacing(6)
+
+        hdr = QLabel("Code")
+        hdr.setStyleSheet("font-weight:700; margin-top:2px;")
+        lay.addWidget(hdr)
+
+        self._editor = QPlainTextEdit()
+        self._editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self._editor.setMinimumHeight(240)
+        self._editor.setPlaceholderText(
+            "def poll(ctx):\n    return 3.14   # each returned value -> a Reading")
+        self._editor.setStyleSheet(
+            "QPlainTextEdit{background:#10141c;border:1px solid #232a38;border-radius:6px;"
+            "font-family:'JetBrains Mono','Consolas',monospace;font-size:12px;}")
+        lay.addWidget(self._editor, 1)
+
+        self._hint = QLabel(_PY_SOURCE_HINT)
+        self._hint.setWordWrap(True)
+        self._hint.setStyleSheet("color:#8b95a4; font-size:11px;")
+        lay.addWidget(self._hint)
+
+        row = QHBoxLayout()
+        self._save_btn = QPushButton("Save & reload")
+        self._save_btn.setToolTip("Recompile and hot-swap the code on the running device")
+        self._save_btn.clicked.connect(self._save)
+        row.addWidget(self._save_btn)
+        self._check_btn = QPushButton("Check / run once")
+        self._check_btn.setToolTip("Run the SAVED code once (Save first to test edits)")
+        self._check_btn.clicked.connect(self._check)
+        row.addWidget(self._check_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet("color:#8b95a4; font-size:11px;")
+        lay.addWidget(self._status)
+
+    # -- actions (GUI thread) ------------------------------------------------
+    def _save(self):
+        # Let the next refresh re-surface whatever last_error the recompile produces.
+        self._shown_error = ""
+        self.controller.set_option("code", self._editor.toPlainText())
+        self._set_status("Saved — reloading on the device…", ok=True)
+
+    def _check(self):
+        self._check_btn.setEnabled(False)
+        self._set_status("Running once…", ok=None)
+        self.controller.check(self._show)
+
+    def _show(self, result):
+        self._check_btn.setEnabled(True)
+        ok = bool(getattr(result, "ok", False))
+        self._set_status(getattr(result, "summary", "Check failed."), ok=ok)
+
+    # -- sync from a fresh descriptor (build + every active_changed) ----------
+    def refresh(self, desc):
+        if desc is None:
+            return
+        code = self._code_of(desc)
+        # Don't clobber an in-progress edit: only reset the buffer when the panel
+        # isn't focused (external change — e.g. the LLM config_set path).
+        if (code is not None and not self._editor.hasFocus()
+                and code != self._editor.toPlainText()):
+            self._editor.setPlainText(code)
+        err = getattr(desc, "last_error", None) or ""
+        if err != self._shown_error:
+            self._shown_error = err
+            if err:
+                self._set_status(err, ok=False)
+            elif not self._editor.hasFocus():
+                self._set_status("", ok=None)   # error cleared
+
+    @staticmethod
+    def _code_of(desc):
+        for opt in getattr(desc, "options", ()) or ():
+            if getattr(opt, "key", None) == "code":
+                return "" if opt.value is None else str(opt.value)
+        return None
+
+    def _set_status(self, text, ok):
+        color = {True: "#7fd18b", False: "#e0807f", None: "#8b95a4"}[ok]
+        mark = {True: "✓  ", False: "✗  ", None: ""}[ok]
+        self._status.setStyleSheet(f"color:{color}; font-size:11px;")
+        self._status.setText(f"{mark}{text}")

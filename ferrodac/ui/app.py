@@ -463,6 +463,7 @@ class MainWindow(QMainWindow):
             "Scanning for devices…  ·  open “Devices” to add one"
         )
         self.manager.start()
+        self._restore_python_sources()       # rehydrate user-authored Python sources
         self._setup_control_api()
         if self._restore_last:
             self._init_session_persistence()    # restores markers, then recovers
@@ -522,6 +523,7 @@ class MainWindow(QMainWindow):
         self.hub_action = netmenu.addAction("ferroDAC Cloud…", self._open_hub)
         netmenu.addAction("External Control…", self._open_connections)
         netmenu.addAction("Connect a phone…", self._connect_phone)
+        netmenu.addAction("Add Python source…", self._add_python_source)
 
         extmenu = self.menuBar().addMenu("E&xtensions")
         extmenu.addAction("Manage extensions…", self._open_extensions)
@@ -2588,6 +2590,33 @@ class MainWindow(QMainWindow):
         dlg.raise_()
         dlg.activateWindow()
         self.statusBar().showMessage(f"Phone companion on {url}", 6000)
+
+    # -- python sources (user-authored virtual instruments) ------------------
+    def _add_python_source(self):
+        """Mint a new Python source, activate it, and open its config dialog so the
+        user can edit the code that produces its channels."""
+        try:
+            from ..devices.python_source import PythonSourceDevice, save_def
+        except Exception as exc:              # noqa: BLE001
+            self.statusBar().showMessage(f"Python source unavailable: {exc}", 6000)
+            return
+        dev = PythonSourceDevice.new()
+        save_def(dev.instance_id, dev.code)   # persist the starter so it survives restart
+        self.manager.add_user_device(dev, user=True)
+        self._open_config(dev.instance_id)    # open the code editor
+        self.statusBar().showMessage(
+            "Added a Python source — edit its code in the config dialog", 6000)
+
+    def _restore_python_sources(self):
+        """Re-mint every saved Python source at startup so a user's virtual instruments
+        survive a restart. A bad def must never block launch."""
+        try:
+            from ..devices.python_source import PythonSourceDevice
+            for dev in PythonSourceDevice.restore_all():
+                self.manager.add_user_device(dev, user=False)   # silent restore, no curate
+        except Exception:                     # noqa: BLE001
+            logging.getLogger("ferrodac").warning(
+                "python source restore failed", exc_info=True)
 
     def _open_source_config(self, source_key: str) -> None:
         """The ⚙ on a source card → open its owning device's config/control section.

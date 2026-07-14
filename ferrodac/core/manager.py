@@ -166,11 +166,51 @@ class DeviceManager(QObject):
 
         self._run_async(_connect_and_stream, on_finished=self.active_changed.emit)
 
+    def add_user_device(self, device, *, user: bool = True) -> None:
+        """Activate a device the APP minted itself (a Python source, or any
+        discoverable=False driver) — one that never came from a discovery scan. Mirrors
+        add() but injects the live object straight into _active instead of pulling it
+        from _available: the discovery worker OWNS _available and purges any entry its
+        scan didn't re-report, so a non-discovered device parked there would vanish on
+        the next tick. It must go straight to _active. user=True (an explicit mint) emits
+        device_added so the UI auto-curates its channels; pass user=False for a startup
+        restore (re-minting saved defs), which must NOT auto-curate."""
+        iid = device.instance_id
+        if iid in self._active:
+            return
+        if hasattr(device, "fingerprint") and device.uuid is None:
+            uid = self._registry.register(device.fingerprint, friendly=device.name)
+            device.set_uuid(uid)
+        self._active[iid] = device
+        if hasattr(device, "mark_connecting"):
+            device.mark_connecting()
+        self.active_changed.emit()          # _available untouched → no available_changed
+        if user:
+            self.device_added.emit(iid)
+
+        def _connect_and_stream():
+            device.connect()
+            if self._engine is not None:
+                self._engine.start_device(device)
+
+        self._run_async(_connect_and_stream, on_finished=self.active_changed.emit)
+
     def remove(self, instance_id: str) -> None:
         device = self._active.pop(instance_id, None)
         if device is None:
             return
         self.active_changed.emit()
+        # A user-minted device (Python source) persists its definition so it survives a
+        # restart; an explicit user remove must drop that def too, else it'd be re-minted
+        # on the next launch. on_forget() is the device's own cleanup hook — absent (a
+        # no-op) on hardware drivers. remove() is ALWAYS user-initiated (never a transient
+        # "device lost"), so forgetting the def here is safe.
+        forget = getattr(device, "on_forget", None)
+        if forget is not None:
+            try:
+                forget()
+            except Exception:               # noqa: BLE001 — cleanup must not block removal
+                log.exception("on_forget failed for %s", instance_id)
 
         def _stop_and_disconnect():
             if self._engine is not None:
