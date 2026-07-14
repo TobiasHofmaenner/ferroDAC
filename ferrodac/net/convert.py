@@ -13,7 +13,7 @@ import numpy as np
 from google.protobuf import json_format
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 
-from ..core.device import DeviceDescriptor, Param, Sink, SinkKind
+from ..core.device import DeviceDescriptor, Option, Param, Sink, SinkKind
 from ..core.reading import Reading
 from ..core.tag import (Marker, ORIGIN_USER, ORIGIN_DEVICE, ORIGIN_PROCESSOR,
                         ORIGIN_SYSTEM)
@@ -84,11 +84,30 @@ def descriptor_to_proto(d: DeviceDescriptor) -> pb.DeviceDescriptor:
         if p is not None and p.maximum is not None:
             sp.max = float(p.maximum)
         sinks.append(sp)
+    options = [_option_to_proto(o) for o in getattr(d, "options", ()) or ()]
     return pb.DeviceDescriptor(
         uuid=d.uuid or d.instance_id, instance_id=d.instance_id, name=d.name,
         driver=d.driver, hardware_id=d.hardware_id or "",
         firmware=d.firmware or "", software_version=_app_version(),
-        online=True, sources=sources, sinks=sinks)
+        online=True, sources=sources, sinks=sinks, options=options)
+
+
+def _option_to_proto(o) -> "pb.DeviceOption":
+    # a SECRET's current value never leaves the agent (settable, not readable, §13)
+    val = "" if o.kind == "secret" else ("" if o.value is None else str(o.value))
+    return pb.DeviceOption(
+        key=o.key, name=o.name, kind=o.kind or "choice", value=val,
+        choices=[pb.OptionChoice(value=str(c[0]), label=str(c[1]))
+                 for c in (o.choices or ())])
+
+
+def option_from_proto(op) -> Option:
+    """Wire DeviceOption -> app Option so the VIEWER can render a hub device's config
+    form (§5.3). A secret comes back with value="" (never sent) — the field is blank
+    but settable."""
+    return Option(key=op.key, name=op.name, kind=op.kind or "choice",
+                  value=(op.value or None),
+                  choices=tuple((c.value, c.label) for c in op.choices))
 
 
 # --- trace ------------------------------------------------------------------ #

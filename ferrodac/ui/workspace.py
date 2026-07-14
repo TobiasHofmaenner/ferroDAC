@@ -240,9 +240,10 @@ class Dashboard(QObject):
         self._on_route_refused = self._migrate_refused_route
         self._x_linking = False               # guard: a cross-panel X-link broadcast in flight
         self.on_chart_zoom = None             # app hook(panel, t0, t1): re-query on manual zoom
-        # control plane (§5.3): set a REMOTE device sink over the hub. app wires this to
-        # HubViewer.send_command(uuid, sink_id, value, on_result); None until connected.
+        # control plane (§5.3): set a REMOTE device sink / configure it over the hub.
+        # app wires these to HubViewer.send_command / .set_config; None until connected.
         self.send_command = None
+        self.set_config = None            # (uuid, option=(k,v)|rate_hz=|rename=) -> None
         # is_live() → are we following the live edge (vs a parked replay)? Heavy
         # processors run off the GUI thread while LIVE (so a slow analysis never
         # freezes acquisition); during a parked re-stream they run inline so the
@@ -281,6 +282,7 @@ class Dashboard(QObject):
         self._proc_counters: dict = {}
         self._remote_names: dict = {}            # uuid -> name (hub-viewer devices)
         self._remote_sinks: dict = {}            # uuid -> [app Sink] (for the control dialog)
+        self._remote_options: dict = {}          # uuid -> [app Option] (for the config dialog)
         # off-GUI processor execution (§21.3): a worker pool runs process(), with
         # at-most-one-in-flight PER processor (conflate — the latest input wins so a
         # slow analysis can't back up), and results marshal to the GUI via _derived.
@@ -920,15 +922,17 @@ class Dashboard(QObject):
                 out.add(key.split("/", 1)[0])
         return out
 
-    def add_remote_device(self, uuid: str, name: str, sources, sinks=(),
+    def add_remote_device(self, uuid: str, name: str, sources, sinks=(), options=(),
                           online: bool = True):
         """Add/refresh a hub device's sources AND control sinks as local-looking
         ports. `sources` is [(source_id, name, dtype, unit)]; `sinks` is a list of app
-        `Sink`s (the control plane §5.3 — writes route over the hub via SendCommand).
-        Returning online re-binds an existing placeholder (its routes/curves persist)."""
+        `Sink`s and `options` a list of app `Option`s (control plane §5.3 — writes go
+        over the hub via SendCommand/SetConfig). Returning online re-binds a placeholder."""
         self._remote_names[uuid] = name
         if sinks:
             self._remote_sinks[uuid] = list(sinks)      # for the remote control dialog
+        if options:
+            self._remote_options[uuid] = list(options)  # for the remote config form
         for sid, sname, dtype, unit in sources:
             key = f"{uuid}/{sid}"
             existing = self._sources.get(key)
@@ -977,7 +981,12 @@ class Dashboard(QObject):
                 self._routes[src] = [s for s in self._routes[src] if s != key]
         self._remote_names.pop(uuid, None)
         self._remote_sinks.pop(uuid, None)
+        self._remote_options.pop(uuid, None)
         self.ports_changed.emit()
+
+    def remote_options(self, uuid: str) -> list:
+        """The app `Option`s of a hub device (for the remote config form), or []."""
+        return list(self._remote_options.get(uuid, ()))
 
     def source_origin(self, key: str) -> str:
         """A source port's kind ("device" local / "remote" hub / "display" / …), so a

@@ -112,6 +112,10 @@ class ViewerServicer(rpc.ViewerServicer):
         owning agent and relays its Ack; ok=false if no agent owns it or it failed."""
         return await self.hub.send_command(request)
 
+    async def SetConfig(self, request, context):  # noqa: N802
+        """Control plane (§5.3): configure a device (option/rate/name) the hub knows."""
+        return await self.hub.send_config(request)
+
     async def WatchCatalog(self, request, context):  # noqa: N802
         q: asyncio.Queue = asyncio.Queue(maxsize=256)
         # register BEFORE snapshotting so nothing is missed in the gap; a device

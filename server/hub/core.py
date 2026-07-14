@@ -254,8 +254,35 @@ class Hub:
         finally:
             self._pending_cmds.pop(rid, None)
 
+    async def send_config(self, req) -> "pb.Ack":
+        """A viewer's SetConfig → the owning agent's down-channel as a Configure,
+        awaiting the Ack (same request_id correlation as send_command, §5.3). The new
+        state returns to viewers on the re-announced catalog descriptor."""
+        outq = self._agent_outq.get(req.device_uuid)
+        if outq is None:
+            return pb.Ack(ok=False, detail="no agent owns this device")
+        rid = _uuid.uuid4().hex
+        cfg = pb.Configure(request_id=rid, device_uuid=req.device_uuid)
+        which = req.WhichOneof("action")
+        if which == "option":
+            cfg.option.CopyFrom(req.option)
+        elif which == "rate_hz":
+            cfg.rate_hz = req.rate_hz
+        elif which == "rename":
+            cfg.rename = req.rename
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_cmds[rid] = fut
+        _offer(outq, pb.HubMessage(configure=cfg))
+        try:
+            return await asyncio.wait_for(fut, timeout=10.0)
+        except asyncio.TimeoutError:
+            return pb.Ack(request_id=rid, ok=False, detail="agent did not respond")
+        finally:
+            self._pending_cmds.pop(rid, None)
+
     def deliver_ack(self, ack) -> None:
-        """An agent's Ack came up the Ingest stream → resolve the waiting command."""
+        """An agent's Ack came up the Ingest stream → resolve the waiting command
+        or configure (both correlate by request_id in _pending_cmds)."""
         fut = self._pending_cmds.get(ack.request_id)
         if fut is not None and not fut.done():
             fut.set_result(ack)

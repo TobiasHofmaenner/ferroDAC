@@ -26,7 +26,7 @@ class HubAgent(ReconnectingClient):
     _disconnect_label = "hub"
 
     def __init__(self, addr: str, agent_id: str = "ferrodac", on_state=None,
-                 on_frame_demand=None, on_command=None):
+                 on_frame_demand=None, on_command=None, on_configure=None):
         super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
         self._outq: "asyncio.Queue | None" = None
@@ -39,6 +39,9 @@ class HubAgent(ReconnectingClient):
         # control (§5.3): (device_uuid, sink_id, value) -> (ok: bool, detail: str).
         # Runs the local device write; called off the agent loop (may block on I/O).
         self._on_command = on_command
+        # configure (§5.3): (device_uuid, action, *args) -> (ok, detail), where action
+        # is "option"/(key,value), "rate"/(hz,) or "rename"/(name,). Off-loop too.
+        self._on_configure = on_configure
         self.demanded_frames: set = set()      # {(uuid, source_id)} currently watched
 
     def _on_loop_created(self, loop) -> None:
@@ -130,6 +133,8 @@ class HubAgent(ReconnectingClient):
                                       exc_info=True)
                 elif which == "command":
                     await self._handle_command(hub_msg.command)
+                elif which == "configure":
+                    await self._handle_configure(hub_msg.configure)
                 # welcome: nothing to do
         finally:
             self.demanded_frames.clear()       # a reconnect re-sends active demand
@@ -163,6 +168,33 @@ class HubAgent(ReconnectingClient):
         if which == "text":
             return cmd.text
         return None                            # trigger (ACTION) or unset
+
+    async def _handle_configure(self, cfg) -> None:
+        """Apply a hub Configure (option/rate/rename) to the local device and Ack
+        (§5.3). The new state returns to the viewer on the re-announced descriptor."""
+        action, args = self._configure_action(cfg)
+        ok, detail = False, "no configure handler on this agent"
+        if action is None:
+            ok, detail = False, "empty configure action"
+        elif self._on_configure is not None:
+            try:
+                ok, detail = await asyncio.to_thread(
+                    self._on_configure, cfg.device_uuid, action, *args)
+            except Exception as exc:           # noqa: BLE001 — surface it in the Ack
+                ok, detail = False, str(exc)
+        self._send(pb.AgentMessage(ack=pb.Ack(
+            request_id=cfg.request_id, ok=bool(ok), detail=str(detail or ""))))
+
+    @staticmethod
+    def _configure_action(cfg):
+        which = cfg.WhichOneof("action")
+        if which == "option":
+            return "option", (cfg.option.key, cfg.option.value)
+        if which == "rate_hz":
+            return "rate", (cfg.rate_hz,)
+        if which == "rename":
+            return "rename", (cfg.rename,)
+        return None, ()
 
     async def _outgen(self):
         outq = self._outq                      # pin THIS session's queue (a late-

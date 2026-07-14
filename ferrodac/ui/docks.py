@@ -490,34 +490,99 @@ class RemoteControlDialog(QDialog):
     the effect (§7.5). Device OPTIONS over the hub (a Configure RPC) are a later
     milestone — this surfaces control inputs only."""
 
-    def __init__(self, uuid, name, sinks, send_command, parent=None):
+    def __init__(self, uuid, name, sinks, options, send_command, send_config,
+                 parent=None):
         super().__init__(parent)
         self._uuid = uuid
         self._send = send_command
-        self.setWindowTitle(f"Control · {name}")
+        self._config = send_config
+        self.setWindowTitle(f"Config · {name}")
         lay = QVBoxLayout(self)
         head = QLabel(f"{name}   ·   hub device")
         head.setStyleSheet("font-weight:700;")
         lay.addWidget(head)
-        note = QLabel("Commands go to the owning agent over the hub; the device's "
-                      "readback channel shows the result on the chart.")
+        note = QLabel("Changes are applied on the owning agent over the hub; the "
+                      "readback / re-announced descriptor shows the result.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#8b95a4; font-size:11px;")
         lay.addWidget(note)
-        if not sinks:
-            empty = QLabel("This device exposes no control inputs.")
+
+        nrow = QHBoxLayout()                          # rename (§5.3 configure)
+        nrow.addWidget(QLabel("Name"))
+        self._name_edit = QLineEdit(name)
+        nrow.addWidget(self._name_edit, 1)
+        rn = QPushButton("Rename")
+        rn.clicked.connect(
+            lambda: self._configure(rename=self._name_edit.text().strip() or name))
+        nrow.addWidget(rn)
+        lay.addLayout(nrow)
+
+        if options:                                   # config params (Configure RPC)
+            lay.addWidget(self._section("Options"))
+            oform = QFormLayout()
+            for o in options:
+                oform.addRow(o.name, self._option_widget(o))
+            lay.addLayout(oform)
+
+        if sinks:                                     # control inputs (SendCommand)
+            lay.addWidget(self._section("Controls"))
+            sform = QFormLayout()
+            for s in sinks:
+                sform.addRow(s.name, self._sink_widget(s))
+            lay.addLayout(sform)
+
+        if not sinks and not options:
+            empty = QLabel("This device exposes no controls or options.")
             empty.setStyleSheet("color:#8b95a4;")
             lay.addWidget(empty)
-        form = QFormLayout()
-        for s in sinks:
-            form.addRow(s.name, self._sink_widget(s))
-        lay.addLayout(form)
+
         row = QHBoxLayout()
         row.addStretch(1)
         close = QPushButton("Close")
         close.clicked.connect(self.accept)
         row.addWidget(close)
         lay.addLayout(row)
+
+    @staticmethod
+    def _section(text) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet("font-weight:700; margin-top:6px; color:#c7d0dc;")
+        return lbl
+
+    def _configure(self, **kw) -> None:
+        if self._config is not None:
+            self._config(self._uuid, **kw)
+
+    def _option_widget(self, o) -> QWidget:
+        if o.kind == "choice":
+            combo = QComboBox()
+            vals = []
+            for c in (o.choices or ()):
+                combo.addItem(str(c[1]), c[0])
+                vals.append(c[0])
+            if o.value in vals:
+                combo.setCurrentIndex(vals.index(o.value))
+            combo.currentIndexChanged.connect(
+                lambda _i, cb=combo, key=o.key:
+                self._configure(option=(key, cb.currentData())))
+            return combo
+        edit = QLineEdit("" if o.value is None else str(o.value))   # text / secret
+        if o.kind == "secret":
+            edit.setEchoMode(QLineEdit.Password)
+            edit.setPlaceholderText("(unchanged)")
+        apply = QPushButton("Apply")
+
+        def _apply(_=False, key=o.key, e=edit):
+            self._configure(option=(key, e.text()))
+
+        apply.clicked.connect(_apply)
+        edit.returnPressed.connect(_apply)
+        host = QWidget()
+        cell = QHBoxLayout(host)
+        cell.setContentsMargins(0, 0, 0, 0)
+        cell.addWidget(edit, 1)
+        cell.addWidget(apply)
+        return host
 
     def _write(self, sink_id, value) -> None:
         if self._send is not None:

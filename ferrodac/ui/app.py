@@ -2435,7 +2435,8 @@ class MainWindow(QMainWindow):
                 dlg.raise_(); dlg.activateWindow(); return
             dlg = RemoteControlDialog(
                 did, self.dashboard.remote_name(did),
-                self.dashboard.remote_sinks(did), self.dashboard.send_command, self)
+                self.dashboard.remote_sinks(did), self.dashboard.remote_options(did),
+                self.dashboard.send_command, self.dashboard.set_config, self)
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
             dlg.destroyed.connect(lambda *_: self._dialogs.pop(source_key, None))
             self._dialogs[source_key] = dlg

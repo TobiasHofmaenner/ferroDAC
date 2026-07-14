@@ -34,6 +34,39 @@ def test_sink_from_proto_roundtrips_every_kind():
     assert a.kind is SinkKind.ACTION
 
 
+def test_option_to_from_proto_and_secrets_are_stripped():
+    from ferrodac.core.device import Option
+    # choice + text round-trip
+    o = Option(key="mode", name="Mode", kind="choice", value="slow",
+               choices=(("fast", "Fast"), ("slow", "Slow")))
+    p = convert._option_to_proto(o)
+    assert p.value == "slow" and {c.value for c in p.choices} == {"fast", "slow"}
+    back = convert.option_from_proto(p)
+    assert back.kind == "choice" and back.value == "slow"
+    assert back.choices == (("fast", "Fast"), ("slow", "Slow"))
+    # a SECRET's current value NEVER goes on the wire (settable, not readable)
+    sec = convert._option_to_proto(Option(key="auth", name="Key", kind="secret",
+                                          value="hunter2"))
+    assert sec.value == "" and convert.option_from_proto(sec).value is None
+
+
+def test_remote_options_surface_for_the_config_dialog(qapp):
+    from ferrodac.core.engine import Engine
+    from ferrodac.core.manager import DeviceManager
+    from ferrodac.core.device import Option
+    from ferrodac.ui.workspace import Dashboard, WorkspaceArea
+
+    dash = Dashboard(WorkspaceArea(), Engine(),
+                     DeviceManager([], engine=Engine(), registry=None))
+    opts = [Option(key="mode", name="Mode", kind="choice", value="fast",
+                   choices=(("fast", "Fast"),))]
+    dash.add_remote_device("dev-uuid", "Dev", [("x", "X", "float", "")],
+                           sinks=(), options=opts)
+    assert [o.key for o in dash.remote_options("dev-uuid")] == ["mode"]
+    dash.remove_remote_device("dev-uuid")
+    assert dash.remote_options("dev-uuid") == []
+
+
 def test_remote_sink_becomes_a_writable_port_routed_over_the_hub(qapp):
     from ferrodac.core.engine import Engine
     from ferrodac.core.manager import DeviceManager

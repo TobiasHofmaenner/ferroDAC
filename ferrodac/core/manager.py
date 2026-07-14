@@ -215,6 +215,39 @@ class DeviceManager(QObject):
             self.provenance_changed.emit()
         return True, ""
 
+    # -- synchronous configure (control plane §5.3, remote SetConfig) ---------
+    # The agent runs these OFF its loop and Acks (ok, detail). They emit the same
+    # signals as the local config dialog, so the re-announced descriptor carries the
+    # new state back to the viewer (the config readback).
+    def set_option_sync(self, instance_id: str, key: str, value) -> "tuple[bool, str]":
+        device = self._active.get(instance_id) or self._available.get(instance_id)
+        if device is None or not hasattr(device, "set_option"):
+            return False, "device not found"
+        try:
+            device.set_option(key, value)        # inline (agent is already off-loop)
+        except Exception as exc:                 # noqa: BLE001 — reason → Ack
+            return False, str(exc)
+        self.active_changed.emit()
+        self.available_changed.emit()
+        return True, ""
+
+    def set_rate_sync(self, instance_id: str, hz: float) -> "tuple[bool, str]":
+        device = self._active.get(instance_id)
+        if device is None or not hasattr(device, "set_rate_hz"):
+            return False, "device not active or fixed-rate"
+        device.set_rate_hz(float(hz))
+        self.active_changed.emit()
+        return True, ""
+
+    def rename_sync(self, instance_id: str, name: str) -> "tuple[bool, str]":
+        device = self._active.get(instance_id) or self._available.get(instance_id)
+        if device is None or not hasattr(device, "set_name"):
+            return False, "device not found"
+        device.set_name(name)
+        self.active_changed.emit()
+        self.available_changed.emit()
+        return True, ""
+
     def set_rate(self, instance_id: str, hz: float) -> None:
         device = self._active.get(instance_id)
         if device is None or not hasattr(device, "set_rate_hz"):

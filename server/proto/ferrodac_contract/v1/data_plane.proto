@@ -96,7 +96,24 @@ message DeviceDescriptor {
   string software_version = 7;
   bool online = 8;               // hub liveness; false = greyed placeholder (§6.1)
   repeated SourcePort sources = 9;
-  repeated SinkPort sinks = 10;  // visible but INERT in milestone 1 (control reserved)
+  repeated SinkPort sinks = 10;  // control inputs (§5.3): set via Viewer.SendCommand
+  repeated DeviceOption options = 11;  // config params (§5.3): set via Viewer.SetConfig
+}
+
+// A device configuration option — parameterises the device (NOT routable, unlike a
+// Sink). `kind`: "choice" (pick from `choices`) | "text" | "secret". A SECRET's
+// current value is NEVER put on the wire (settable, not readable).
+message DeviceOption {
+  string key = 1;
+  string name = 2;
+  string kind = 3;
+  string value = 4;              // current value ("" for secrets)
+  repeated OptionChoice choices = 5;   // for kind == "choice"
+}
+
+message OptionChoice {
+  string value = 1;
+  string label = 2;
 }
 
 // --------------------------------------------------------------------------- //
@@ -215,6 +232,24 @@ message Command {
   }
 }
 
+message OptionSet {
+  string key = 1;
+  string value = 2;
+}
+
+// Control plane §5.3: configure a device (option / rate / name), hub -> agent. The
+// hub stamps request_id; the agent applies it locally and Acks up the stream. The
+// new state is observed via the re-announced descriptor (the config readback).
+message Configure {
+  string request_id = 1;
+  string device_uuid = 2;
+  oneof action {
+    OptionSet option = 3;
+    double rate_hz = 4;
+    string rename = 5;
+  }
+}
+
 // Up the Session stream (agent -> hub).
 message AgentMessage {
   oneof msg {
@@ -240,8 +275,9 @@ message HubMessage {
   oneof msg {
     Welcome welcome = 1;         // handshake reply
     Ack ack = 2;
-    Command command = 3;         // RESERVED — unused in milestone 1
+    Command command = 3;         // control §5.3: set a sink
     FrameDemand frame_demand = 4;
+    Configure configure = 5;     // control §5.3: set an option / rate / name
   }
 }
 
@@ -303,6 +339,18 @@ message CommandRequest {
   }
 }
 
+// A viewer asking the hub to configure a (possibly remote) device — the Configure
+// analog of CommandRequest. Routed to the owning agent, the agent's Ack relayed.
+message ConfigureRequest {
+  string token = 1;              // reserved auth seam (carried, enforcement is milestone 2)
+  string device_uuid = 2;
+  oneof action {
+    OptionSet option = 3;
+    double rate_hz = 4;
+    string rename = 5;
+  }
+}
+
 service Viewer {
   rpc GetInfo(GetInfoRequest) returns (HubInfo);
   rpc GetCatalog(CatalogRequest) returns (Catalog);
@@ -311,6 +359,9 @@ service Viewer {
   // Control plane: set a sink on a device the hub knows (routes to its agent,
   // waits for the agent's Ack). ok=false if no agent owns it or the write failed.
   rpc SendCommand(CommandRequest) returns (Ack);
+  // Control plane: configure a device (option / rate / name) — same routing as
+  // SendCommand. The new state comes back on the re-announced catalog descriptor.
+  rpc SetConfig(ConfigureRequest) returns (Ack);
   // Live video frames for EXPLICITLY named image sources. Opening this stream
   // IS the demand signal: the hub tells the owning agent to start encoding
   // while >=1 watcher holds a ref, stop on the last close. Latest-wins

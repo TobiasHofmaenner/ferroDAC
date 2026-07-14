@@ -143,7 +143,8 @@ class HubController(QObject):
         if as_agent:
             self._agent = HubAgent(addr, agent_id=aid,
                                    on_state=self._state_cb("agent"),
-                                   on_command=self._on_agent_command)
+                                   on_command=self._on_agent_command,
+                                   on_configure=self._on_agent_configure)
             self._agent.start()
             self._agent.set_devices(self.manager.active_descriptors())
             # per-reading protobuf conversion runs on its own bus pump, not the
@@ -179,6 +180,7 @@ class HubController(QObject):
             self.dashboard.ports_changed.connect(self._recompute_frame_wants)
             self._recompute_frame_wants()
             self.dashboard.send_command = self._send_remote_command   # control §5.3
+            self.dashboard.set_config = self._send_remote_config      # configure §5.3
             self._viewer.start()
         # hub READ tier + backup admin: a sync channel, wired whenever connected
         # (independent of agent/viewer) — the read tier back-reads history a wiped
@@ -294,6 +296,7 @@ class HubController(QObject):
             if self._on_projects is not None:
                 self._on_projects()
         self.dashboard.send_command = None       # control seam gone with the viewer
+        self.dashboard.set_config = None
         self.dashboard.clear_remote_devices()
         self._link = {}
         if self.addr:
@@ -446,6 +449,32 @@ class HubController(QObject):
                 self.status.emit(f"⚠ command failed: {detail}")
         self._viewer.send_command(device_uuid, sink_id, value, on_result=on_result)
 
+    def _send_remote_config(self, device_uuid, **kw):
+        """Dashboard → configure a REMOTE device over the hub (§5.3). Non-blocking; a
+        failure surfaces on the status line. `kw`: option=(key,value) | rate_hz | rename."""
+        if self._viewer is None:
+            return
+
+        def on_result(ok, detail):
+            if not ok:
+                self.status.emit(f"⚠ configure failed: {detail}")
+        self._viewer.set_config(device_uuid, on_result=on_result, **kw)
+
+    def _on_agent_configure(self, device_uuid, action, *args):
+        """A hub Configure for a device THIS agent owns → apply locally (§5.3). Agent
+        worker thread; returns (ok, detail) for the Ack. The re-announced descriptor
+        carries the new state back to the viewer."""
+        inst = self.manager.instance_for_uuid(device_uuid)
+        if inst is None:
+            return False, "device not on this agent"
+        if action == "option":
+            return self.manager.set_option_sync(inst, args[0], args[1])
+        if action == "rate":
+            return self.manager.set_rate_sync(inst, args[0])
+        if action == "rename":
+            return self.manager.rename_sync(inst, args[0])
+        return False, f"unknown configure action: {action}"
+
     def _on_agent_command(self, device_uuid, sink_id, value):
         """A hub command for a device THIS agent owns → run the local sink write
         (§5.3). Called on the agent's worker thread (off its loop), so the blocking
@@ -583,8 +612,9 @@ class HubController(QObject):
                         convert._DTYPE_FROM_PROTO.get(s.dtype, "float"), s.unit)
                        for s in dev.sources]
             sinks = [convert.sink_from_proto(sk) for sk in dev.sinks]   # control §5.3
+            options = [convert.option_from_proto(o) for o in dev.options]  # configure
             self.dashboard.add_remote_device(dev.uuid, dev.name, sources, sinks,
-                                              online=dev.online)
+                                              options, online=dev.online)
         elif etype == "REMOVED":
             self.dashboard.set_remote_offline(dev.uuid)
 

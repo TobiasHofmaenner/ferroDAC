@@ -69,6 +69,38 @@ class HubViewer(ReconnectingClient):
 
         asyncio.ensure_future(go())
 
+    def set_config(self, device_uuid, *, option=None, rate_hz=None, rename=None,
+                   on_result=None) -> None:
+        """Configure a hub device (§5.3) — pass exactly ONE of option=(key, value),
+        rate_hz=float, rename=str. Non-blocking; on_result(ok, detail) on the loop."""
+        call_soon_safe(self._loop, self._do_set_config, str(device_uuid),
+                       option, rate_hz, rename, on_result)
+
+    def _do_set_config(self, device_uuid, option, rate_hz, rename, on_result) -> None:
+        if self._stub is None:
+            if on_result is not None:
+                on_result(False, "not connected to the hub")
+            return
+        req = pb.ConfigureRequest(device_uuid=device_uuid)
+        if option is not None:
+            req.option.key, req.option.value = str(option[0]), str(option[1])
+        elif rate_hz is not None:
+            req.rate_hz = float(rate_hz)
+        elif rename is not None:
+            req.rename = str(rename)
+        stub = self._stub
+
+        async def go():
+            try:
+                ack = await stub.SetConfig(req)
+                res = (bool(ack.ok), str(ack.detail or ""))
+            except Exception as exc:           # noqa: BLE001 — surface to the caller
+                res = (False, str(exc))
+            if on_result is not None:
+                on_result(*res)
+
+        asyncio.ensure_future(go())
+
     @staticmethod
     def _set_command_value(req, value) -> None:
         """Fill the CommandRequest value oneof. bool BEFORE int (bool subclasses int)."""
