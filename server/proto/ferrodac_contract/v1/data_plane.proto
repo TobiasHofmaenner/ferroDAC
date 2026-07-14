@@ -84,6 +84,11 @@ message SinkPort {
   optional double min = 5;
   optional double max = 6;
   repeated string options = 7;   // for ENUM kind
+  oneof value {                  // CURRENT value (readback) — so a remote config UI
+    double scalar = 8;           // shows real state (a TOGGLE ticked, a SETPOINT set),
+    bool boolean = 9;            // not a default. Unset for ACTION sinks.
+    string text = 10;
+  }
 }
 
 message DeviceDescriptor {

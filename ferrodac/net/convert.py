@@ -48,7 +48,10 @@ def sink_from_proto(sp) -> Sink:
             minimum=(sp.min if sp.HasField("min") else None),
             maximum=(sp.max if sp.HasField("max") else None),
             options=tuple(sp.options)),)
-    return Sink(id=sp.id, name=sp.name, kind=kind, params=params)
+    which = sp.WhichOneof("value")               # current value → the config UI shows it
+    value = (sp.scalar if which == "scalar" else sp.boolean if which == "boolean"
+             else sp.text if which == "text" else None)
+    return Sink(id=sp.id, name=sp.name, kind=kind, params=params, value=value)
 
 
 def _app_version() -> str:
@@ -83,6 +86,16 @@ def descriptor_to_proto(d: DeviceDescriptor) -> pb.DeviceDescriptor:
             sp.min = float(p.minimum)
         if p is not None and p.maximum is not None:
             sp.max = float(p.maximum)
+        if sk.value is not None and sk.kind != SinkKind.ACTION:   # current value (readback)
+            if sk.kind == SinkKind.TOGGLE:
+                sp.boolean = bool(sk.value)
+            elif sk.kind == SinkKind.ENUM:
+                sp.text = str(sk.value)
+            else:
+                try:
+                    sp.scalar = float(sk.value)
+                except (TypeError, ValueError):
+                    pass
         sinks.append(sp)
     options = [_option_to_proto(o) for o in getattr(d, "options", ()) or ()]
     return pb.DeviceDescriptor(

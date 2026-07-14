@@ -33,6 +33,20 @@ def test_sink_from_proto_roundtrips_every_kind():
     a = convert.sink_from_proto(pb.SinkPort(id="zero", name="Zero", kind=pb.ACTION))
     assert a.kind is SinkKind.ACTION
 
+    # CURRENT value (readback) travels so the remote config UI shows real state, not a
+    # default — a TOGGLE that is ON must come back True (the reported-HV-off bug).
+    on = pb.SinkPort(id="hv", name="HV", kind=pb.TOGGLE)
+    on.boolean = True
+    assert convert.sink_from_proto(on).value is True
+    off = pb.SinkPort(id="hv", name="HV", kind=pb.TOGGLE)
+    off.boolean = False
+    assert convert.sink_from_proto(off).value is False    # off ≠ unknown
+    setp = pb.SinkPort(id="v", name="V", kind=pb.SETPOINT)
+    setp.scalar = 12.0
+    assert convert.sink_from_proto(setp).value == 12.0
+    assert convert.sink_from_proto(pb.SinkPort(id="v", name="V",
+                                               kind=pb.SETPOINT)).value is None  # unset
+
 
 def test_option_to_from_proto_and_secrets_are_stripped():
     from ferrodac.core.device import Option

@@ -49,9 +49,10 @@ async def main() -> int:
             return False, "unknown device"
         try:
             psu.write(sink_id, value)
-            return True, ""
         except Exception as exc:                        # noqa: BLE001
             return False, str(exc)
+        agent.announce(psu.describe())                  # mirror active_changed → re-announce
+        return True, ""
 
     agent = HubAgent(addr, agent_id="ctrl-agent", on_command=on_command)
     agent.start()
@@ -85,10 +86,19 @@ async def main() -> int:
     assert next(s.value for s in psu.describe().sinks if s.id == "voltage") == 12.0
     print("✓ SETPOINT command: voltage → 12 V, captured on the device's readback")
 
-    # 3) TOGGLE.
+    # 3) TOGGLE — and the re-announced descriptor carries the sink's CURRENT value, so
+    #    a viewer's config UI shows real state (a ticked toggle), not a default.
     ack = await send("enable", boolean=True)
     assert ack.ok and psu._sink_values["enable"] is True
-    print("✓ TOGGLE command: enable → on")
+    for _ in range(100):
+        cat = await asyncio.to_thread(lambda: stub.GetCatalog(pb.CatalogRequest()))
+        dv2 = next((x for x in cat.devices if x.uuid == UUID), None)
+        en = next((s for s in dv2.sinks if s.id == "enable"), None) if dv2 else None
+        if en is not None and en.WhichOneof("value") == "boolean" and en.boolean:
+            break
+        await asyncio.sleep(0.05)
+    assert en is not None and en.boolean is True, "sink readback value not on the wire"
+    print("✓ TOGGLE command: enable → on, current value visible on the descriptor")
 
     # 4) the setpoint is CLAMPED to the sink's declared range (0–30 V) — safety.
     ack = await send("voltage", scalar=100.0)
