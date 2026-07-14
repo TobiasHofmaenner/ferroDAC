@@ -63,8 +63,14 @@ class LocalApiServer:
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> int:
+        # log_config=None: do NOT let uvicorn run logging.config.dictConfig. Its default
+        # config builds a 'default' formatter (uvicorn.logging.DefaultFormatter) that can't
+        # be configured in the frozen, console-less Windows build (no sys.stdout/stderr, and
+        # the frozen importer can't resolve the formatter's dotted path) → the enable step
+        # failed with "Unable to configure formatter 'default'". We use the app's own logging;
+        # log_level/access_log below are still honoured (they don't depend on log_config).
         config = uvicorn.Config(self._app, host=self._host, port=self._req_port,
-                                log_level="warning", access_log=False)
+                                log_level="warning", access_log=False, log_config=None)
         self._server = uvicorn.Server(config)
         self._server.install_signal_handlers = lambda: None   # not on the main thread
         self._thread = threading.Thread(target=self._serve, name="fd-localapi",
