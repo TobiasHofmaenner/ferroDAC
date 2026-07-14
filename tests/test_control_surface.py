@@ -94,7 +94,7 @@ def test_build_control_surface_registers_the_cheap_tier():
     from ferrodac.ui.appcontrol import build_control_surface
 
     app = types.SimpleNamespace(
-        _gui_bridge=types.SimpleNamespace(post_and_wait=lambda fn: fn()))
+        _gui_bridge=types.SimpleNamespace(post_and_wait=lambda fn, **kw: fn()))
     s = build_control_surface(app)
     by = {v["name"]: v for v in s.describe("admin")["verbs"]}
     assert {"device.list", "device.add", "device.set_sink", "hub.connect",

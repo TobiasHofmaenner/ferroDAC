@@ -106,22 +106,33 @@ class GuiBridge(QObject):
         """Fire-and-forget: run fn() on the GUI thread."""
         self._call.emit(fn)
 
-    def post_and_wait(self, fn, timeout: float = 5.0):
+    def post_and_wait(self, fn, timeout: float = 5.0, reraise: bool = False):
         """Run fn() on the GUI thread and BLOCK the caller until it finishes (or
         `timeout`). Returns fn()'s result. Used by the replay pump so a worker
         never renders faster than the GUI can paint — natural backpressure.
-        Never call from the GUI thread (it would deadlock)."""
+        Never call from the GUI thread (it would deadlock).
+
+        With reraise=True an exception from fn() is captured and re-raised on the
+        CALLER's thread instead of being logged-and-swallowed (which makes the caller
+        see None). The control surface uses this so a GUI-thread verb handler's
+        ControlError actually reaches the connector rather than becoming a silent null."""
         done = threading.Event()
         box: dict = {}
 
         def wrapped():
             try:
                 box["v"] = fn()
+            except Exception as exc:             # noqa: BLE001
+                box["exc"] = exc
+                if not reraise:                  # legacy: let _run log-and-swallow
+                    raise
             finally:
                 done.set()
 
         self._call.emit(wrapped)
         done.wait(timeout)
+        if reraise and "exc" in box:
+            raise box["exc"]
         return box.get("v")
 
 
