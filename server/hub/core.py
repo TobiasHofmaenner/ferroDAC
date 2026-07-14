@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+import uuid as _uuid
 
 from google.protobuf import json_format
 
@@ -100,6 +101,7 @@ class Hub:
         self._frame_subs: set[Subscriber] = set()   # WatchFrames watchers (§9)
         self._frame_demand: dict = {}               # (uuid, source) -> watcher count
         self._agent_outq: dict = {}                 # device uuid -> Ingest out-queue
+        self._pending_cmds: dict = {}               # request_id -> Future[Ack] (control §5.3)
         self._watchers: set[asyncio.Queue] = set()
         # Tags (DESIGN §7.3): a durable, reliable store keyed by id, merged
         # last-write-wins on version, tombstones kept so deletes propagate.
@@ -215,6 +217,48 @@ class Hub:
 
     def unregister_agent(self, uuid: str) -> None:
         self._agent_outq.pop(uuid, None)
+        for rid, fut in list(self._pending_cmds.items()):   # agent gone → fail its commands
+            if not fut.done():
+                fut.set_result(pb.Ack(request_id=rid, ok=False,
+                                      detail="agent disconnected"))
+
+    # -- control plane (DESIGN §5.3 / §7.5): route a command to the owning agent -
+    async def send_command(self, req) -> "pb.Ack":
+        """A viewer's SendCommand → the owning agent's Ingest down-channel, awaiting
+        the agent's Ack (correlated by request_id). Milestone-1 transport: `req.token`
+        is carried but not yet enforced (RBAC is milestone 2). The actual device
+        effect is observed via the sink's READBACK source (§7.5), not this Ack —
+        the Ack only says the command reached a live agent and was accepted."""
+        outq = self._agent_outq.get(req.device_uuid)
+        if outq is None:
+            return pb.Ack(ok=False, detail="no agent owns this device")
+        rid = _uuid.uuid4().hex
+        cmd = pb.Command(request_id=rid, device_uuid=req.device_uuid,
+                         sink_id=req.sink_id)
+        which = req.WhichOneof("value")             # copy the value arm the viewer set
+        if which == "scalar":
+            cmd.scalar = req.scalar
+        elif which == "boolean":
+            cmd.boolean = req.boolean
+        elif which == "text":
+            cmd.text = req.text
+        elif which == "trigger":
+            cmd.trigger = req.trigger
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_cmds[rid] = fut
+        _offer(outq, pb.HubMessage(command=cmd))
+        try:
+            return await asyncio.wait_for(fut, timeout=10.0)
+        except asyncio.TimeoutError:
+            return pb.Ack(request_id=rid, ok=False, detail="agent did not respond")
+        finally:
+            self._pending_cmds.pop(rid, None)
+
+    def deliver_ack(self, ack) -> None:
+        """An agent's Ack came up the Ingest stream → resolve the waiting command."""
+        fut = self._pending_cmds.get(ack.request_id)
+        if fut is not None and not fut.done():
+            fut.set_result(ack)
 
     def add_frame_watcher(self, sub: Subscriber) -> None:
         self._frame_subs.add(sub)

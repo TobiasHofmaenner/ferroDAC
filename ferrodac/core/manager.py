@@ -197,6 +197,24 @@ class DeviceManager(QObject):
 
         self._run_async(lambda: device.write(sink_id, value), on_finished=_finished)
 
+    def write_sync(self, instance_id: str, sink_id: str, value=None) -> "tuple[bool, str]":
+        """Synchronous sink write returning (ok, detail) — the control plane's remote
+        command path (§5.3): the agent runs this OFF its loop (so a blocking device
+        write can't stall the session) and Acks the result. Emits active_changed /
+        provenance so local views and the device's readback source update exactly like
+        a UI write. Not for the GUI thread — device.write blocks on the I/O lock."""
+        device = self._active.get(instance_id)
+        if device is None:
+            return False, "device not active"
+        try:
+            device.write(sink_id, value)
+        except Exception as exc:                # noqa: BLE001 — the reason goes in the Ack
+            return False, str(exc)
+        self.active_changed.emit()
+        if device.take_provenance_dirty():
+            self.provenance_changed.emit()
+        return True, ""
+
     def set_rate(self, instance_id: str, hz: float) -> None:
         device = self._active.get(instance_id)
         if device is None or not hasattr(device, "set_rate_hz"):

@@ -40,6 +40,47 @@ class HubViewer(ReconnectingClient):
         self._stub = None                      # this session's ViewerStub
 
     # -- public API (any thread) ----------------------------------------------
+    def send_command(self, device_uuid, sink_id, value, on_result=None) -> None:
+        """Set a control sink on a device the hub knows (§5.3). NON-BLOCKING: the
+        SendCommand RPC runs on the viewer loop and `on_result(ok: bool, detail:
+        str)` fires on that thread when the hub relays the agent's Ack (the Qt side
+        marshals to the GUI). Control must never freeze the UI. `value`: bool→TOGGLE,
+        number→SETPOINT, str→ENUM, None→ACTION trigger."""
+        call_soon_safe(self._loop, self._do_send_command,
+                       str(device_uuid), str(sink_id), value, on_result)
+
+    def _do_send_command(self, device_uuid, sink_id, value, on_result) -> None:
+        if self._stub is None:
+            if on_result is not None:
+                on_result(False, "not connected to the hub")
+            return
+        req = pb.CommandRequest(device_uuid=device_uuid, sink_id=sink_id)
+        self._set_command_value(req, value)
+        stub = self._stub
+
+        async def go():
+            try:
+                ack = await stub.SendCommand(req)
+                res = (bool(ack.ok), str(ack.detail or ""))
+            except Exception as exc:           # noqa: BLE001 — surface to the caller
+                res = (False, str(exc))
+            if on_result is not None:
+                on_result(*res)
+
+        asyncio.ensure_future(go())
+
+    @staticmethod
+    def _set_command_value(req, value) -> None:
+        """Fill the CommandRequest value oneof. bool BEFORE int (bool subclasses int)."""
+        if value is None:
+            req.trigger = True                 # ACTION sink — no value
+        elif isinstance(value, bool):
+            req.boolean = value
+        elif isinstance(value, (int, float)):
+            req.scalar = float(value)
+        else:
+            req.text = str(value)
+
     def set_frame_refs(self, refs: set) -> None:
         """Replace the watched camera set. Thread-safe; a no-op when unchanged.
         The stream restarts with the new refs (grpc has no re-subscribe on a

@@ -200,8 +200,9 @@ message Ack {
   string detail = 3;
 }
 
-// RESERVED for the control milestone — the shape exists so the down channel is
-// ready; the hub never sends this in milestone 1.
+// The control plane's down-channel message: hub -> agent, "set this device sink".
+// The hub stamps request_id and forwards the value the viewer supplied; the agent
+// executes it locally (DeviceManager.write) and replies with an Ack up the stream.
 message Command {
   string request_id = 1;
   string device_uuid = 2;
@@ -222,6 +223,7 @@ message AgentMessage {
     ReadingBatch readings = 3;
     Retire retire = 4;
     Heartbeat heartbeat = 5;
+    Ack ack = 6;                 // control: result of a Command (correlated by request_id)
   }
 }
 
@@ -287,11 +289,28 @@ message SubscribeRequest {
   repeated SourceRef sources = 2;  // empty = subscribe to everything
 }
 
+// A viewer asking the hub to set a control sink on a (possibly remote) device.
+// The hub routes it to the owning agent as a Command and relays the agent's Ack.
+message CommandRequest {
+  string token = 1;              // reserved auth seam (carried, enforcement is milestone 2)
+  string device_uuid = 2;
+  string sink_id = 3;
+  oneof value {
+    double scalar = 4;
+    bool boolean = 5;
+    string text = 6;
+    bool trigger = 7;            // for ACTION sinks
+  }
+}
+
 service Viewer {
   rpc GetInfo(GetInfoRequest) returns (HubInfo);
   rpc GetCatalog(CatalogRequest) returns (Catalog);
   rpc WatchCatalog(CatalogRequest) returns (stream CatalogEvent);
   rpc Subscribe(SubscribeRequest) returns (stream ReadingBatch);
+  // Control plane: set a sink on a device the hub knows (routes to its agent,
+  // waits for the agent's Ack). ok=false if no agent owns it or the write failed.
+  rpc SendCommand(CommandRequest) returns (Ack);
   // Live video frames for EXPLICITLY named image sources. Opening this stream
   // IS the demand signal: the hub tells the owning agent to start encoding
   // while >=1 watcher holds a ref, stop on the last close. Latest-wins

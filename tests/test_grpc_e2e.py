@@ -15,6 +15,7 @@ grpc = pytest.importorskip("grpc")
 
 # server/tests scripts on the path (see conftest); each has async def main()→int.
 E2E = [
+    "control_e2e",  # §5.3 control plane: viewer→hub→agent Command/Ack + readback + clamp
     "sync_e2e",     # sync mirror + live tail + read tier (ListSources/Coverage/Query/ReadRaw/Trace)
     "video_sync_e2e",  # §9.3 ph3: segment sync mirror + live tail + on-demand backfill (byte-exact)
     "e2e",          # agent → hub → viewer: transparent remote device, subscribe, retire

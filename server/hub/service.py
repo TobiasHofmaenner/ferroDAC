@@ -68,6 +68,8 @@ class IngestServicer(rpc.IngestServicer):
                         self.hub.retire(msg.retire.device_uuid)
                         self.hub.unregister_agent(msg.retire.device_uuid)
                         mine.discard(msg.retire.device_uuid)
+                    elif which == "ack":
+                        self.hub.deliver_ack(msg.ack)   # control: command result (§5.3)
                     elif which == "heartbeat":
                         pass
             finally:
@@ -104,6 +106,11 @@ class ViewerServicer(rpc.ViewerServicer):
 
     async def GetCatalog(self, request, context):  # noqa: N802
         return pb.Catalog(devices=self.hub.snapshot())
+
+    async def SendCommand(self, request, context):  # noqa: N802
+        """Control plane (§5.3): set a sink on a device the hub knows. Routes to the
+        owning agent and relays its Ack; ok=false if no agent owns it or it failed."""
+        return await self.hub.send_command(request)
 
     async def WatchCatalog(self, request, context):  # noqa: N802
         q: asyncio.Queue = asyncio.Queue(maxsize=256)

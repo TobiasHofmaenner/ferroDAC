@@ -142,7 +142,8 @@ class HubController(QObject):
         self._collab_actor = name or aid          # presence/cursor label
         if as_agent:
             self._agent = HubAgent(addr, agent_id=aid,
-                                   on_state=self._state_cb("agent"))
+                                   on_state=self._state_cb("agent"),
+                                   on_command=self._on_agent_command)
             self._agent.start()
             self._agent.set_devices(self.manager.active_descriptors())
             # per-reading protobuf conversion runs on its own bus pump, not the
@@ -430,6 +431,16 @@ class HubController(QObject):
     _FRAME_DOC_MAX_PX = 960
     _FRAME_DOC_MIN_DT = 1.0 / 8      # ≤8 fps
     _FRAME_DOC_QUALITY = 80
+
+    def _on_agent_command(self, device_uuid, sink_id, value):
+        """A hub command for a device THIS agent owns → run the local sink write
+        (§5.3). Called on the agent's worker thread (off its loop), so the blocking
+        device write is safe here; returns (ok, detail) for the Ack. The device's
+        readback source captures the actual effect (§7.5)."""
+        inst = self.manager.instance_for_uuid(device_uuid)
+        if inst is None:
+            return False, "device not on this agent"
+        return self.manager.write_sync(inst, sink_id, value)
 
     def _feed_agent(self, batch) -> None:
         if self._agent is None:

@@ -26,7 +26,7 @@ class HubAgent(ReconnectingClient):
     _disconnect_label = "hub"
 
     def __init__(self, addr: str, agent_id: str = "ferrodac", on_state=None,
-                 on_frame_demand=None):
+                 on_frame_demand=None, on_command=None):
         super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
         self._outq: "asyncio.Queue | None" = None
@@ -36,6 +36,9 @@ class HubAgent(ReconnectingClient):
         # (uuid, source_id, active) — viewers started/stopped watching a camera
         # (§9). Called on the AGENT's asyncio thread; the wirer marshals.
         self._on_frame_demand = on_frame_demand
+        # control (§5.3): (device_uuid, sink_id, value) -> (ok: bool, detail: str).
+        # Runs the local device write; called off the agent loop (may block on I/O).
+        self._on_command = on_command
         self.demanded_frames: set = set()      # {(uuid, source_id)} currently watched
 
     def _on_loop_created(self, loop) -> None:
@@ -125,10 +128,41 @@ class HubAgent(ReconnectingClient):
                         except Exception:      # noqa: BLE001 — a bad callback
                             log.debug("frame-demand callback failed",
                                       exc_info=True)
-                # welcome/ack: nothing to do
+                elif which == "command":
+                    await self._handle_command(hub_msg.command)
+                # welcome: nothing to do
         finally:
             self.demanded_frames.clear()       # a reconnect re-sends active demand
             watcher.cancel()
+
+    async def _handle_command(self, cmd) -> None:
+        """Execute a hub command on the local device and Ack the result (§5.3). The
+        write may BLOCK on device I/O, so it runs off the agent loop (a physicist's
+        control must never stall the session). The actual effect is captured by the
+        sink's readback source (§7.5), not this Ack — the Ack reports acceptance."""
+        value = self._command_value(cmd)
+        ok, detail = False, "no command handler on this agent"
+        if self._on_command is not None:
+            try:
+                ok, detail = await asyncio.to_thread(
+                    self._on_command, cmd.device_uuid, cmd.sink_id, value)
+            except Exception as exc:           # noqa: BLE001 — surface it in the Ack
+                ok, detail = False, str(exc)
+        self._send(pb.AgentMessage(ack=pb.Ack(
+            request_id=cmd.request_id, ok=bool(ok), detail=str(detail or ""))))
+
+    @staticmethod
+    def _command_value(cmd):
+        """The value the viewer set, unwrapped from the proto oneof. A `trigger`
+        (ACTION sink) carries no value → None."""
+        which = cmd.WhichOneof("value")
+        if which == "scalar":
+            return cmd.scalar
+        if which == "boolean":
+            return cmd.boolean
+        if which == "text":
+            return cmd.text
+        return None                            # trigger (ACTION) or unset
 
     async def _outgen(self):
         outq = self._outq                      # pin THIS session's queue (a late-
