@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import math
 import os
 import time
 
@@ -57,9 +58,12 @@ def _reading_value(dtype: str, reading):
             return {"type": "bool"}
     if dtype == "float":
         try:
-            return float(val)
+            v = float(val)
         except (TypeError, ValueError):
             return {"type": "float"}
+        # JSON has no NaN/Infinity, and Starlette's JSONResponse uses allow_nan=False
+        # (a raw NaN would 500 the whole response) — a non-finite reading reads as null.
+        return v if math.isfinite(v) else None
     return {"type": dtype or "unknown"}          # trace / image / action / unknown
 
 

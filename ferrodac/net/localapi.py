@@ -199,14 +199,24 @@ class LocalApiServer:
             result = await run_in_threadpool(
                 self._surface.dispatch, verb, payload,
                 scope=conn.scope, confirm=confirm)
-            self._audit(conn, verb, True, "")
-            return JSONResponse({"result": result})
         except ScopeError as exc:
             self._audit(conn, verb, False, str(exc))
             return JSONResponse({"error": str(exc)}, status_code=403)
         except ControlError as exc:
             self._audit(conn, verb, False, str(exc))
             return JSONResponse({"error": str(exc)}, status_code=400)
+        # Building the JSONResponse serializes the result (json.dumps, allow_nan=False).
+        # A non-JSON-able / NaN result would otherwise raise here and 500 the whole
+        # response — turn it into a clean 400 so a bad verb can never crash the server.
+        try:
+            resp = JSONResponse({"result": result})
+        except (ValueError, TypeError) as exc:
+            self._audit(conn, verb, False, f"unserializable result: {exc}")
+            return JSONResponse(
+                {"error": f"{verb} returned a non-JSON-serializable result: {exc}"},
+                status_code=400)
+        self._audit(conn, verb, True, "")
+        return resp
 
     async def _events(self, request: Request):
         conn = self._auth(request)

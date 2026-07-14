@@ -74,6 +74,22 @@ def test_source_read_joins_value_with_meta_and_guards_non_scalars(control_surfac
         s.dispatch("source.read", {"key": "nope/nope"}, scope="read")
 
 
+@pytest.mark.ui
+def test_source_read_nan_reads_as_null_not_a_crash(control_surface):
+    # a float source whose latest reading is NaN (e.g. an offline channel) must read
+    # as JSON null — a raw NaN would 500 the API response (Starlette allow_nan=False).
+    w, s = control_surface
+    w.dashboard._sources["dev0/t"] = SourcePort(
+        "dev0/t", "T", "float", "K", "Dev", "device")
+    w.dashboard.engine.publish(Reading("dev0", "t", 100.0, float("nan")))
+    w.dashboard.engine.bus.drain()
+    out = s.dispatch("source.read", {"key": "dev0/t"}, scope="read")
+    assert out["value"] is None                 # NaN -> null, not a non-finite float
+    w.dashboard.engine.publish(Reading("dev0", "t", 101.0, float("inf")))
+    w.dashboard.engine.bus.drain()
+    assert s.dispatch("source.read", {"key": "dev0/t"}, scope="read")["value"] is None
+
+
 # -- layout routing ----------------------------------------------------------
 @pytest.mark.ui
 def test_layout_route_and_routes_dispatch(control_surface):

@@ -110,6 +110,17 @@ def test_revoked_token_stops_working(server):
     assert httpx.get(_base(srv) + "/describe", headers=h, timeout=5.0).status_code == 401
 
 
+def test_nan_result_is_a_clean_400_not_500(server):
+    # a verb returning a NaN (or otherwise non-JSON-serializable) result must not crash
+    # the response with a 500 — the server turns it into a clean 400.
+    srv, reg = server
+    srv._surface.query("debug.nan", lambda p: float("nan"))
+    tok = _pair(srv, reg, scope="control")
+    r = httpx.get(_base(srv) + "/query/debug.nan",
+                  headers={"Authorization": f"Bearer {tok}"}, timeout=5.0)
+    assert r.status_code == 400 and "non-JSON" in r.json()["error"]
+
+
 def test_events_stream_delivers_emitted_events(server):
     srv, reg = server
     surface = srv._surface
