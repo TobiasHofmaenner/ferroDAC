@@ -69,8 +69,15 @@ def _tolist(a) -> list:
     return fn() if fn else list(a)
 
 
+def available_uuid(agent_id: str, instance_id: str) -> str:
+    """Catalog key for an AVAILABLE remote device — it has no real uuid, and two
+    clients can share an instance_id (both "sim:psu:1"), so scope it by agent."""
+    return f"avail:{agent_id}:{instance_id}"
+
+
 # --- descriptor (agent side) ----------------------------------------------- #
-def descriptor_to_proto(d: DeviceDescriptor) -> pb.DeviceDescriptor:
+def descriptor_to_proto(d: DeviceDescriptor, available: bool = False,
+                        agent_id: str = "") -> pb.DeviceDescriptor:
     sources = [pb.SourcePort(id=s.id, name=s.name, unit=s.unit or "",
                              dtype=_DTYPE_TO_PROTO.get(s.dtype, pb.SCALAR))
                for s in d.sources]
@@ -98,11 +105,14 @@ def descriptor_to_proto(d: DeviceDescriptor) -> pb.DeviceDescriptor:
                     pass
         sinks.append(sp)
     options = [_option_to_proto(o) for o in getattr(d, "options", ()) or ()]
+    uuid = (available_uuid(agent_id, d.instance_id) if available
+            else (d.uuid or d.instance_id))
     return pb.DeviceDescriptor(
-        uuid=d.uuid or d.instance_id, instance_id=d.instance_id, name=d.name,
+        uuid=uuid, instance_id=d.instance_id, name=d.name,
         driver=d.driver, hardware_id=d.hardware_id or "",
         firmware=d.firmware or "", software_version=_app_version(),
-        online=True, sources=sources, sinks=sinks, options=options)
+        online=True, sources=sources, sinks=sinks, options=options,
+        available=available, agent_id=agent_id)
 
 
 def _option_to_proto(o) -> "pb.DeviceOption":

@@ -101,6 +101,8 @@ class Hub:
         self._frame_subs: set[Subscriber] = set()   # WatchFrames watchers (§9)
         self._frame_demand: dict = {}               # (uuid, source) -> watcher count
         self._agent_outq: dict = {}                 # device uuid -> Ingest out-queue
+        self._agent_conns: dict = {}                # agent_id -> Ingest out-queue (Hello);
+        #   routes to a client with NO active device (remote-add targets the agent)
         self._pending_cmds: dict = {}               # request_id -> Future[Ack] (control §5.3)
         self._watchers: set[asyncio.Queue] = set()
         # Tags (DESIGN §7.3): a durable, reliable store keyed by id, merged
@@ -215,12 +217,45 @@ class Hub:
                 _offer(outq, pb.HubMessage(frame_demand=pb.FrameDemand(
                     device_uuid=du, source_id=sid, active=True)))
 
-    def unregister_agent(self, uuid: str) -> None:
-        self._agent_outq.pop(uuid, None)
-        for rid, fut in list(self._pending_cmds.items()):   # agent gone → fail its commands
-            if not fut.done():
+    def register_agent_session(self, agent_id: str, outq) -> None:
+        """Track a client's down-channel by its identity (from Hello), so we can
+        route to a client that has NO active device yet — remote-add (below) targets
+        the agent, not a device uuid."""
+        if agent_id:
+            self._agent_conns[agent_id] = outq
+
+    def unregister_agent_session(self, agent_id: str, outq) -> None:
+        if self._agent_conns.get(agent_id) is outq:   # don't clobber a newer session
+            self._agent_conns.pop(agent_id, None)
+        for rid, (fut, oq) in list(self._pending_cmds.items()):   # session gone → fail
+            if oq is outq and not fut.done():                     # ONLY its commands
                 fut.set_result(pb.Ack(request_id=rid, ok=False,
-                                      detail="agent disconnected"))
+                                      detail="client disconnected"))
+
+    async def add_device(self, req) -> "pb.Ack":
+        """Route a viewer's AddRemoteDevice to the owning client (by agent_id) as an
+        AddDevice down-message, awaiting its Ack (same correlation as send_command).
+        The client onboards the device, which then re-announces as active."""
+        outq = self._agent_conns.get(req.agent_id)
+        if outq is None:
+            return pb.Ack(ok=False, detail="that client is not connected")
+        rid = _uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_cmds[rid] = (fut, outq)
+        _offer(outq, pb.HubMessage(add_device=pb.AddDevice(
+            request_id=rid, instance_id=req.instance_id)))
+        try:
+            return await asyncio.wait_for(fut, timeout=10.0)
+        except asyncio.TimeoutError:
+            return pb.Ack(request_id=rid, ok=False, detail="the client did not respond")
+        finally:
+            self._pending_cmds.pop(rid, None)
+
+    def unregister_agent(self, uuid: str) -> None:
+        # per-DEVICE retire only — must NOT fail pending commands (a device retiring
+        # mid-session, e.g. an available device going active on add, would clobber the
+        # add's own Ack). Session teardown fails pending in unregister_agent_session.
+        self._agent_outq.pop(uuid, None)
 
     # -- control plane (DESIGN §5.3 / §7.5): route a command to the owning agent -
     async def send_command(self, req) -> "pb.Ack":
@@ -245,7 +280,7 @@ class Hub:
         elif which == "trigger":
             cmd.trigger = req.trigger
         fut = asyncio.get_running_loop().create_future()
-        self._pending_cmds[rid] = fut
+        self._pending_cmds[rid] = (fut, outq)
         _offer(outq, pb.HubMessage(command=cmd))
         try:
             return await asyncio.wait_for(fut, timeout=10.0)
@@ -271,7 +306,7 @@ class Hub:
         elif which == "rename":
             cfg.rename = req.rename
         fut = asyncio.get_running_loop().create_future()
-        self._pending_cmds[rid] = fut
+        self._pending_cmds[rid] = (fut, outq)
         _offer(outq, pb.HubMessage(configure=cfg))
         try:
             return await asyncio.wait_for(fut, timeout=10.0)
@@ -281,11 +316,13 @@ class Hub:
             self._pending_cmds.pop(rid, None)
 
     def deliver_ack(self, ack) -> None:
-        """An agent's Ack came up the Ingest stream → resolve the waiting command
-        or configure (both correlate by request_id in _pending_cmds)."""
-        fut = self._pending_cmds.get(ack.request_id)
-        if fut is not None and not fut.done():
-            fut.set_result(ack)
+        """An agent's Ack came up the Ingest stream → resolve the waiting command,
+        configure or add-device (all correlate by request_id in _pending_cmds)."""
+        entry = self._pending_cmds.get(ack.request_id)
+        if entry is not None:
+            fut, _outq = entry
+            if not fut.done():
+                fut.set_result(ack)
 
     def add_frame_watcher(self, sub: Subscriber) -> None:
         self._frame_subs.add(sub)

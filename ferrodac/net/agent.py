@@ -26,7 +26,8 @@ class HubAgent(ReconnectingClient):
     _disconnect_label = "hub"
 
     def __init__(self, addr: str, agent_id: str = "ferrodac", on_state=None,
-                 on_frame_demand=None, on_command=None, on_configure=None):
+                 on_frame_demand=None, on_command=None, on_configure=None,
+                 on_add_device=None):
         super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
         self._outq: "asyncio.Queue | None" = None
@@ -42,6 +43,9 @@ class HubAgent(ReconnectingClient):
         # configure (§5.3): (device_uuid, action, *args) -> (ok, detail), where action
         # is "option"/(key,value), "rate"/(hz,) or "rename"/(name,). Off-loop too.
         self._on_configure = on_configure
+        # remote device addition: (instance_id) -> (ok, detail). Onboards a local
+        # available device on request from another client. Off the agent loop.
+        self._on_add_device = on_add_device
         self.demanded_frames: set = set()      # {(uuid, source_id)} currently watched
 
     def _on_loop_created(self, loop) -> None:
@@ -54,7 +58,9 @@ class HubAgent(ReconnectingClient):
 
     # -- public API (any thread) --------------------------------------------
     def announce(self, descriptor) -> None:
-        pd = convert.descriptor_to_proto(descriptor)
+        self._announce_proto(convert.descriptor_to_proto(descriptor))
+
+    def _announce_proto(self, pd) -> None:
         with self._lock:
             self._devices[pd.uuid] = pd
             # Readings are stamped with the device's *data_id* (= uuid once
@@ -74,15 +80,24 @@ class HubAgent(ReconnectingClient):
                     self._id2uuid.pop(inst, None)
         self._send(pb.AgentMessage(retire=pb.Retire(device_uuid=uuid)))
 
-    def set_devices(self, descriptors) -> None:
-        """Reconcile the published set: announce new, retire vanished."""
-        wanted = {convert.descriptor_to_proto(d).uuid: d for d in descriptors}
+    def set_devices(self, descriptors, available=()) -> None:
+        """Reconcile the published set. ACTIVE devices announce as-is; AVAILABLE
+        devices (advertised for remote addition) are tagged `available` + `agent_id`
+        with a synthetic uuid, so another client can see and onboard them. Announce
+        new, retire vanished — one call carries the whole current picture."""
+        wanted = {}
+        for d in descriptors:
+            pd = convert.descriptor_to_proto(d, available=False, agent_id=self._agent_id)
+            wanted[pd.uuid] = pd
+        for d in available:
+            pd = convert.descriptor_to_proto(d, available=True, agent_id=self._agent_id)
+            wanted[pd.uuid] = pd
         with self._lock:
             current = set(self._devices)
         for uuid in current - set(wanted):
             self.retire(uuid)
-        for d in wanted.values():
-            self.announce(d)
+        for pd in wanted.values():
+            self._announce_proto(pd)
 
     def feed(self, readings) -> None:
         """Publish a batch of app Readings. r.device is the device's data_id
@@ -135,6 +150,8 @@ class HubAgent(ReconnectingClient):
                     await self._handle_command(hub_msg.command)
                 elif which == "configure":
                     await self._handle_configure(hub_msg.configure)
+                elif which == "add_device":
+                    await self._handle_add_device(hub_msg.add_device)
                 # welcome: nothing to do
         finally:
             self.demanded_frames.clear()       # a reconnect re-sends active demand
@@ -184,6 +201,19 @@ class HubAgent(ReconnectingClient):
                 ok, detail = False, str(exc)
         self._send(pb.AgentMessage(ack=pb.Ack(
             request_id=cfg.request_id, ok=bool(ok), detail=str(detail or ""))))
+
+    async def _handle_add_device(self, msg) -> None:
+        """Another client asked us to onboard one of our AVAILABLE devices → run the
+        local add and Ack. The device then re-announces as active on its own."""
+        ok, detail = False, "no add-device handler on this agent"
+        if self._on_add_device is not None:
+            try:
+                ok, detail = await asyncio.to_thread(self._on_add_device,
+                                                     msg.instance_id)
+            except Exception as exc:           # noqa: BLE001 — surface it in the Ack
+                ok, detail = False, str(exc)
+        self._send(pb.AgentMessage(ack=pb.Ack(
+            request_id=msg.request_id, ok=bool(ok), detail=str(detail or ""))))
 
     @staticmethod
     def _configure_action(cfg):

@@ -103,6 +103,9 @@ message DeviceDescriptor {
   repeated SourcePort sources = 9;
   repeated SinkPort sinks = 10;  // control inputs (§5.3): set via Viewer.SendCommand
   repeated DeviceOption options = 11;  // config params (§5.3): set via Viewer.SetConfig
+  bool available = 12;           // true = discovered-but-not-added on the owning client
+  //                                (addable via Viewer.AddRemoteDevice); false = active
+  string agent_id = 13;          // which client advertises it (display + add routing)
 }
 
 // A device configuration option — parameterises the device (NOT routable, unlike a
@@ -255,6 +258,14 @@ message Configure {
   }
 }
 
+// Remote device addition: hub -> agent, "onboard this available device of yours".
+// Routed to the owning agent by agent_id (an available device has no uuid). The agent
+// runs manager.add(instance_id) and Acks; the device then re-announces as active.
+message AddDevice {
+  string request_id = 1;
+  string instance_id = 2;
+}
+
 // Up the Session stream (agent -> hub).
 message AgentMessage {
   oneof msg {
@@ -283,6 +294,7 @@ message HubMessage {
     Command command = 3;         // control §5.3: set a sink
     FrameDemand frame_demand = 4;
     Configure configure = 5;     // control §5.3: set an option / rate / name
+    AddDevice add_device = 6;    // remote device addition: onboard an available device
   }
 }
 
@@ -344,6 +356,14 @@ message CommandRequest {
   }
 }
 
+// A viewer asking the hub to onboard an AVAILABLE device on the client that owns it
+// (routed by agent_id, not device uuid — an available device has none).
+message AddDeviceRequest {
+  string token = 1;              // reserved auth seam
+  string agent_id = 2;
+  string instance_id = 3;
+}
+
 // A viewer asking the hub to configure a (possibly remote) device — the Configure
 // analog of CommandRequest. Routed to the owning agent, the agent's Ack relayed.
 message ConfigureRequest {
@@ -367,6 +387,9 @@ service Viewer {
   // Control plane: configure a device (option / rate / name) — same routing as
   // SendCommand. The new state comes back on the re-announced catalog descriptor.
   rpc SetConfig(ConfigureRequest) returns (Ack);
+  // Remote device addition: ask a client (by agent_id) to onboard one of its
+  // available devices; it then re-announces as an active remote device.
+  rpc AddRemoteDevice(AddDeviceRequest) returns (Ack);
   // Live video frames for EXPLICITLY named image sources. Opening this stream
   // IS the demand signal: the hub tells the owning agent to start encoding
   // while >=1 watcher holds a ref, stop on the last close. Latest-wins

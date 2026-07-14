@@ -52,6 +52,7 @@ class IngestServicer(rpc.IngestServicer):
                                 "proceeding; mismatched fields may be ignored",
                                 agent, cv, CONTRACT_VERSION)
                         log.info("agent connected: %s", agent)
+                        self.hub.register_agent_session(agent, outq)   # agent-id routing
                         outq.put_nowait(pb.HubMessage(welcome=pb.Welcome(
                             session_id=_uuid.uuid4().hex,
                             contract_version=CONTRACT_VERSION,
@@ -89,6 +90,7 @@ class IngestServicer(rpc.IngestServicer):
                     break                       # agent stream ended
         finally:
             task.cancel()
+            self.hub.unregister_agent_session(agent, outq)   # drop the agent-id route
             for device_uuid in mine:    # session ended ⇒ its devices vanish
                 self.hub.retire(device_uuid)
                 self.hub.unregister_agent(device_uuid)
@@ -115,6 +117,10 @@ class ViewerServicer(rpc.ViewerServicer):
     async def SetConfig(self, request, context):  # noqa: N802
         """Control plane (§5.3): configure a device (option/rate/name) the hub knows."""
         return await self.hub.send_config(request)
+
+    async def AddRemoteDevice(self, request, context):  # noqa: N802
+        """Ask a client (by agent_id) to onboard one of its available devices."""
+        return await self.hub.add_device(request)
 
     async def WatchCatalog(self, request, context):  # noqa: N802
         q: asyncio.Queue = asyncio.Queue(maxsize=256)
