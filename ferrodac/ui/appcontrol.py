@@ -67,7 +67,7 @@ def build_control_surface(app) -> ControlSurface:
 
     def _hub_status(_):
         hub = app.hub
-        agent, viewer = hub.roles() if hasattr(hub, "roles") else (False, False)
+        agent, viewer = hub.roles if hasattr(hub, "roles") else (False, False)
         return {"connected": bool(getattr(hub, "connected", False)),
                 "addr": getattr(hub, "addr", ""), "agent": agent, "viewer": viewer}
     s.query("hub.status", lambda _: _hub_status(_), description="Hub connection state.")
@@ -133,9 +133,9 @@ def build_control_surface(app) -> ControlSurface:
     def _tag_add(p):
         if "label" not in p:
             raise ControlError("tag.add needs 'label'")
-        m = app.dashboard.markers.add(float(p.get("t") or time.time()),
-                                      str(p["label"]), comment=str(p.get("comment", "")))
-        return {"id": getattr(m, "id", None)}
+        mid = app.dashboard.markers.add(float(p.get("t") or time.time()),
+                                        str(p["label"]), comment=str(p.get("comment", "")))
+        return {"id": mid}
     s.register("tag.add", gui(_tag_add), description="Add a tag/marker at a time (default now).",
                params={"label": {"type": "string", "required": True},
                        "comment": {"type": "string"}, "t": {"type": "number"}})

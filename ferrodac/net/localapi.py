@@ -164,7 +164,8 @@ class LocalApiServer:
         conn = self._auth(request)
         if conn is None:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return JSONResponse({"connector": conn.public(),
+        return JSONResponse({"app": self._name, "version": self._version,
+                             "connector": conn.public(),
                              **self._surface.describe(conn.scope)})
 
     async def _command(self, request: Request):
