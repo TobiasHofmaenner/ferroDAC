@@ -64,6 +64,44 @@ def test_option_to_from_proto_and_secrets_are_stripped():
     assert sec.value == "" and convert.option_from_proto(sec).value is None
 
 
+def test_remote_control_dialog_live_refreshes_on_reannounce(qapp):
+    """An open remote config dialog reflects the device's new state when it re-announces
+    (a command from elsewhere, or an external change the driver reads back) — the HV
+    toggle ticks without the user reopening the dialog, and without re-sending."""
+    from qtpy.QtCore import QObject, Signal
+    from qtpy.QtWidgets import QCheckBox
+    from ferrodac.core.device import Sink
+    from ferrodac.ui.docks import RemoteControlDialog
+
+    class _FakeDash(QObject):
+        ports_changed = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self._sinks = []
+
+        def remote_sinks(self, uuid):
+            return list(self._sinks)
+
+        def remote_options(self, uuid):
+            return []
+
+    dash = _FakeDash()
+    sent = []
+    dlg = RemoteControlDialog(
+        "u", "LSA", [Sink(id="hv", name="HV", kind=SinkKind.TOGGLE, value=False)],
+        [], send_command=lambda *a: sent.append(a), send_config=lambda *a, **k: None,
+        dashboard=dash)
+    chk = dlg._sink_widgets["hv"]
+    assert isinstance(chk, QCheckBox) and not chk.isChecked()
+
+    dash._sinks = [Sink(id="hv", name="HV", kind=SinkKind.TOGGLE, value=True)]
+    dash.ports_changed.emit()                        # the device re-announced HV=on
+    assert chk.isChecked()                           # reflected live…
+    assert sent == []                                # …WITHOUT re-sending a command
+    dlg.close()
+
+
 def test_devices_panel_lists_remote_available_and_add_routes(qapp):
     """The Devices window shows other clients' available devices grouped by client,
     and Add routes to that client (request_add_remote); the share toggle reflects/sets."""

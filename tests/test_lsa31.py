@@ -187,6 +187,26 @@ def test_device_reads_all_channels_from_one_transaction(fake):
     assert math.isnan(v) and st == 0           # honest nan until sensitivity set
 
 
+def test_hv_readback_reflects_external_toggle_and_marks_dirty(fake):
+    """The poll reads HV state back from the status byte, so HV toggled on the front
+    panel (not by us) updates the sink value and flags a re-announce — the config UIs
+    then reflect real state (§5.3/§7.5)."""
+    fake.state["outp"] = 1
+    dev = _device(fake)
+    assert dev._sink_values["hv_enable"] is True     # seeded from get_output() on connect
+    dev.take_sink_dirty()                             # clear connect-time dirt
+
+    fake.state["outp"] = 0                             # someone toggles HV off externally
+    dev._meas = None                                  # force a fresh MEAS on the next poll
+    _read(dev, "hv")
+    assert dev._sink_values["hv_enable"] is False     # readback caught the change
+    assert dev.take_sink_dirty() is True              # …and flagged a re-announce
+
+    dev._meas = None                                  # a poll with NO change → no re-flag
+    _read(dev, "hv")
+    assert dev.take_sink_dirty() is False
+
+
 def test_overload_invalidates_current_and_pressure_only(fake):
     dev = _device(fake)
     fake.state["status"] = ST_OVERLOAD

@@ -491,11 +491,14 @@ class RemoteControlDialog(QDialog):
     milestone — this surfaces control inputs only."""
 
     def __init__(self, uuid, name, sinks, options, send_command, send_config,
-                 parent=None):
+                 dashboard=None, parent=None):
         super().__init__(parent)
         self._uuid = uuid
         self._send = send_command
         self._config = send_config
+        self._dashboard = dashboard        # for LIVE refresh on a re-announce
+        self._sink_widgets: dict = {}      # sink_id -> widget (to reflect new state)
+        self._option_widgets: dict = {}    # option key -> widget
         self.setWindowTitle(f"Config · {name}")
         lay = QVBoxLayout(self)
         head = QLabel(f"{name}   ·   hub device")
@@ -536,6 +539,12 @@ class RemoteControlDialog(QDialog):
             empty.setStyleSheet("color:#8b95a4;")
             lay.addWidget(empty)
 
+        # LIVE refresh: when the device re-announces (a command from us or elsewhere,
+        # or an external state change the driver reads back), update toggles/menus in
+        # place so the dialog reflects real state — mirrors the local ConfigDialog.
+        if dashboard is not None:
+            dashboard.ports_changed.connect(self._on_ports_changed)
+
         row = QHBoxLayout()
         row.addStretch(1)
         close = QPushButton("Close")
@@ -553,6 +562,48 @@ class RemoteControlDialog(QDialog):
         if self._config is not None:
             self._config(self._uuid, **kw)
 
+    def _on_ports_changed(self) -> None:
+        """The device re-announced → reflect its current sink/option state."""
+        if self._dashboard is None:
+            return
+        self._apply_state(self._dashboard.remote_sinks(self._uuid),
+                          self._dashboard.remote_options(self._uuid))
+
+    def _apply_state(self, sinks, options) -> None:
+        """Update toggles + menus to the latest values WITHOUT re-sending (block
+        signals) and WITHOUT clobbering a text/setpoint field the user may be editing."""
+        by_id = {s.id: s for s in sinks}
+        for sid, w in self._sink_widgets.items():
+            s = by_id.get(sid)
+            if s is None:
+                continue
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(bool(s.value))
+            elif isinstance(w, QComboBox) and s.value is not None:
+                i = w.findText(str(s.value))
+                if i >= 0:
+                    w.setCurrentIndex(i)
+            w.blockSignals(False)
+        by_key = {o.key: o for o in options}
+        for key, w in self._option_widgets.items():
+            o = by_key.get(key)
+            if o is None or not isinstance(w, QComboBox):
+                continue
+            w.blockSignals(True)
+            i = w.findData(o.value)
+            if i >= 0:
+                w.setCurrentIndex(i)
+            w.blockSignals(False)
+
+    def closeEvent(self, ev):  # noqa: N802
+        if self._dashboard is not None:
+            try:
+                self._dashboard.ports_changed.disconnect(self._on_ports_changed)
+            except (RuntimeError, TypeError):
+                pass
+        super().closeEvent(ev)
+
     def _option_widget(self, o) -> QWidget:
         if o.kind == "choice":
             combo = QComboBox()
@@ -565,6 +616,7 @@ class RemoteControlDialog(QDialog):
             combo.currentIndexChanged.connect(
                 lambda _i, cb=combo, key=o.key:
                 self._configure(option=(key, cb.currentData())))
+            self._option_widgets[o.key] = combo
             return combo
         edit = QLineEdit("" if o.value is None else str(o.value))   # text / secret
         if o.kind == "secret":
@@ -597,6 +649,7 @@ class RemoteControlDialog(QDialog):
             chk = QCheckBox("on")
             chk.setChecked(bool(s.value))
             chk.toggled.connect(lambda on, sid=s.id: self._write(sid, on))
+            self._sink_widgets[s.id] = chk           # reflect live state on re-announce
             return chk
         if s.kind == SinkKind.ENUM:
             combo = QComboBox()
@@ -606,6 +659,7 @@ class RemoteControlDialog(QDialog):
                 combo.setCurrentText(s.value)
             combo.currentTextChanged.connect(
                 lambda txt, sid=s.id: self._write(sid, txt))
+            self._sink_widgets[s.id] = combo
             return combo
         unit = s.params[0].unit if s.params else ""      # SETPOINT
         edit = QLineEdit("" if s.value is None else f"{s.value:g}")

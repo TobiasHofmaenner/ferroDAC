@@ -242,6 +242,7 @@ class MainWindow(QMainWindow):
         # models are dropped on provenance_changed, the signal that changes them.
         self._sigma_refresh.timeout.connect(self._retry_empty_sigma_timelines)
         self._sigma_refresh.timeout.connect(self._coverage_cache.clear)
+        self._sigma_refresh.timeout.connect(self._refresh_dirty_sinks)
         self._sigma_refresh.start()
         self.dashboard.set_sigma_provider(self._chart_sigma)
         self.dashboard.set_gap_provider(self._chart_coverage)
@@ -2423,6 +2424,17 @@ class MainWindow(QMainWindow):
         self._dialogs[instance_id] = dlg
         dlg.show()
 
+    def _refresh_dirty_sinks(self) -> None:
+        """A device polled back a changed control state (e.g. HV toggled on the front
+        panel) → re-announce its descriptor so the config UIs (local + remote) reflect
+        it. Checks ALL active devices so every dirty flag is cleared."""
+        if self.manager is None:
+            return
+        dirty = [d for d in self.manager.active_devices()
+                 if getattr(d, "take_sink_dirty", lambda: False)()]
+        if dirty:
+            self.manager.active_changed.emit()
+
     def _open_source_config(self, source_key: str) -> None:
         """The ⚙ on a source card → open its owning device's config/control section.
         Local devices open the ConfigDialog; hub-remote devices open the
@@ -2437,7 +2449,8 @@ class MainWindow(QMainWindow):
             dlg = RemoteControlDialog(
                 did, self.dashboard.remote_name(did),
                 self.dashboard.remote_sinks(did), self.dashboard.remote_options(did),
-                self.dashboard.send_command, self.dashboard.set_config, self)
+                self.dashboard.send_command, self.dashboard.set_config,
+                dashboard=self.dashboard, parent=self)
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
             dlg.destroyed.connect(lambda *_: self._dialogs.pop(source_key, None))
             self._dialogs[source_key] = dlg

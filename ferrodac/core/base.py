@@ -91,6 +91,7 @@ class BaseDevice(Device):
         self._uncertainty = {s.id: s.uncertainty for s in self._sources
                              if getattr(s, "uncertainty", None) is not None}
         self._provenance_dirty = False   # set when a model changes → app re-pushes
+        self._sink_dirty = False         # set when a poll reads back a changed control state
         self._sinks = list(sinks)
         self._options = list(options)
         self._option_values = {o.key: o.value for o in self._options}
@@ -248,6 +249,18 @@ class BaseDevice(Device):
         """True (once) if a σ model changed since the last check — the app polls this
         after a write to decide whether to re-push the device record."""
         dirty, self._provenance_dirty = self._provenance_dirty, False
+        return dirty
+
+    def _mark_sink_dirty(self) -> None:
+        """A driver calls this when a POLL reads back a control state that changed
+        outside our writes (e.g. HV toggled on the front panel), so the app re-announces
+        the descriptor and the config UIs (local + remote) reflect the real state."""
+        self._sink_dirty = True
+
+    def take_sink_dirty(self) -> bool:
+        """True (once) if a sink's readback value changed since the last check — the
+        app polls active devices on its refresh tick and re-announces if any did."""
+        dirty, self._sink_dirty = self._sink_dirty, False
         return dirty
 
     # -- sinks (control) ------------------------------------------------------

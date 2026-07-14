@@ -407,6 +407,10 @@ class LSA31Device(BaseDevice):
         if self._meas is None or (now - self._meas_at) > max_age:
             self._meas = self._lsa.meas()
             self._meas_at = now
+            on = bool(self._meas.status & ST_HV_ON)   # readback: reflect the REAL HV
+            if self._sink_values.get("hv_enable") != on:   # state, even if toggled on
+                self._sink_values["hv_enable"] = on        # the front panel (not by us)
+                self._mark_sink_dirty()                    # → app re-announces the descriptor
         return self._meas
 
     def _read(self, source: Source):
