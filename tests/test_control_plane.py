@@ -64,6 +64,57 @@ def test_option_to_from_proto_and_secrets_are_stripped():
     assert sec.value == "" and convert.option_from_proto(sec).value is None
 
 
+def test_devices_panel_lists_remote_available_and_add_routes(qapp):
+    """The Devices window shows other clients' available devices grouped by client,
+    and Add routes to that client (request_add_remote); the share toggle reflects/sets."""
+    from qtpy.QtCore import QObject, Signal
+    from qtpy.QtWidgets import QPushButton
+    from ferrodac.core.engine import Engine
+    from ferrodac.core.manager import DeviceManager
+    from ferrodac.core.device import DeviceDescriptor, Interface, Status
+    from ferrodac.ui.docks import DevicesPanel
+
+    class _FakeHub(QObject):
+        remote_available_changed = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.share_devices = True
+            self.added = []
+            self._ra = {}
+
+        def remote_available(self):
+            return dict(self._ra)
+
+        def set_share_devices(self, on):
+            self.share_devices = bool(on)
+
+        def request_add_remote(self, aid, iid):
+            self.added.append((aid, iid))
+
+    hub = _FakeHub()
+    hub._ra = {"ferrodac@rig-1": [DeviceDescriptor(
+        instance_id="sim:psu:1", driver="fake_psu", name="PSU",
+        interface=Interface(kind="hub"), status=Status.DISCOVERED)]}
+    mgr = DeviceManager([], engine=Engine(), registry=None)   # no local devices
+    panel = DevicesPanel(mgr, on_configure=lambda iid: None, hub=hub)
+
+    assert not panel._remote_label.isHidden()                 # section shown
+    assert "(1)" in panel._remote_label.text()
+    adds = [b for b in panel.findChildren(QPushButton) if b.text() == "Add"]
+    assert adds, "no Add button for the remote device"
+    adds[0].click()
+    assert hub.added == [("ferrodac@rig-1", "sim:psu:1")]     # routed by agent_id
+
+    assert panel._share.isChecked()                           # opt-out default on
+    panel._share.setChecked(False)
+    assert hub.share_devices is False
+
+    hub._ra = {}                                              # client left → section hides
+    panel._rebuild_remote()
+    assert panel._remote_label.isHidden()
+
+
 def test_remote_options_surface_for_the_config_dialog(qapp):
     from ferrodac.core.engine import Engine
     from ferrodac.core.manager import DeviceManager

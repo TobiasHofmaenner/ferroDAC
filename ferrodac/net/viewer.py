@@ -69,6 +69,31 @@ class HubViewer(ReconnectingClient):
 
         asyncio.ensure_future(go())
 
+    def add_remote_device(self, agent_id, instance_id, on_result=None) -> None:
+        """Ask a client (by agent_id) to onboard one of its AVAILABLE devices. Non-
+        blocking; on_result(ok, detail) on the loop when the client Acks."""
+        call_soon_safe(self._loop, self._do_add_remote,
+                       str(agent_id), str(instance_id), on_result)
+
+    def _do_add_remote(self, agent_id, instance_id, on_result) -> None:
+        if self._stub is None:
+            if on_result is not None:
+                on_result(False, "not connected to the hub")
+            return
+        req = pb.AddDeviceRequest(agent_id=agent_id, instance_id=instance_id)
+        stub = self._stub
+
+        async def go():
+            try:
+                ack = await stub.AddRemoteDevice(req)
+                res = (bool(ack.ok), str(ack.detail or ""))
+            except Exception as exc:           # noqa: BLE001
+                res = (False, str(exc))
+            if on_result is not None:
+                on_result(*res)
+
+        asyncio.ensure_future(go())
+
     def set_config(self, device_uuid, *, option=None, rate_hz=None, rename=None,
                    on_result=None) -> None:
         """Configure a hub device (§5.3) — pass exactly ONE of option=(key, value),

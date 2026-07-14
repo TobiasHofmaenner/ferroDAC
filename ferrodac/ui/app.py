@@ -581,7 +581,8 @@ class MainWindow(QMainWindow):
     def _open_devices(self):
         """The Devices manager (Available + Active, add/remove/configure) as a window."""
         if getattr(self, "_devices_win", None) is None:
-            win = DevicesWindow(self.manager, self._open_config, self)
+            win = DevicesWindow(self.manager, self._open_config,
+                                hub=getattr(self, "hub", None), parent=self)
             win.destroyed.connect(lambda: setattr(self, "_devices_win", None))
             self._devices_win = win
         self._devices_win.show()

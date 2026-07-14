@@ -635,23 +635,39 @@ class RemoteControlDialog(QDialog):
 #  Devices panel (left dock)
 # --------------------------------------------------------------------------- #
 class DevicesPanel(QWidget):
-    def __init__(self, manager: DeviceManager, on_configure, parent=None):
+    def __init__(self, manager: DeviceManager, on_configure, hub=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.on_configure = on_configure
+        self._hub = hub
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
+        # opt-out: advertise our AVAILABLE devices to other clients (default on)
+        self._share = QCheckBox("Share my available devices with other clients")
+        self._share.setChecked(hub.share_devices if hub is not None else True)
+        self._share.setVisible(hub is not None)
+        if hub is not None:
+            self._share.toggled.connect(hub.set_share_devices)
+        root.addWidget(self._share)
         self._avail_label, avail_scroll, self._avail_layout = self._section("Available")
         self._active_label, active_scroll, self._active_layout = self._section("Active")
+        # other clients' addable devices (grouped by client)
+        self._remote_label, self._remote_scroll, self._remote_layout = \
+            self._section("Available on other clients")
         root.addWidget(self._avail_label)
         root.addWidget(avail_scroll, 1)
         root.addWidget(self._active_label)
         root.addWidget(active_scroll, 2)
+        root.addWidget(self._remote_label)
+        root.addWidget(self._remote_scroll, 1)
         manager.available_changed.connect(self._rebuild_available)
         manager.active_changed.connect(self._rebuild_active)
+        if hub is not None:
+            hub.remote_available_changed.connect(self._rebuild_remote)
         self._rebuild_available()
         self._rebuild_active()
+        self._rebuild_remote()
 
     def _section(self, title):
         label = QLabel(title)
@@ -688,6 +704,31 @@ class DevicesPanel(QWidget):
                            self.on_configure if active else None)
             )
         layout.addStretch(1)
+
+    def _rebuild_remote(self):
+        """Other clients' AVAILABLE devices, grouped by client — Add asks that client
+        to onboard the device, which then appears as an active remote device."""
+        clear_layout(self._remote_layout)
+        by_agent = self._hub.remote_available() if self._hub is not None else {}
+        total = 0
+        for agent in sorted(by_agent):
+            descs = by_agent[agent]
+            if not descs:
+                continue
+            hdr = QLabel(f"on {agent}")
+            hdr.setStyleSheet("color:#8b95a4; font-size:11px; font-weight:700;"
+                              " margin-top:4px;")
+            self._remote_layout.addWidget(hdr)
+            for desc in sorted(descs, key=lambda d: d.name):
+                on_action = (lambda iid, aid=agent:
+                             self._hub.request_add_remote(aid, iid))
+                self._remote_layout.addWidget(DeviceCard(desc, False, on_action))
+                total += 1
+        self._remote_layout.addStretch(1)
+        self._remote_label.setText(f"Available on other clients  ({total})")
+        vis = self._hub is not None and total > 0
+        self._remote_label.setVisible(vis)
+        self._remote_scroll.setVisible(vis)
 
 
 class DeviceMetaDialog(QDialog):
@@ -878,7 +919,7 @@ class DevicesWindow(QMainWindow):
     cramped dock — Available + Active devices, add/remove/configure. Just hosts a
     DevicesPanel; the panel is unchanged."""
 
-    def __init__(self, manager: DeviceManager, on_configure, parent=None):
+    def __init__(self, manager: DeviceManager, on_configure, hub=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ferroDAC — Devices")
         self.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -886,7 +927,7 @@ class DevicesWindow(QMainWindow):
         self.setStyleSheet(
             "QMainWindow,QWidget{background:#0e1116;color:#c7d0db;}"
             "QScrollArea{border:none;}")
-        self.panel = DevicesPanel(manager, on_configure)
+        self.panel = DevicesPanel(manager, on_configure, hub=hub)
         self.setCentralWidget(self.panel)
 
 

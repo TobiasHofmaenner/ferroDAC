@@ -37,6 +37,8 @@ class HubController(QObject):
     connection_changed = Signal(bool)     # connected ↔ disconnected (intent/mode)
     link_state = Signal(str, str)         # REAL gRPC link: connecting|connected|error|
     #                                       offline + detail (drives the button colour)
+    remote_available_changed = Signal()   # other clients' available devices changed (Devices menu)
+    _do_add = Signal(str)                 # marshal manager.add(instance_id) to the GUI thread
 
     def __init__(self, dashboard, engine, manager, parent=None, store=None,
                  resolver=None, video_store=None):
@@ -70,6 +72,10 @@ class HubController(QObject):
         self._local: set = set()
         self._frame_last: dict = {}     # (uuid, source) -> last doc-frame send (worker lane)
         self._link: dict = {}            # role -> live gRPC connected? (for the button)
+        # remote device addition: other clients' AVAILABLE devices (agent_id -> {iid ->
+        # display DeviceDescriptor}), and whether WE advertise ours (opt-out, default on).
+        self._remote_available: dict = {}
+        self._share_devices = True
         self.addr = ""
         # These signals are emitted from raw (non-QThread) gRPC worker threads;
         # force QueuedConnection so the slots ALWAYS run on the GUI thread. With
@@ -82,6 +88,7 @@ class HubController(QObject):
         self._doc_update.connect(self._on_doc_update_gui, Qt.QueuedConnection)
         self._doc_awareness.connect(self._on_doc_awareness_gui, Qt.QueuedConnection)
         self._doc_presence.connect(self._on_doc_presence_gui, Qt.QueuedConnection)
+        self._do_add.connect(self._gui_add_device, Qt.QueuedConnection)
 
     def set_projects(self, project_mgr, on_change) -> None:
         """Wire hub-project sync to the client ProjectManager (called by the app
@@ -144,15 +151,17 @@ class HubController(QObject):
             self._agent = HubAgent(addr, agent_id=aid,
                                    on_state=self._state_cb("agent"),
                                    on_command=self._on_agent_command,
-                                   on_configure=self._on_agent_configure)
+                                   on_configure=self._on_agent_configure,
+                                   on_add_device=self._on_agent_add_device)
             self._agent.start()
-            self._agent.set_devices(self.manager.active_descriptors())
+            self._advertise_devices()          # active + (opt-out) available devices
             # per-reading protobuf conversion runs on its own bus pump, not the
             # GUI drain; the live feed is lossy by design → conflate (§21.2)
             self._agent_unsub = self.engine.subscribe(
                 self._feed_agent, thread="worker", mode="conflate",
                 name="hub-agent")
             self.manager.active_changed.connect(self._on_active_changed)
+            self.manager.available_changed.connect(self._on_available_changed)
             # store-and-forward: upload the local durable store to the hub (live
             # tails + backfill of anything recorded while offline). Headless —
             # a background thread, never blocks acquisition (DESIGN §12.1).
@@ -298,6 +307,9 @@ class HubController(QObject):
         self.dashboard.send_command = None       # control seam gone with the viewer
         self.dashboard.set_config = None
         self.dashboard.clear_remote_devices()
+        if self._remote_available:               # drop other clients' available devices
+            self._remote_available = {}
+            self.remote_available_changed.emit()
         self._link = {}
         if self.addr:
             self.status.emit("ferroDAC Cloud: disconnected")
@@ -546,8 +558,60 @@ class HubController(QObject):
 
     def _on_active_changed(self) -> None:
         self._update_local()
-        if self._agent is not None:
-            self._agent.set_devices(self.manager.active_descriptors())
+        self._advertise_devices()
+
+    def _on_available_changed(self) -> None:
+        self._advertise_devices()
+
+    def _advertise_devices(self) -> None:
+        """Publish our devices to the hub: ACTIVE always, plus AVAILABLE ones when
+        sharing is on (opt-out, default on). One call carries the whole picture."""
+        if self._agent is None:
+            return
+        avail = self.manager.available_descriptors() if self._share_devices else []
+        self._agent.set_devices(self.manager.active_descriptors(), available=avail)
+
+    # -- remote device addition (opt-out advertise + add another client's device) --
+    @property
+    def share_devices(self) -> bool:
+        return self._share_devices
+
+    def set_share_devices(self, on: bool) -> None:
+        """Toggle advertising our available devices to other clients (default on).
+        Turning off retires them from the hub immediately."""
+        self._share_devices = bool(on)
+        self._advertise_devices()
+
+    def remote_available(self) -> dict:
+        """{agent_id: [display DeviceDescriptor]} — other clients' addable devices."""
+        return {aid: list(devs.values())
+                for aid, devs in self._remote_available.items()}
+
+    def request_add_remote(self, agent_id: str, instance_id: str) -> None:
+        """Devices menu → ask a client (by agent_id) to onboard one of its available
+        devices. Non-blocking; the result shows on the status line and the device
+        then appears as an active remote device."""
+        if self._viewer is None:
+            return
+
+        def on_result(ok, detail):
+            self.status.emit("✓ device added" if ok else f"⚠ add failed: {detail}")
+        self._viewer.add_remote_device(agent_id, instance_id, on_result=on_result)
+
+    def _on_agent_add_device(self, instance_id):
+        """Another client asked us to onboard one of OUR available devices → marshal
+        the add to the GUI thread (manager.add mutates + spawns threads). The Ack is
+        'accepted'; the device re-announces as active once onboarded (the readback)."""
+        avail = {d.instance_id for d in self.manager.available_descriptors()}
+        if instance_id not in avail:
+            if self.manager.is_active(instance_id):
+                return True, "already added"
+            return False, "no such available device"
+        self._do_add.emit(instance_id)          # → _gui_add_device on the GUI thread
+        return True, ""
+
+    def _gui_add_device(self, instance_id: str) -> None:
+        self.manager.add(instance_id, user=True)
 
     def _update_local(self) -> None:
         self._local = self.dashboard.local_uuids()
@@ -607,6 +671,9 @@ class HubController(QObject):
     def _on_catalog_gui(self, etype, dev) -> None:
         if dev.uuid in self.dashboard.local_uuids():
             return                              # never inject our own as 'remote'
+        if dev.available:                       # discovered-but-not-added → Devices menu
+            self._on_remote_available(etype, dev)
+            return
         if etype in ("ADDED", "UPDATED"):
             sources = [(s.id, s.name,
                         convert._DTYPE_FROM_PROTO.get(s.dtype, "float"), s.unit)
@@ -617,6 +684,33 @@ class HubController(QObject):
                                               options, online=dev.online)
         elif etype == "REMOVED":
             self.dashboard.set_remote_offline(dev.uuid)
+
+    def _on_remote_available(self, etype, dev) -> None:
+        """Another client's AVAILABLE device (addable) → the Devices-menu store."""
+        if dev.agent_id and dev.agent_id == self._aid:
+            return                              # our own available devices aren't 'remote'
+        agent = dev.agent_id or "?"
+        if etype == "REMOVED":
+            devs = self._remote_available.get(agent)
+            if devs is not None:
+                devs.pop(dev.instance_id, None)
+                if not devs:
+                    self._remote_available.pop(agent, None)
+        else:
+            self._remote_available.setdefault(agent, {})[dev.instance_id] = \
+                self._display_descriptor(dev)
+        self.remote_available_changed.emit()
+
+    @staticmethod
+    def _display_descriptor(dev):
+        """A minimal app DeviceDescriptor for the Devices-menu card (DeviceCard reads
+        name/driver/interface.kind/status/sources/… — not the full device)."""
+        from ..core.device import DeviceDescriptor, Interface, Status
+        return DeviceDescriptor(
+            instance_id=dev.instance_id, driver=dev.driver, name=dev.name,
+            interface=Interface(kind="hub"), status=Status.DISCOVERED,
+            hardware_id=dev.hardware_id or None, firmware=dev.firmware or None,
+            sources=list(dev.sources))          # DeviceCard uses len() only
 
     def _state_cb(self, role):
         """Per-role gRPC state callback (fires on a worker thread). Surfaces the
