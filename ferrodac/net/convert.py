@@ -13,7 +13,7 @@ import numpy as np
 from google.protobuf import json_format
 from ferrodac_contract.v1 import data_plane_pb2 as pb
 
-from ..core.device import DeviceDescriptor, SinkKind
+from ..core.device import DeviceDescriptor, Param, Sink, SinkKind
 from ..core.reading import Reading
 from ..core.tag import (Marker, ORIGIN_USER, ORIGIN_DEVICE, ORIGIN_PROCESSOR,
                         ORIGIN_SYSTEM)
@@ -33,6 +33,22 @@ _SINKKIND_TO_PROTO = {
     SinkKind.ACTION: pb.ACTION, SinkKind.SETPOINT: pb.SETPOINT,
     SinkKind.TOGGLE: pb.TOGGLE, SinkKind.ENUM: pb.ENUM,
 }
+_SINKKIND_FROM_PROTO = {v: k for k, v in _SINKKIND_TO_PROTO.items()}
+
+
+def sink_from_proto(sp) -> Sink:
+    """Wire SinkPort -> app Sink so the VIEWER can build writable control ports for
+    a hub device's sinks (the control plane's viewer leg, §5.3) — the inverse of the
+    sink serialization in descriptor_to_proto."""
+    kind = _SINKKIND_FROM_PROTO.get(sp.kind, SinkKind.SETPOINT)
+    params: tuple = ()
+    if sp.unit or sp.HasField("min") or sp.HasField("max") or sp.options:
+        params = (Param(
+            name=sp.id, dtype="float", unit=sp.unit or "",
+            minimum=(sp.min if sp.HasField("min") else None),
+            maximum=(sp.max if sp.HasField("max") else None),
+            options=tuple(sp.options)),)
+    return Sink(id=sp.id, name=sp.name, kind=kind, params=params)
 
 
 def _app_version() -> str:

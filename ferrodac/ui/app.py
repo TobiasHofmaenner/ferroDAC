@@ -328,7 +328,8 @@ class MainWindow(QMainWindow):
         self._sources_show_all = False
         self.sources_panel = SourcesPanel(manager, self.dashboard,
                                           on_curate=self._curate_sources,
-                                          on_lens=self._set_source_lens_all)
+                                          on_lens=self._set_source_lens_all,
+                                          on_config=self._open_source_config)
         self.sources_dock = QDockWidget("Sources", self)
         self.sources_dock.setObjectName("SourcesDock")
         self.sources_dock.setWidget(self.sources_panel)
@@ -2420,6 +2421,27 @@ class MainWindow(QMainWindow):
         dlg.destroyed.connect(lambda *_: self._dialogs.pop(instance_id, None))
         self._dialogs[instance_id] = dlg
         dlg.show()
+
+    def _open_source_config(self, source_key: str) -> None:
+        """The ⚙ on a source card → open its owning device's config/control section.
+        Local devices open the ConfigDialog; hub-remote devices open the
+        RemoteControlDialog (control sinks over SendCommand, §5.3)."""
+        did = source_key.split("/", 1)[0]                # device identity is the first seg
+        kind = self.dashboard.source_origin(source_key)
+        if kind == "remote":
+            from .docks import RemoteControlDialog
+            dlg = self._dialogs.get(source_key)
+            if dlg is not None:
+                dlg.raise_(); dlg.activateWindow(); return
+            dlg = RemoteControlDialog(
+                did, self.dashboard.remote_name(did),
+                self.dashboard.remote_sinks(did), self.dashboard.send_command, self)
+            dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+            dlg.destroyed.connect(lambda *_: self._dialogs.pop(source_key, None))
+            self._dialogs[source_key] = dlg
+            dlg.show()
+        elif kind == "device":
+            self._open_config(self.manager.instance_for_uuid(did) or did)
 
     def _open_cv_config(self, sink_key: str) -> None:
         dlg = self._cv_dialogs.get(sink_key)

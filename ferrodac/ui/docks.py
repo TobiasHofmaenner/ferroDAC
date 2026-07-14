@@ -75,7 +75,8 @@ class SourceCard(QFrame):
     """One source port (device output or virtual input), with a Route dropdown
     listing datatype-compatible sinks."""
 
-    def __init__(self, port, color, sinks, routed, on_route, parent=None):
+    def __init__(self, port, color, sinks, routed, on_route, on_config=None,
+                 parent=None):
         super().__init__(parent)
         self.key = port.key
         self.unit = port.unit or ""
@@ -124,6 +125,14 @@ class SourceCard(QFrame):
             a.setEnabled(False)
         route.setMenu(menu)
         top.addWidget(route)
+        # ⚙ jump to the owning device's config/control section — for real devices
+        # (local or hub-remote), not virtual/derived/display ports.
+        if on_config is not None and port.kind in ("device", "remote"):
+            cfg = QToolButton()
+            cfg.setText("⚙")
+            cfg.setToolTip("Open this device's config / control")
+            cfg.clicked.connect(lambda _=False, key=port.key: on_config(key))
+            top.addWidget(cfg)
         lay.addLayout(top)
 
         # the device (origin) on its own clear line — two devices' identically-named
@@ -473,6 +482,90 @@ class ConfigDialog(QDialog):
         super().closeEvent(event)
 
 
+class RemoteControlDialog(QDialog):
+    """Control a HUB device's sinks over the wire (DESIGN §5.3). The remote analog of
+    ConfigDialog's sink section: the same SETPOINT/TOGGLE/ENUM/ACTION widgets, but
+    each dispatches through `send_command(sink_id, value)` (→ HubViewer.SendCommand)
+    instead of the local manager. The device's readback source (on the chart) shows
+    the effect (§7.5). Device OPTIONS over the hub (a Configure RPC) are a later
+    milestone — this surfaces control inputs only."""
+
+    def __init__(self, uuid, name, sinks, send_command, parent=None):
+        super().__init__(parent)
+        self._uuid = uuid
+        self._send = send_command
+        self.setWindowTitle(f"Control · {name}")
+        lay = QVBoxLayout(self)
+        head = QLabel(f"{name}   ·   hub device")
+        head.setStyleSheet("font-weight:700;")
+        lay.addWidget(head)
+        note = QLabel("Commands go to the owning agent over the hub; the device's "
+                      "readback channel shows the result on the chart.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8b95a4; font-size:11px;")
+        lay.addWidget(note)
+        if not sinks:
+            empty = QLabel("This device exposes no control inputs.")
+            empty.setStyleSheet("color:#8b95a4;")
+            lay.addWidget(empty)
+        form = QFormLayout()
+        for s in sinks:
+            form.addRow(s.name, self._sink_widget(s))
+        lay.addLayout(form)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+    def _write(self, sink_id, value) -> None:
+        if self._send is not None:
+            self._send(self._uuid, sink_id, value)
+
+    def _sink_widget(self, s) -> QWidget:
+        if s.kind == SinkKind.ACTION:
+            b = QPushButton(f"Trigger {s.name}")
+            b.clicked.connect(lambda _=False, sid=s.id: self._write(sid, None))
+            return b
+        if s.kind == SinkKind.TOGGLE:
+            chk = QCheckBox("on")
+            chk.setChecked(bool(s.value))
+            chk.toggled.connect(lambda on, sid=s.id: self._write(sid, on))
+            return chk
+        if s.kind == SinkKind.ENUM:
+            combo = QComboBox()
+            opts = list(s.params[0].options) if s.params else []
+            combo.addItems(opts)
+            if s.value in opts:
+                combo.setCurrentText(s.value)
+            combo.currentTextChanged.connect(
+                lambda txt, sid=s.id: self._write(sid, txt))
+            return combo
+        unit = s.params[0].unit if s.params else ""      # SETPOINT
+        edit = QLineEdit("" if s.value is None else f"{s.value:g}")
+        edit.setFixedWidth(110)
+        apply = QPushButton("Apply")
+
+        def _apply(_=False, sid=s.id, e=edit):
+            try:
+                val = float(e.text())
+            except ValueError:
+                return
+            self._write(sid, val)
+
+        apply.clicked.connect(_apply)
+        edit.returnPressed.connect(_apply)
+        host = QWidget()
+        cell = QHBoxLayout(host)
+        cell.setContentsMargins(0, 0, 0, 0)
+        cell.addWidget(edit)
+        cell.addWidget(QLabel(unit))
+        cell.addWidget(apply)
+        cell.addStretch(1)
+        return host
+
+
 # --------------------------------------------------------------------------- #
 #  Devices panel (left dock)
 # --------------------------------------------------------------------------- #
@@ -789,12 +882,13 @@ class CollapsibleGroup(QWidget):
 
 class SourcesPanel(QWidget):
     def __init__(self, manager: DeviceManager, dashboard: Dashboard,
-                 on_curate=None, on_lens=None, parent=None):
+                 on_curate=None, on_lens=None, on_config=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.dashboard = dashboard
         self._on_curate = on_curate
         self._on_lens = on_lens
+        self._on_config = on_config              # (source_key) -> open its device's config
         self._cards: dict[str, SourceCard] = {}
         self._collapsed: set[str] = set()        # origins folded by the user
 
@@ -874,6 +968,7 @@ class SourcesPanel(QWidget):
                     self.dashboard.compatible_sinks(port.key),
                     self.dashboard.routed(port.key),
                     lambda skey, on, key=port.key: self.dashboard.set_route(key, skey, on),
+                    on_config=self._on_config,
                 )
                 self._cards[port.key] = card
                 grp.add(card)

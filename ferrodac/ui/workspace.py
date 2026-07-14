@@ -91,6 +91,7 @@ class SinkPort:
     smin: float = 0.0
     smax: float = 1.0
     online: bool = True   # False = referenced-but-absent placeholder
+    remote: bool = False  # True = a hub device's sink; writes go via SendCommand (§5.3)
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +240,9 @@ class Dashboard(QObject):
         self._on_route_refused = self._migrate_refused_route
         self._x_linking = False               # guard: a cross-panel X-link broadcast in flight
         self.on_chart_zoom = None             # app hook(panel, t0, t1): re-query on manual zoom
+        # control plane (§5.3): set a REMOTE device sink over the hub. app wires this to
+        # HubViewer.send_command(uuid, sink_id, value, on_result); None until connected.
+        self.send_command = None
         # is_live() → are we following the live edge (vs a parked replay)? Heavy
         # processors run off the GUI thread while LIVE (so a slow analysis never
         # freezes acquisition); during a parked re-stream they run inline so the
@@ -276,6 +280,7 @@ class Dashboard(QObject):
         self._processors: dict = {}
         self._proc_counters: dict = {}
         self._remote_names: dict = {}            # uuid -> name (hub-viewer devices)
+        self._remote_sinks: dict = {}            # uuid -> [app Sink] (for the control dialog)
         # off-GUI processor execution (§21.3): a worker pool runs process(), with
         # at-most-one-in-flight PER processor (conflate — the latest input wins so a
         # slow analysis can't back up), and results marshal to the GUI via _derived.
@@ -915,11 +920,15 @@ class Dashboard(QObject):
                 out.add(key.split("/", 1)[0])
         return out
 
-    def add_remote_device(self, uuid: str, name: str, sources, online: bool = True):
-        """Add/refresh a hub device's sources as local-looking ports. `sources`
-        is a list of (source_id, name, dtype, unit). Returning online re-binds an
-        existing placeholder (its routes/curves persist)."""
+    def add_remote_device(self, uuid: str, name: str, sources, sinks=(),
+                          online: bool = True):
+        """Add/refresh a hub device's sources AND control sinks as local-looking
+        ports. `sources` is [(source_id, name, dtype, unit)]; `sinks` is a list of app
+        `Sink`s (the control plane §5.3 — writes route over the hub via SendCommand).
+        Returning online re-binds an existing placeholder (its routes/curves persist)."""
         self._remote_names[uuid] = name
+        if sinks:
+            self._remote_sinks[uuid] = list(sinks)      # for the remote control dialog
         for sid, sname, dtype, unit in sources:
             key = f"{uuid}/{sid}"
             existing = self._sources.get(key)
@@ -929,6 +938,16 @@ class Dashboard(QObject):
             else:
                 self._sources[key] = SourcePort(
                     key, sname, dtype, unit, name, "remote", online=online)
+        for sk in sinks:                          # writable control ports, routed remotely
+            key = f"{uuid}#{sk.id}"
+            dt = _SINK_DTYPE.get(sk.kind, "float")
+            p = sk.params[0] if sk.params else None
+            self._sinks[key] = SinkPort(
+                key, sk.name, dt, p.unit if p else "", name, "device",
+                accepts=frozenset({dt}), single_bind=True,
+                device_id=uuid, sink_id=sk.id, remote=True, online=online,
+                smin=(p.minimum if p and p.minimum is not None else 0.0),
+                smax=(p.maximum if p and p.maximum is not None else 1.0))
         self.ports_changed.emit()
 
     def set_remote_offline(self, uuid: str):
@@ -939,6 +958,9 @@ class Dashboard(QObject):
             if p.kind == "remote" and key.startswith(prefix) and p.online:
                 p.online = False
                 self._emit_offline_gap(key)
+        for sp in self._sinks.values():           # grey the control ports too
+            if sp.remote and sp.device_id == uuid:
+                sp.online = False
         self.ports_changed.emit()
 
     def remove_remote_device(self, uuid: str):
@@ -948,8 +970,27 @@ class Dashboard(QObject):
                     if p.kind == "remote" and k.startswith(prefix)]:
             del self._sources[key]
             self._routes.pop(key, None)
+        for key in [k for k, p in self._sinks.items()      # + its remote control ports
+                    if p.remote and p.device_id == uuid]:
+            del self._sinks[key]
+            for src in list(self._routes):                 # unbind any routes to them
+                self._routes[src] = [s for s in self._routes[src] if s != key]
         self._remote_names.pop(uuid, None)
+        self._remote_sinks.pop(uuid, None)
         self.ports_changed.emit()
+
+    def source_origin(self, key: str) -> str:
+        """A source port's kind ("device" local / "remote" hub / "display" / …), so a
+        caller can route it to the right config surface. "" if unknown."""
+        p = self._sources.get(key)
+        return p.kind if p is not None else ""
+
+    def remote_sinks(self, uuid: str) -> list:
+        """The app `Sink`s of a hub device (for the remote control dialog), or []."""
+        return list(self._remote_sinks.get(uuid, ()))
+
+    def remote_name(self, uuid: str) -> str:
+        return self._remote_names.get(uuid, uuid)
 
     def clear_remote_devices(self):
         for uuid in list(self._remote_names):
@@ -1263,7 +1304,7 @@ class Dashboard(QObject):
             for sink_key in self._routes.get(source_key, ()):
                 sp = self._sinks.get(sink_key)
                 if sp is not None and sp.kind == "device":
-                    self.manager.write(sp.device_id, sp.sink_id, None, silent=True)
+                    self._write_to_device(sp, None)   # local or remote (via SendCommand)
             return
         # slider/toggle: publish as a reading so displays show it; the control
         # sink (_on_control_batch) then writes it to any routed device sinks.
@@ -1272,6 +1313,10 @@ class Dashboard(QObject):
         )
 
     def _write_to_device(self, sink: SinkPort, value) -> None:
+        if sink.remote:                       # a hub device → command over the wire (§5.3)
+            if self.send_command is not None:
+                self.send_command(sink.device_id, sink.sink_id, value)
+            return
         self.manager.write(sink.device_id, sink.sink_id, value, silent=True)
 
     # -- edit mode -----------------------------------------------------------

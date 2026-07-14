@@ -178,6 +178,7 @@ class HubController(QObject):
             # live video demand follows the local routes (§9)
             self.dashboard.ports_changed.connect(self._recompute_frame_wants)
             self._recompute_frame_wants()
+            self.dashboard.send_command = self._send_remote_command   # control §5.3
             self._viewer.start()
         # hub READ tier + backup admin: a sync channel, wired whenever connected
         # (independent of agent/viewer) — the read tier back-reads history a wiped
@@ -292,6 +293,7 @@ class HubController(QObject):
             self._project_mgr.clear_hub()        # hub projects aren't offline
             if self._on_projects is not None:
                 self._on_projects()
+        self.dashboard.send_command = None       # control seam gone with the viewer
         self.dashboard.clear_remote_devices()
         self._link = {}
         if self.addr:
@@ -432,6 +434,18 @@ class HubController(QObject):
     _FRAME_DOC_MIN_DT = 1.0 / 8      # ≤8 fps
     _FRAME_DOC_QUALITY = 80
 
+    def _send_remote_command(self, device_uuid, sink_id, value):
+        """Dashboard → set a REMOTE device's control sink over the hub (§5.3). Non-
+        blocking; a failure surfaces on the status line (the sink's readback source
+        is the real success signal, §7.5). No-op unless we're a viewer."""
+        if self._viewer is None:
+            return
+
+        def on_result(ok, detail):           # fires on the viewer thread → status is queued
+            if not ok:
+                self.status.emit(f"⚠ command failed: {detail}")
+        self._viewer.send_command(device_uuid, sink_id, value, on_result=on_result)
+
     def _on_agent_command(self, device_uuid, sink_id, value):
         """A hub command for a device THIS agent owns → run the local sink write
         (§5.3). Called on the agent's worker thread (off its loop), so the blocking
@@ -568,7 +582,8 @@ class HubController(QObject):
             sources = [(s.id, s.name,
                         convert._DTYPE_FROM_PROTO.get(s.dtype, "float"), s.unit)
                        for s in dev.sources]
-            self.dashboard.add_remote_device(dev.uuid, dev.name, sources,
+            sinks = [convert.sink_from_proto(sk) for sk in dev.sinks]   # control §5.3
+            self.dashboard.add_remote_device(dev.uuid, dev.name, sources, sinks,
                                               online=dev.online)
         elif etype == "REMOVED":
             self.dashboard.set_remote_offline(dev.uuid)
