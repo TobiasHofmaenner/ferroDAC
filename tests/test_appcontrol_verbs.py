@@ -249,6 +249,14 @@ def test_record_start_stop_status(control_surface):
 
 
 @pytest.mark.ui
+def test_device_add_errors_on_unavailable_id(control_surface):
+    """device.add on an id that isn't discovered raises (not a silent ok:true no-op, #6)."""
+    w, s = control_surface
+    with pytest.raises(ControlError):
+        s.dispatch("device.add", {"instance_id": "lsc:nope"}, scope="control")
+
+
+@pytest.mark.ui
 def test_device_remove_remote_registered_and_guards(control_surface):
     w, s = control_surface
     verbs = {v["name"]: v for v in s.describe()["verbs"]}

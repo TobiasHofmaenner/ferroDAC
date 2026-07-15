@@ -191,13 +191,22 @@ def build_control_surface(app) -> ControlSurface:
                description="Disconnect from the hub.")
 
     def _device_add(p):
-        iid = p.get("instance_id")
+        iid = str(p.get("instance_id") or "")
         if not iid:
             raise ControlError("device.add needs 'instance_id'")
-        app.manager.add(str(iid), user=True)
+        if app.manager.is_active(iid):
+            return {"ok": True, "instance_id": iid, "already_active": True}
+        avail = {d.instance_id for d in app.manager.available_descriptors()}
+        if iid not in avail:                 # don't ack a silent no-op (issue #6)
+            raise ControlError(
+                f"no available device with instance_id {iid!r} — it isn't discovered "
+                f"(check the connection / cable), see device.list")
+        app.manager.add(iid, user=True)      # async connect; watch device.list for active/error
         return {"ok": True, "instance_id": iid}
     s.register("device.add", gui(_device_add),
-               description="Onboard an available (discovered) device.",
+               description="Onboard an available (discovered) device. Errors if the "
+                           "instance_id isn't in the available set (not a silent no-op). The "
+                           "connect is async — poll device.list for active / error + last_error.",
                params={"instance_id": {"type": "string", "required": True}})
 
     def _device_set_sink(p):     # OFF the GUI thread — write_sync may block on I/O

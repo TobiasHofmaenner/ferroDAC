@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import math
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -64,6 +65,8 @@ except Exception:  # pragma: no cover
 
 BAUD = 1050000       # NEVER 1200 — that is the bootloader trigger (manual §1)
 TERM = b"\n"
+PROBE_RETRY_S = 30.0  # re-probe a port whose probe FAILED after this cooldown, so a transient
+#                       glitch can't stick a live device as undiscoverable forever (issue #6)
 
 # !EVT kind -> tag severity (manual §7). Unlisted kinds default to "info".
 _EVENT_SEVERITY = {
@@ -155,9 +158,13 @@ class LSC:
     def open(self) -> "LSC":
         if not HAVE_SERIAL:
             raise LSCError("pyserial not available")
-        self._ser = serial.Serial(
-            self.port, self.baud, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE, timeout=self.timeout, write_timeout=self.timeout)
+        kw = dict(bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
+                  stopbits=serial.STOPBITS_ONE, timeout=self.timeout,
+                  write_timeout=self.timeout)
+        if sys.platform.startswith(("linux", "darwin")):
+            kw["exclusive"] = True         # POSIX TIOCEXCL: a stray reader/screen/cat on the
+            #                                port can't silently corrupt a live link (issue #6)
+        self._ser = serial.Serial(self.port, self.baud, **kw)
         time.sleep(0.15)                       # let the FTDI device settle after open
         try:
             self._ser.reset_input_buffer()     # drop boot noise (only safe moment to)
@@ -536,6 +543,7 @@ class LSCDevice(BaseDevice):
     discoverable = True
 
     _cache: dict = {}                # port -> ProbeResult | None
+    _probe_cooldown: dict = {}       # port -> earliest monotonic re-probe time (failed probes)
     _active_ports = PORTS_IN_USE     # shared serial arbiter (see lsa31)
     _cls_lock = SERIAL_LOCK
 
@@ -585,16 +593,29 @@ class LSCDevice(BaseDevice):
         if not HAVE_SERIAL:
             return []
         present = {p.device for p in serial.tools.list_ports.comports()}
+        now = time.monotonic()
         with cls._cls_lock:
             for p in [p for p in cls._cache if p not in present]:
                 del cls._cache[p]
+            for p in [p for p in cls._active_ports if p not in present]:
+                cls._active_ports.discard(p)          # #6: a vanished port can't be "in use"
+                cls._probe_cooldown.pop(p, None)
+            # probe a port not yet cached, OR one whose cached FAILURE has cooled down — so a
+            # transient probe glitch doesn't leave a present device undiscoverable forever (#6).
             to_probe = [p for p in present
-                        if p not in cls._cache and p not in cls._active_ports]
+                        if p not in cls._active_ports
+                        and (p not in cls._cache
+                             or (cls._cache[p] is None
+                                 and now >= cls._probe_cooldown.get(p, 0.0)))]
         for p in to_probe:
             res = probe_port(p)                       # slow work outside the lock
             with cls._cls_lock:
                 if p not in cls._active_ports:
                     cls._cache[p] = res
+                    if res is None:
+                        cls._probe_cooldown[p] = now + PROBE_RETRY_S   # back off, then retry
+                    else:
+                        cls._probe_cooldown.pop(p, None)
         with cls._cls_lock:
             results = [r for r in cls._cache.values() if r is not None]
         return [cls(r) for r in results]
@@ -642,13 +663,19 @@ class LSCDevice(BaseDevice):
     def _disconnect(self) -> None:
         # Leave physical outputs as the operator set them — an implicit vent/pump
         # change on disconnect would be an unsafe surprise, not a safe default.
-        with self._io_lock:
-            if self._lsc is not None:
-                self._lsc.close()
-                self._lsc = None
-            self._meas = None
-        with type(self)._cls_lock:
-            type(self)._active_ports.discard(self._port)
+        try:
+            with self._io_lock:
+                try:
+                    if self._lsc is not None:
+                        self._lsc.close()
+                except Exception:             # a corrupted/dropped port can error on close —
+                    pass                      # swallow it so the arbiter is STILL released (#6)
+                finally:
+                    self._lsc = None
+                    self._meas = None
+        finally:
+            with type(self)._cls_lock:        # ALWAYS free the port, on any teardown path (#6)
+                type(self)._active_ports.discard(self._port)
 
     @staticmethod
     def _parse_state(sink: Sink, raw: str):

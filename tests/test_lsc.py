@@ -534,6 +534,91 @@ def test_reader_hard_resyncs_after_timeout(fake):
         lsc.close()
 
 
+def test_disconnect_releases_port_even_if_close_raises(fake, monkeypatch):
+    """A corrupted port that errors on close() must STILL be released from the shared
+    arbiter — else the device stays 'in use' and becomes undiscoverable until restart (#6)."""
+    from ferrodac.core.serial_arbiter import PORTS_IN_USE
+    dev = LSCDevice(ProbeResult(port="/dev/ttyUSB9", serial="0009", firmware="d",
+                                product="P", schema=json.loads(json.dumps(SCHEMA))))
+    dev._connect()
+    lsc = dev._lsc
+    assert "/dev/ttyUSB9" in PORTS_IN_USE                 # held while active
+    monkeypatch.setattr(lsc, "close",                     # simulate a corrupted FTDI on close
+                        lambda: (_ for _ in ()).throw(OSError("bad port")))
+    try:
+        dev._disconnect()
+        assert "/dev/ttyUSB9" not in PORTS_IN_USE         # …released anyway
+    finally:
+        lsc.stop_reader()                                 # close was stubbed → stop the reader
+        PORTS_IN_USE.discard("/dev/ttyUSB9")
+
+
+def test_discover_releases_vanished_port_from_arbiter(monkeypatch):
+    """discover() drops a no-longer-present port from the shared arbiter (the #6 backstop)."""
+    import ferrodac.devices.lsc as m
+    from ferrodac.core.serial_arbiter import PORTS_IN_USE
+    monkeypatch.setattr(m, "HAVE_SERIAL", True)
+    monkeypatch.setattr(m.serial.tools.list_ports, "comports", lambda: [])   # nothing present
+    monkeypatch.setattr(m, "probe_port", lambda p: None)
+    m.LSCDevice._cache.pop("/dev/ghost", None)
+    PORTS_IN_USE.add("/dev/ghost")                        # a port stuck in the arbiter
+    try:
+        m.LSCDevice.discover()
+        assert "/dev/ghost" not in PORTS_IN_USE
+    finally:
+        PORTS_IN_USE.discard("/dev/ghost")
+
+
+def test_discover_reprobes_a_failed_port_after_cooldown(monkeypatch):
+    """A transiently-failed probe is cached but re-probed after PROBE_RETRY_S, so a live
+    device can't be stuck undiscoverable forever (issue #6)."""
+    import ferrodac.devices.lsc as m
+    from ferrodac.core.serial_arbiter import PORTS_IN_USE
+
+    class _P:
+        def __init__(self, d):
+            self.device = d
+    monkeypatch.setattr(m, "HAVE_SERIAL", True)
+    monkeypatch.setattr(m.serial.tools.list_ports, "comports", lambda: [_P("/dev/probe0")])
+    n = {"calls": 0}
+
+    def _probe(_p):
+        n["calls"] += 1
+        return None                                       # always fails
+    monkeypatch.setattr(m, "probe_port", _probe)
+    m.LSCDevice._cache.pop("/dev/probe0", None)
+    m.LSCDevice._probe_cooldown.pop("/dev/probe0", None)
+    PORTS_IN_USE.discard("/dev/probe0")
+    try:
+        m.LSCDevice.discover()                            # probe #1 → fail → cached + cooldown
+        assert n["calls"] == 1
+        m.LSCDevice.discover()                            # within cooldown → NOT re-probed
+        assert n["calls"] == 1
+        m.LSCDevice._probe_cooldown["/dev/probe0"] = 0.0  # fast-forward past the cooldown
+        m.LSCDevice.discover()                            # cooldown expired → re-probed
+        assert n["calls"] == 2
+    finally:
+        m.LSCDevice._cache.pop("/dev/probe0", None)
+        m.LSCDevice._probe_cooldown.pop("/dev/probe0", None)
+
+
+def test_open_is_exclusive_on_posix_only(monkeypatch):
+    """A live link opens with POSIX exclusive access so a stray reader can't corrupt it (#6);
+    non-POSIX (Windows serial is exclusive by default) passes no such kwarg."""
+    import ferrodac.devices.lsc as m
+    captured = {}
+    monkeypatch.setattr(m.serial, "Serial",
+                        lambda port, baud, **kw: (captured.update(kw), FakeSerial())[1])
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    monkeypatch.setattr(m.sys, "platform", "linux")
+    LSC("/dev/ttyUSB0").open()
+    assert captured.get("exclusive") is True
+    captured.clear()
+    monkeypatch.setattr(m.sys, "platform", "win32")
+    LSC("/dev/ttyUSB0").open()
+    assert "exclusive" not in captured
+
+
 def test_device_write_action_sends_do(fake):
     """A device-level ACTION write sends '<sink>:DO' (only TOGGLE was covered)."""
     dev = _device(fake)
