@@ -152,6 +152,7 @@ make test-ui                  # PySide6 smoke tests only
 
 - [docs/DESIGN.md](docs/DESIGN.md) — the full architecture (the ideal we aim at).
 - [docs/ROADMAP.md](docs/ROADMAP.md) — phasing, MVP scope, and open decisions.
+- [docs/writing-a-driver.md](docs/writing-a-driver.md) — the device-driver contract (hooks, `_read`, dtypes, `emit_tag`, serial).
 
 ## License
 

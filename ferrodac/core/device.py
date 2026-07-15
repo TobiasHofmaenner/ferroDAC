@@ -90,6 +90,11 @@ class Source:
     name: str
     unit: str = ""
     modality: Modality = Modality.SCALAR
+    # Legal dtype tokens (the router in net/convert.py is the authority): "float", "bool",
+    # "trace", "string", "enum", "image", "video", "waveform". A driver's _read() ALWAYS
+    # returns a float regardless (an enum → its option index, a bool → 0/1), so scalar/
+    # categorical channels declare "float"/"bool" — NOT "int"/"str", which aren't tokens and
+    # make the router drop the channel from curation/export/charts. See docs/writing-a-driver.md.
     dtype: str = "float"
     prefer_log: bool = False
     # First-class uncertainty (DESIGN §19.0): the declared σ MODEL for this channel, or
