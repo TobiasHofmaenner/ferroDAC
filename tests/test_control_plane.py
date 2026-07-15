@@ -170,6 +170,43 @@ def test_remote_options_surface_for_the_config_dialog(qapp):
     assert dash.remote_options("dev-uuid") == []
 
 
+def test_curate_dialog_includes_video_sources(qapp):
+    """Camera/video sources (dtype 'image'/'video') are tickable in the Curate dialog —
+    the dtype allowlist previously dropped them, so a remote camera couldn't be curated
+    (the remote-video-not-selectable bug)."""
+    from ferrodac.core.engine import Engine
+    from ferrodac.core.manager import DeviceManager
+    from ferrodac.ui.workspace import Dashboard, WorkspaceArea
+    from ferrodac.ui.docks import _SourceCurateDialog
+
+    dash = Dashboard(WorkspaceArea(), Engine(),
+                     DeviceManager([], engine=Engine(), registry=None))
+    dash.add_remote_device("cam-uuid", "Rig Cam",
+                           [("frame", "Video", "image", ""),
+                            ("temp", "Temp", "float", "C")])
+    dlg = _SourceCurateDialog(dash.source_ports(), [], None)
+    assert "cam-uuid/frame" in dlg._checks           # the video source got a checkbox…
+    assert "cam-uuid/temp" in dlg._checks            # …and the scalar still does
+    dlg.deleteLater()
+
+
+def test_remote_added_fires_once_for_a_new_hub_device(qapp):
+    """Workspace.remote_added fires on a hub device's FIRST appearance (drives the app's
+    remote auto-curate) — and not again when it merely re-announces/refreshes."""
+    from ferrodac.core.engine import Engine
+    from ferrodac.core.manager import DeviceManager
+    from ferrodac.ui.workspace import Dashboard, WorkspaceArea
+
+    dash = Dashboard(WorkspaceArea(), Engine(),
+                     DeviceManager([], engine=Engine(), registry=None))
+    seen = []
+    dash.remote_added.connect(seen.append)
+    dash.add_remote_device("cam-uuid", "Rig Cam", [("frame", "Video", "image", "")])
+    dash.add_remote_device("cam-uuid", "Rig Cam",
+                           [("frame", "Video", "image", "")])   # re-announce → no re-fire
+    assert seen == ["cam-uuid"]                       # first appearance only
+
+
 def test_remote_sink_becomes_a_writable_port_routed_over_the_hub(qapp):
     from ferrodac.core.engine import Engine
     from ferrodac.core.manager import DeviceManager

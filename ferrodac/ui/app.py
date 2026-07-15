@@ -314,6 +314,9 @@ class MainWindow(QMainWindow):
         # a device the USER adds → its channels join the active project's curated lens
         # (so a curated project doesn't silently hide a device you just plugged in)
         self.manager.device_added.connect(self._curate_new_device)
+        # a hub device that arrives → auto-curate it too (local devices get this via
+        # device_added, but remote ones are injected straight into the dashboard)
+        self.dashboard.remote_added.connect(self._curate_remote_device)
         # project git history (DESIGN §8.2): boundary commits are immediate; doc edits
         # debounce through this timer so a burst of edits → one "settled" commit.
         self._commit_timer = QTimer(self)
@@ -1109,29 +1112,39 @@ class MainWindow(QMainWindow):
             return
 
         def apply(iid=instance_id):
-            proj = self._project_mgr.active
-            if proj is None:
-                return
-            existing = proj.source_keys()
-            if not existing:
-                return
             desc = next((d for d in self.manager.active_descriptors()
                          if d.instance_id == iid), None)
-            if desc is None:
-                return
-            dev_id = getattr(desc, "uuid", "") or iid
-            keys = [sp.key for sp in self.dashboard.source_ports()
-                    if sp.key.split("/", 1)[0] == dev_id
-                    and getattr(sp, "kind", "") in ("device", "remote")]
-            to_add = [k for k in keys if k not in existing]
-            if not to_add:
-                return
-            proj.set_sources(list(proj.sources()) + [{"key": k} for k in to_add])
-            self._apply_source_lens()
-            self._refresh_explorer()
-            self._republish_active_if_hub()
+            if desc is not None:
+                self._curate_dev_id(getattr(desc, "uuid", "") or iid)
         # defer one tick so the dashboard has rebuilt its ports for the new device
         QTimer.singleShot(0, apply)
+
+    def _curate_remote_device(self, uuid: str) -> None:
+        """A hub device just appeared → auto-curate its channels too. Local devices get
+        this via manager.device_added; remote ones are injected into the dashboard, so
+        the Workspace.remote_added signal drives it. Its ports already exist here."""
+        self._curate_dev_id(uuid)
+
+    def _curate_dev_id(self, dev_id: str) -> None:
+        """Append device `dev_id`'s channels to the active project's lens (so a curated
+        project doesn't silently hide a just-arrived device). No-op for a show-all
+        project or when every channel is already listed; never re-adds a curated-out one."""
+        proj = self._project_mgr.active
+        if proj is None:
+            return
+        existing = proj.source_keys()
+        if not existing:
+            return
+        keys = [sp.key for sp in self.dashboard.source_ports()
+                if sp.key.split("/", 1)[0] == dev_id
+                and getattr(sp, "kind", "") in ("device", "remote")]
+        to_add = [k for k in keys if k not in existing]
+        if not to_add:
+            return
+        proj.set_sources(list(proj.sources()) + [{"key": k} for k in to_add])
+        self._apply_source_lens()
+        self._refresh_explorer()
+        self._republish_active_if_hub()
 
     def _curate_sources(self) -> None:
         """Pick which channels this project shows (a lens over the catalog)."""

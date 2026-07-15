@@ -222,6 +222,7 @@ EXPORT_DEFAULT = {"width": 1600, "height": 0, "dpi": 96}
 
 class Dashboard(QObject):
     ports_changed = Signal()     # ports or routes changed (docks refresh)
+    remote_added = Signal(str)   # a NEW hub device was injected (uuid) → auto-curate it
     _derived = Signal(str, float, object)   # proc_id, t, out-dict — worker → GUI
 
     def __init__(self, area: WorkspaceArea, engine, manager, parent=None,
@@ -928,6 +929,7 @@ class Dashboard(QObject):
         ports. `sources` is [(source_id, name, dtype, unit)]; `sinks` is a list of app
         `Sink`s and `options` a list of app `Option`s (control plane §5.3 — writes go
         over the hub via SendCommand/SetConfig). Returning online re-binds a placeholder."""
+        is_new = uuid not in self._remote_names
         self._remote_names[uuid] = name
         if sinks:
             self._remote_sinks[uuid] = list(sinks)      # for the remote control dialog
@@ -953,6 +955,8 @@ class Dashboard(QObject):
                 smin=(p.minimum if p and p.minimum is not None else 0.0),
                 smax=(p.maximum if p and p.maximum is not None else 1.0))
         self.ports_changed.emit()
+        if is_new:                                # first appearance → let the app auto-curate
+            self.remote_added.emit(uuid)
 
     def set_remote_offline(self, uuid: str):
         """A remote device left the catalog → greyed placeholder + a NaN gap,

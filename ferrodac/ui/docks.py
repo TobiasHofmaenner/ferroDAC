@@ -1308,8 +1308,8 @@ class _SourceCurateDialog(QDialog):
         sel = set(selected)
         last_origin = None
         for p in sorted(ports, key=lambda p: (p.origin or "", p.name)):
-            if p.dtype not in ("float", "bool", "trace"):
-                continue
+            if p.dtype not in ("float", "bool", "trace", "image", "video"):
+                continue                            # video/camera sources are curatable too
             if p.origin != last_origin:             # a light per-device header
                 last_origin = p.origin
                 h = QLabel(p.origin or "Unknown device")
