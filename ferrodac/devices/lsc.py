@@ -137,6 +137,8 @@ class LSC:
         self._schema: Optional[dict] = None
         self._sources: Optional[list] = None   # cached DESCRIBE sources[] (order!)
         self._sinks: Optional[list] = None
+        self._desynced = False                 # a timed-out reply may have left the stream
+        #                                        offset by one → resync on the next send (§6)
 
     # -- link ----------------------------------------------------------------- #
     def open(self) -> "LSC":
@@ -169,6 +171,12 @@ class LSC:
     def _send(self, line: str) -> None:
         if self._ser is None:
             raise LSCError("port not open")
+        if self._desynced:                     # a prior timeout may have left a late reply in
+            try:                               # the buffer → discard it so THIS command's reply
+                self._ser.reset_input_buffer() # is the next '=' we read (deliberate resync, §6)
+            except Exception:
+                pass
+            self._desynced = False
         try:
             self._ser.write(line.encode("ascii") + TERM)
             self._ser.flush()
@@ -210,6 +218,7 @@ class LSC:
         for _ in range(10000):
             raw = self._readline()
             if raw is None:
+                self._desynced = True          # a late reply may still be in flight → resync next send
                 raise LSCError("no reply (timeout)")
             c = raw[0]
             if c == "=":
@@ -219,6 +228,7 @@ class LSC:
             elif c == "!":
                 self._dispatch(self.on_event, self._parse_event(raw))
             # else: bare/unknown line — skip
+        self._desynced = True
         raise LSCError("no reply (too many interleaved frames)")
 
     @staticmethod
@@ -268,23 +278,26 @@ class LSC:
 
     @staticmethod
     def _convert(dtype: str, raw: str):
-        """A positional MEAS/stream value → its typed Python value (manual §5)."""
+        """A positional MEAS/stream value → its typed Python value (manual §5). TOTAL by
+        design: an unparseable field maps to NaN (the invalid-reading sentinel) instead of
+        raising, so one garbage value never crashes a MEAS?/stream decode mid-exchange."""
         if raw.lower() == "nan":
             return float("nan")                # invalid / unavailable
-        if dtype == "bool":
-            return int(raw)                    # 0 / 1
-        if dtype == "i32":
-            return int(raw)
         if dtype == "enum":
-            return raw                         # the option string
-        return float(raw)                      # f32 (default)
+            return raw                         # the option string (index mapped in _read)
+        try:
+            if dtype in ("bool", "i32"):
+                return int(raw)                # 0 / 1 or a signed int
+            return float(raw)                  # f32 (default)
+        except (ValueError, TypeError):
+            return float("nan")                # garbage field → invalid reading, never a crash
 
     # -- transactions --------------------------------------------------------- #
     def _query(self, line: str) -> str:
         """Send a command/query; return the ``=`` payload, raising on ``=ERR``."""
         self._send(line)
         payload = self._await_reply()
-        if payload.startswith("ERR"):
+        if payload == "ERR" or payload.startswith("ERR,"):   # NOT a value like "ERR_LEAK"
             code, msg = self._parse_err(payload)
             raise LSCError(f"query {line!r} error {code}: {msg}", code=code)
         return payload
@@ -337,7 +350,7 @@ class LSC:
         line = f"{sink_id}:{verb}" + ("" if arg is None else f" {arg}")
         self._send(line)
         payload = self._await_reply()
-        if payload.startswith("ERR"):
+        if payload == "ERR" or payload.startswith("ERR,"):   # NOT a value like "ERR_LEAK"
             code, msg = self._parse_err(payload)
             raise LSCError(f"command {line!r} error {code}: {msg}", code=code)
         return payload
@@ -397,14 +410,16 @@ def probe_port(port: str) -> Optional[ProbeResult]:
 #  Schema → ferroDAC descriptors (the self-describing mapping, manual §4)
 # --------------------------------------------------------------------------- #
 def _source_from_schema(s: dict) -> Source:
+    # Every LSC source carries a FLOAT on the data plane (_read returns a float — an enum
+    # becomes its option index), so the ferroDAC dtype is "float" for numeric/enum sources
+    # and "bool" for booleans. "str"/"int" are NOT platform dtypes: the router only knows
+    # float/bool/trace/… and would silently drop the channel from curation/export/charts.
     dt = s.get("dtype", "f32")
     if dt == "bool":
         modality, pydtype = Modality.STATUS, "bool"
     elif dt == "enum":
-        modality, pydtype = Modality.STATUS, "str"
-    elif dt == "i32":
-        modality, pydtype = Modality.SCALAR, "int"
-    else:                                      # f32 (and any unknown) → scalar
+        modality, pydtype = Modality.STATUS, "float"   # carried as its option index
+    else:                                              # f32 / i32 / unknown → scalar float
         modality, pydtype = Modality.SCALAR, "float"
     return Source(id=s["id"], name=s.get("name", s["id"]), unit=s.get("unit", ""),
                   modality=modality, dtype=pydtype, prefer_log=bool(s.get("log", False)))
@@ -475,15 +490,9 @@ class LSCDevice(BaseDevice):
         # for at most a half-period — the lsa31 polling model.
         self._meas: Optional[dict] = None
         self._meas_at = 0.0
-        # !EVT lines the link surfaced while awaiting replies, drained → tags.
+        # !EVT lines the link surfaced while awaiting replies, drained → tags via the
+        # BaseDevice emit_tag() channel (the platform injects the sink; §7.3).
         self._events: list = []
-        self._on_tag: Optional[Callable[[Marker], None]] = None
-
-    # -- tag sink -------------------------------------------------------------- #
-    def set_tag_sink(self, cb: Optional[Callable[[Marker], None]]) -> None:
-        """Register the callback that receives device-origin tags (one per
-        ``!EVT``). The app wires this to its TagStore; None disables emission."""
-        self._on_tag = cb
 
     # -- discovery -------------------------------------------------------------- #
     @classmethod
@@ -581,14 +590,8 @@ class LSCDevice(BaseDevice):
         if not self._events:
             return
         pending, self._events = self._events, []
-        cb = self._on_tag
-        if cb is None:
-            return
         for evt in pending:
-            try:
-                cb(self._event_to_tag(evt))
-            except Exception:
-                pass
+            self.emit_tag(self._event_to_tag(evt))    # base forwards to the platform sink
 
     def _event_to_tag(self, evt: Event) -> Marker:
         sev = _EVENT_SEVERITY.get(evt.kind, "info")
@@ -618,10 +621,12 @@ class LSCDevice(BaseDevice):
         v = m.get(source.id)
         if v is None:
             return math.nan, 1
-        if source.dtype == "str":                 # enum → index into its options
+        if source.id in self._enum_options:       # enum → index into its options
+            #                                       (keyed off the enum map, NOT the dtype,
+            #                                        which is "float" so charts/export accept it)
             if isinstance(v, float) and math.isnan(v):
                 return math.nan, 1
-            opts = self._enum_options.get(source.id, ())
+            opts = self._enum_options[source.id]
             try:
                 return float(opts.index(v)), 0
             except ValueError:
