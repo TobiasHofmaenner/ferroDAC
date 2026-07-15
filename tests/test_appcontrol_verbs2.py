@@ -209,6 +209,36 @@ def test_device_verbs_are_self_described(control_surface):
     assert "device.remove" not in read_verbs and "device.config_set" not in read_verbs
 
 
+@pytest.mark.ui
+def test_device_create_python_source(control_surface, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))   # isolate the python_sources defs
+    w, s = control_surface
+
+    # default: a python source with the starter template (sine + ramp), activated
+    out = assert_json_able(s.dispatch("device.create", {}, scope="control"))
+    assert out["driver"] == "python_source" and out["instance_id"].startswith("python:")
+    assert out["uuid"] and out["last_error"] is None       # got a uuid; starter compiled
+    assert {sk["id"] for sk in out["sources"]} == {"sine", "ramp"}
+    assert w.manager.is_active(out["instance_id"])
+
+    # custom code -> the declared source(s)
+    code = 'SOURCES=[{"id":"answer","unit":""}]\ndef poll(ctx): return {"answer": 42.0}'
+    out2 = assert_json_able(
+        s.dispatch("device.create", {"code": code, "name": "Answer"}, scope="control"))
+    assert out2["name"] == "Answer" and [sk["id"] for sk in out2["sources"]] == ["answer"]
+    assert out2["last_error"] is None
+
+    # broken code -> created anyway with last_error surfaced (fixable via device.config_set)
+    out3 = s.dispatch("device.create", {"code": "def poll(ctx): return {  # oops"},
+                      scope="control")
+    assert out3["last_error"]
+
+    with pytest.raises(ControlError):                      # unsupported kind
+        s.dispatch("device.create", {"kind": "keithley6221"}, scope="control")
+    with pytest.raises(ScopeError):                        # control verb
+        s.dispatch("device.create", {}, scope="read")
+
+
 # -- projects ----------------------------------------------------------------
 @pytest.mark.ui
 def test_project_active_returns_full_metadata(control_surface):

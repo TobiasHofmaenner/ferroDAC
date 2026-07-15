@@ -250,11 +250,12 @@ class PythonSourceDevice(BaseDevice):
 
     # -- minting / restore ---------------------------------------------------
     @classmethod
-    def new(cls) -> "PythonSourceDevice":
-        """A fresh instance with a unique id and the starter template — what the
-        Devices-menu action mints. The menu action then persists it with
-        ``save_def(dev.instance_id, dev.describe().options[0].value)``."""
-        return cls(instance_id=f"python:{uuid.uuid4().hex[:8]}", code=STARTER_CODE)
+    def new(cls, code: "str | None" = None, name: str = "Python Source") -> "PythonSourceDevice":
+        """A fresh instance with a unique id. Defaults to the starter template; pass
+        ``code`` to create it pre-populated (e.g. the device.create verb over the API).
+        The caller then persists it with ``save_def(dev.instance_id, dev.code)``."""
+        return cls(instance_id=f"python:{uuid.uuid4().hex[:8]}",
+                   code=code if code else STARTER_CODE, name=str(name or "Python Source"))
 
     @classmethod
     def restore(cls, instance_id: str, code: "str | None" = None) -> "PythonSourceDevice":

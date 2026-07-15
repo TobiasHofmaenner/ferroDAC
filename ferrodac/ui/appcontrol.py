@@ -562,6 +562,36 @@ def build_control_surface(app) -> ControlSurface:
                        "hz": {"type": "number", "required": True}},
                returns="{ok, instance_id, hz}")
 
+    def _device_create(p):
+        kind = str(p.get("kind") or "python_source")
+        if kind != "python_source":
+            raise ControlError(
+                f"device.create: unsupported kind {kind!r} (only 'python_source' in v1)")
+        from ..devices.python_source import PythonSourceDevice, save_def
+        dev = PythonSourceDevice.new(code=p.get("code"),
+                                     name=str(p.get("name") or "Python Source"))
+        # the compile result, captured BEFORE activation — add_user_device runs connect()
+        # on a worker thread, and connect() clears last_error (it's also the transport-
+        # error slot), which would otherwise race away a code error.
+        compile_error = dev.describe().last_error
+        save_def(dev.instance_id, dev.code)          # persist so it survives restart
+        app.manager.add_user_device(dev, user=True)  # activate (straight into _active)
+        out = _dev_dict(dev.describe())
+        out["last_error"] = compile_error            # non-null if the code didn't compile
+        return out
+    s.register("device.create", gui(_device_create),
+               description="Create a NEW user-minted device and activate it (v1: a "
+                           "'python_source' — a virtual device whose channels are produced "
+                           "by Python you supply). Optionally pass initial 'code' (a "
+                           "poll(ctx) script; default = the starter template) + a 'name'. "
+                           "Edit later with device.config_set (option 'code'). Returns the "
+                           "descriptor incl. 'last_error' if the code didn't compile; then "
+                           "route its source(s) — key '<uuid>/<source_id>' — with layout.route.",
+               params={"kind": {"type": "string", "enum": ["python_source"]},
+                       "code": {"type": "string"}, "name": {"type": "string"}},
+               returns="a device descriptor {instance_id, uuid, name, driver, status, "
+                       "sources, sinks, last_error}")
+
     # -- projects: metadata + local lifecycle --------------------------------
     def _project_active(_):
         return _project_dict(_active_project(app))
