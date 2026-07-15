@@ -969,6 +969,71 @@ def build_control_surface(app) -> ControlSurface:
                        "fill": {"type": "boolean"}, "dest": {"type": "string"}},
                returns="{dest, t0, t1, sources, manifest}")
 
+    # -- record (start/stop a recording span → auto-export a run bundle) -----
+    def _rec_ctl():
+        rc = getattr(app, "_recording", None)
+        if rc is None:
+            raise ControlError("recording unavailable — the durable store isn't ready")
+        return rc
+
+    def _record_start(p):
+        rc = _rec_ctl()
+        if rc.recording:
+            raise ControlError("already recording")
+        rc.toggle()                              # opens a REC marker + persists to the store
+        mid = rc.open_mid
+        fields = {}
+        if p.get("label"):
+            fields["label"] = str(p["label"])
+        if p.get("comment"):
+            fields["comment"] = str(p["comment"])
+        if mid is not None and fields:
+            app.dashboard.markers.update(mid, **fields)
+        m = app.dashboard.markers.get(mid) if mid else None
+        return {"ok": True, "recording": True, "mid": mid,
+                "label": (m.label if m else "REC"), "t0": (m.t if m else None)}
+    s.register("record.start", gui(_record_start),
+               description="Start recording a span — opens a recording marker and persists to "
+                           "the durable store. Optionally 'label'/'comment' it. Errors if "
+                           "already recording; stop with record.stop (which auto-exports a run "
+                           "bundle).",
+               params={"label": {"type": "string"}, "comment": {"type": "string"}},
+               returns="{ok, recording, mid, label, t0}")
+
+    def _record_stop(p):
+        rc = _rec_ctl()
+        if not rc.recording:
+            raise ControlError("not recording")
+        mid = rc.open_mid
+        rc.toggle()                              # close the span + finalize/export off-thread
+        m = app.dashboard.markers.get(mid) if mid else None
+        return {"ok": True, "recording": False, "mid": mid,
+                "label": (m.label if m else None), "t0": (m.t if m else None),
+                "t1": (getattr(m, "t_end", None) if m else None),
+                "note": "the run bundle exports in the background; run_dir lands on the "
+                        "recording tag when done"}
+    s.register("record.stop", gui(_record_stop),
+               description="Stop the current recording — closes the span and AUTO-EXPORTS a "
+                           "run bundle (data.csv + traces + tags + manifest) to the project's "
+                           "reports dir, stamping run_dir on the recording tag. Errors if not "
+                           "recording.",
+               returns="{ok, recording, mid, label, t0, t1}")
+
+    def _record_status(_):
+        rc = getattr(app, "_recording", None)
+        if rc is None:
+            return {"available": False, "recording": False}
+        mid = rc.open_mid
+        out = {"available": True, "recording": rc.recording, "mid": mid}
+        if mid is not None:
+            m = app.dashboard.markers.get(mid)
+            if m is not None:
+                out["t0"], out["label"] = m.t, m.label
+        return out
+    s.query("record.status", gui(_record_status),
+            description="Whether a recording is in progress + its marker id / start time / label.",
+            returns="{available, recording, mid, t0, label}")
+
     # -- media (phone-companion uploads; rides the same file+tag substrate) ---
     # A photo is a FILE (written VERBATIM) + an immutable media tag. GUI-wrapped:
     # markers.add emits Qt signals; the byte write is small. Reuses the app's

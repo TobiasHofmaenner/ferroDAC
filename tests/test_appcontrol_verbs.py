@@ -217,6 +217,37 @@ def test_export_csv_and_window(control_surface, tmp_path):
     assert verbs["export.window"]["scope"] == "control"
 
 
+@pytest.mark.ui
+def test_record_start_stop_status(control_surface):
+    w, s = control_surface
+    if getattr(w, "_recording", None) is None:
+        pytest.skip("no recording controller in this build")
+
+    st = assert_json_able(s.dispatch("record.status", scope="read"))
+    assert st["available"] is True and st["recording"] is False
+
+    out = assert_json_able(
+        s.dispatch("record.start", {"label": "anneal step 1"}, scope="control"))
+    assert out["ok"] is True and out["recording"] is True and out["mid"]
+    assert out["label"] == "anneal step 1" and w._recording.recording is True
+    m = w.dashboard.markers.get(out["mid"])                # the REC marker is a tag
+    assert m is not None and m.label == "anneal step 1" and m.kind == "recording"
+
+    with pytest.raises(ControlError):                      # already recording
+        s.dispatch("record.start", {}, scope="control")
+    assert s.dispatch("record.status", scope="read")["mid"] == out["mid"]
+
+    out2 = assert_json_able(s.dispatch("record.stop", {}, scope="control"))
+    assert out2["ok"] is True and out2["recording"] is False and out2["mid"] == out["mid"]
+    assert w._recording.recording is False
+    assert w.dashboard.markers.get(out["mid"]).t_end is not None    # span closed
+
+    with pytest.raises(ControlError):                      # not recording
+        s.dispatch("record.stop", {}, scope="control")
+    with pytest.raises(ScopeError):
+        s.dispatch("record.start", {}, scope="read")
+
+
 # -- tags --------------------------------------------------------------------
 @pytest.mark.ui
 def test_tag_update_edits_metadata_against_real_markers(control_surface):
