@@ -142,6 +142,11 @@ class ViewerStub:
                 request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.AddDeviceRequest.SerializeToString,
                 response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.FromString,
                 _registered_method=True)
+        self.RemoveRemoteDevice = channel.unary_unary(
+                '/ferrodac_contract.v1.Viewer/RemoveRemoteDevice',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RemoveDeviceRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.FromString,
+                _registered_method=True)
         self.WatchFrames = channel.unary_stream(
                 '/ferrodac_contract.v1.Viewer/WatchFrames',
                 request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
@@ -200,6 +205,14 @@ class ViewerServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RemoveRemoteDevice(self, request, context):
+        """Remote device removal: ask the owning client (by device uuid) to retire an active
+        remote device — the reverse of AddRemoteDevice; it then drops from the catalog.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def WatchFrames(self, request, context):
         """Live video frames for EXPLICITLY named image sources. Opening this stream
         IS the demand signal: the hub tells the owning agent to start encoding
@@ -246,6 +259,11 @@ def add_ViewerServicer_to_server(servicer, server):
             'AddRemoteDevice': grpc.unary_unary_rpc_method_handler(
                     servicer.AddRemoteDevice,
                     request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.AddDeviceRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.SerializeToString,
+            ),
+            'RemoveRemoteDevice': grpc.unary_unary_rpc_method_handler(
+                    servicer.RemoveRemoteDevice,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RemoveDeviceRequest.FromString,
                     response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.SerializeToString,
             ),
             'WatchFrames': grpc.unary_stream_rpc_method_handler(
@@ -442,6 +460,33 @@ class Viewer:
             target,
             '/ferrodac_contract.v1.Viewer/AddRemoteDevice',
             ferrodac__contract_dot_v1_dot_data__plane__pb2.AddDeviceRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RemoveRemoteDevice(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Viewer/RemoveRemoteDevice',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.RemoveDeviceRequest.SerializeToString,
             ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.FromString,
             options,
             channel_credentials,

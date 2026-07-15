@@ -18,6 +18,7 @@ E2E = [
     "control_e2e",  # §5.3 control plane: viewer→hub→agent Command/Ack + readback + clamp
     "configure_e2e",  # §5.3 configure: viewer→hub→agent SetConfig (option/rename) + readback
     "remote_add_e2e",  # advertise available devices + AddRemoteDevice (agent-id routing)
+    "remote_remove_e2e",  # RemoveRemoteDevice: retire an active remote device (uuid routing)
     "sync_e2e",     # sync mirror + live tail + read tier (ListSources/Coverage/Query/ReadRaw/Trace)
     "video_sync_e2e",  # §9.3 ph3: segment sync mirror + live tail + on-demand backfill (byte-exact)
     "e2e",          # agent → hub → viewer: transparent remote device, subscribe, retire

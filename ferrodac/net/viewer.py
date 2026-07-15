@@ -94,6 +94,32 @@ class HubViewer(ReconnectingClient):
 
         asyncio.ensure_future(go())
 
+    def remove_remote_device(self, device_uuid, on_result=None) -> None:
+        """Ask the owning client (by device uuid) to retire an active remote device —
+        the reverse of add_remote_device. Non-blocking; on_result(ok, detail) on the
+        loop when the owner Acks."""
+        call_soon_safe(self._loop, self._do_remove_remote,
+                       str(device_uuid), on_result)
+
+    def _do_remove_remote(self, device_uuid, on_result) -> None:
+        if self._stub is None:
+            if on_result is not None:
+                on_result(False, "not connected to the hub")
+            return
+        req = pb.RemoveDeviceRequest(device_uuid=device_uuid)
+        stub = self._stub
+
+        async def go():
+            try:
+                ack = await stub.RemoveRemoteDevice(req)
+                res = (bool(ack.ok), str(ack.detail or ""))
+            except Exception as exc:           # noqa: BLE001
+                res = (False, str(exc))
+            if on_result is not None:
+                on_result(*res)
+
+        asyncio.ensure_future(go())
+
     def set_config(self, device_uuid, *, option=None, rate_hz=None, rename=None,
                    on_result=None) -> None:
         """Configure a hub device (§5.3) — pass exactly ONE of option=(key, value),

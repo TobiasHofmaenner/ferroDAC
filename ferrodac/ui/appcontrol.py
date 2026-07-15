@@ -500,6 +500,26 @@ def build_control_surface(app) -> ControlSurface:
                params={"instance_id": {"type": "string", "required": True}},
                returns="{ok, instance_id, removed}", destructive=True)
 
+    def _device_remove_remote(p):
+        uuid = str(p["uuid"])
+        hub = getattr(app, "hub", None)
+        if hub is None or not getattr(hub, "connected", False):
+            raise ControlError("not connected to a hub")
+        known = {u for devs in hub.active_remote().values() for (u, _d) in devs}
+        if uuid not in known:
+            raise ControlError(f"no active remote device with uuid: {uuid}")
+        hub.request_remove_remote(uuid)
+        return {"ok": True, "requested": uuid,
+                "note": "the owning client retires it over the hub; it then drops from "
+                        "the catalog on every viewer"}
+    s.register("device.remove_remote", gui(_device_remove_remote),
+               description="Retire a device we onboarded from ANOTHER client over the hub — "
+                           "the reverse of adding a remote device. Routed by uuid to the "
+                           "owning client, which runs the local remove; the device then drops "
+                           "from the catalog on every viewer. Async: returns once requested.",
+               params={"uuid": {"type": "string", "required": True}},
+               returns="{ok, requested, note}", destructive=True)
+
     def _device_config_get(p):
         iid = str(p["instance_id"])
         desc = app.manager.descriptor(iid)

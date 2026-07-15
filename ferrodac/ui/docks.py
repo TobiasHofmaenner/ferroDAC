@@ -760,26 +760,37 @@ class DevicesPanel(QWidget):
         layout.addStretch(1)
 
     def _rebuild_remote(self):
-        """Other clients' AVAILABLE devices, grouped by client — Add asks that client
-        to onboard the device, which then appears as an active remote device."""
+        """Other clients' devices, grouped by client. AVAILABLE ones show Add (ask that
+        client to onboard it → it becomes an active remote device); the ACTIVE ones WE
+        onboarded show Remove (ask that client to retire it → it drops off the hub)."""
         clear_layout(self._remote_layout)
-        by_agent = self._hub.remote_available() if self._hub is not None else {}
+        avail = self._hub.remote_available() if self._hub is not None else {}
+        active = self._hub.active_remote() if self._hub is not None else {}
         total = 0
-        for agent in sorted(by_agent):
-            descs = by_agent[agent]
-            if not descs:
+        for agent in sorted(set(avail) | set(active)):
+            rows = []                                    # (kind, desc, uuid)
+            for desc in sorted(avail.get(agent, []), key=lambda d: d.name):
+                rows.append(("add", desc, None))
+            for uuid, desc in sorted(active.get(agent, []), key=lambda t: t[1].name):
+                rows.append(("remove", desc, uuid))
+            if not rows:
                 continue
             hdr = QLabel(f"on {agent}")
             hdr.setStyleSheet("color:#8b95a4; font-size:11px; font-weight:700;"
                               " margin-top:4px;")
             self._remote_layout.addWidget(hdr)
-            for desc in sorted(descs, key=lambda d: d.name):
-                on_action = (lambda iid, aid=agent:
-                             self._hub.request_add_remote(aid, iid))
-                self._remote_layout.addWidget(DeviceCard(desc, False, on_action))
+            for kind, desc, uuid in rows:
+                if kind == "add":
+                    on_action = (lambda iid, aid=agent:
+                                 self._hub.request_add_remote(aid, iid))
+                    self._remote_layout.addWidget(DeviceCard(desc, False, on_action))
+                else:
+                    on_action = (lambda _iid, u=uuid:
+                                 self._hub.request_remove_remote(u))
+                    self._remote_layout.addWidget(DeviceCard(desc, True, on_action))
                 total += 1
         self._remote_layout.addStretch(1)
-        self._remote_label.setText(f"Available on other clients  ({total})")
+        self._remote_label.setText(f"On other clients  ({total})")
         vis = self._hub is not None and total > 0
         self._remote_label.setVisible(vis)
         self._remote_scroll.setVisible(vis)

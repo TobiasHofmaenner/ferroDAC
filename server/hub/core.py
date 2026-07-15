@@ -315,9 +315,30 @@ class Hub:
         finally:
             self._pending_cmds.pop(rid, None)
 
+    async def remove_device(self, req) -> "pb.Ack":
+        """A viewer's RemoveRemoteDevice → the owning agent's down-channel as a
+        RemoveDevice, awaiting its Ack (same request_id correlation as send_command).
+        The reverse of add_device: routed by the device uuid (translated to the owner's
+        instance_id), the agent runs manager.remove and the device leaves the catalog."""
+        outq = self._agent_outq.get(req.device_uuid)
+        desc = self._devices.get(req.device_uuid)
+        if outq is None or desc is None:
+            return pb.Ack(ok=False, detail="no agent owns this device")
+        rid = _uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_cmds[rid] = (fut, outq)
+        _offer(outq, pb.HubMessage(remove_device=pb.RemoveDevice(
+            request_id=rid, instance_id=desc.instance_id)))
+        try:
+            return await asyncio.wait_for(fut, timeout=10.0)
+        except asyncio.TimeoutError:
+            return pb.Ack(request_id=rid, ok=False, detail="agent did not respond")
+        finally:
+            self._pending_cmds.pop(rid, None)
+
     def deliver_ack(self, ack) -> None:
         """An agent's Ack came up the Ingest stream → resolve the waiting command,
-        configure or add-device (all correlate by request_id in _pending_cmds)."""
+        configure, add-device or remove-device (all correlate by request_id)."""
         entry = self._pending_cmds.get(ack.request_id)
         if entry is not None:
             fut, _outq = entry

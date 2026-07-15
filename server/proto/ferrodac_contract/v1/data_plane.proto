@@ -266,6 +266,15 @@ message AddDevice {
   string instance_id = 2;
 }
 
+// Remote device removal: hub -> agent, "retire this active device of yours". The reverse
+// of AddDevice — routed to the owning agent (the hub translates the viewer's device uuid
+// to its instance_id). The agent runs manager.remove(instance_id) and Acks; the device
+// then retires from the catalog.
+message RemoveDevice {
+  string request_id = 1;
+  string instance_id = 2;
+}
+
 // Up the Session stream (agent -> hub).
 message AgentMessage {
   oneof msg {
@@ -295,6 +304,7 @@ message HubMessage {
     FrameDemand frame_demand = 4;
     Configure configure = 5;     // control §5.3: set an option / rate / name
     AddDevice add_device = 6;    // remote device addition: onboard an available device
+    RemoveDevice remove_device = 7;   // remote device removal: retire an active remote device
   }
 }
 
@@ -364,6 +374,14 @@ message AddDeviceRequest {
   string instance_id = 3;
 }
 
+// A viewer asking the hub to retire an ACTIVE device on the client that owns it — the
+// reverse of AddDeviceRequest. Routed by device uuid (an active device has one; the hub
+// translates it to the owner + its instance_id), the agent's Ack relayed back.
+message RemoveDeviceRequest {
+  string token = 1;              // reserved auth seam
+  string device_uuid = 2;
+}
+
 // A viewer asking the hub to configure a (possibly remote) device — the Configure
 // analog of CommandRequest. Routed to the owning agent, the agent's Ack relayed.
 message ConfigureRequest {
@@ -390,6 +408,9 @@ service Viewer {
   // Remote device addition: ask a client (by agent_id) to onboard one of its
   // available devices; it then re-announces as an active remote device.
   rpc AddRemoteDevice(AddDeviceRequest) returns (Ack);
+  // Remote device removal: ask the owning client (by device uuid) to retire an active
+  // remote device — the reverse of AddRemoteDevice; it then drops from the catalog.
+  rpc RemoveRemoteDevice(RemoveDeviceRequest) returns (Ack);
   // Live video frames for EXPLICITLY named image sources. Opening this stream
   // IS the demand signal: the hub tells the owning agent to start encoding
   // while >=1 watcher holds a ref, stop on the last close. Latest-wins

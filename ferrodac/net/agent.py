@@ -27,7 +27,7 @@ class HubAgent(ReconnectingClient):
 
     def __init__(self, addr: str, agent_id: str = "ferrodac", on_state=None,
                  on_frame_demand=None, on_command=None, on_configure=None,
-                 on_add_device=None):
+                 on_add_device=None, on_remove_device=None):
         super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
         self._outq: "asyncio.Queue | None" = None
@@ -46,6 +46,9 @@ class HubAgent(ReconnectingClient):
         # remote device addition: (instance_id) -> (ok, detail). Onboards a local
         # available device on request from another client. Off the agent loop.
         self._on_add_device = on_add_device
+        # remote device removal: (instance_id) -> (ok, detail). Retires a local active
+        # device on request from another client (reverse of add). Off the agent loop.
+        self._on_remove_device = on_remove_device
         self.demanded_frames: set = set()      # {(uuid, source_id)} currently watched
 
     def _on_loop_created(self, loop) -> None:
@@ -152,6 +155,8 @@ class HubAgent(ReconnectingClient):
                     await self._handle_configure(hub_msg.configure)
                 elif which == "add_device":
                     await self._handle_add_device(hub_msg.add_device)
+                elif which == "remove_device":
+                    await self._handle_remove_device(hub_msg.remove_device)
                 # welcome: nothing to do
         finally:
             self.demanded_frames.clear()       # a reconnect re-sends active demand
@@ -209,6 +214,19 @@ class HubAgent(ReconnectingClient):
         if self._on_add_device is not None:
             try:
                 ok, detail = await asyncio.to_thread(self._on_add_device,
+                                                     msg.instance_id)
+            except Exception as exc:           # noqa: BLE001 — surface it in the Ack
+                ok, detail = False, str(exc)
+        self._send(pb.AgentMessage(ack=pb.Ack(
+            request_id=msg.request_id, ok=bool(ok), detail=str(detail or ""))))
+
+    async def _handle_remove_device(self, msg) -> None:
+        """Another client asked us to retire one of our ACTIVE devices → run the local
+        remove and Ack. The device then drops from the catalog. Reverse of add-device."""
+        ok, detail = False, "no remove-device handler on this agent"
+        if self._on_remove_device is not None:
+            try:
+                ok, detail = await asyncio.to_thread(self._on_remove_device,
                                                      msg.instance_id)
             except Exception as exc:           # noqa: BLE001 — surface it in the Ack
                 ok, detail = False, str(exc)

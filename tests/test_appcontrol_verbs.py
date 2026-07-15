@@ -248,6 +248,20 @@ def test_record_start_stop_status(control_surface):
         s.dispatch("record.start", {}, scope="read")
 
 
+@pytest.mark.ui
+def test_device_remove_remote_registered_and_guards(control_surface):
+    w, s = control_surface
+    verbs = {v["name"]: v for v in s.describe()["verbs"]}
+    assert "device.remove_remote" in verbs
+    assert verbs["device.remove_remote"]["scope"] == "control"
+    assert verbs["device.remove_remote"]["destructive"] is True
+    # destructive → needs confirm; then, not connected to a hub → a clear error
+    with pytest.raises(ScopeError):
+        s.dispatch("device.remove_remote", {"uuid": "nope"}, scope="control")
+    with pytest.raises(ControlError):
+        s.dispatch("device.remove_remote", {"uuid": "nope"}, scope="control", confirm=True)
+
+
 # -- tags --------------------------------------------------------------------
 @pytest.mark.ui
 def test_tag_update_edits_metadata_against_real_markers(control_surface):

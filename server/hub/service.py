@@ -122,6 +122,11 @@ class ViewerServicer(rpc.ViewerServicer):
         """Ask a client (by agent_id) to onboard one of its available devices."""
         return await self.hub.add_device(request)
 
+    async def RemoveRemoteDevice(self, request, context):  # noqa: N802
+        """Ask the owning client (by device uuid) to retire an active device — the
+        reverse of AddRemoteDevice."""
+        return await self.hub.remove_device(request)
+
     async def WatchCatalog(self, request, context):  # noqa: N802
         q: asyncio.Queue = asyncio.Queue(maxsize=256)
         # register BEFORE snapshotting so nothing is missed in the gap; a device

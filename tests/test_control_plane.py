@@ -119,16 +119,23 @@ def test_devices_panel_lists_remote_available_and_add_routes(qapp):
             super().__init__()
             self.share_devices = True
             self.added = []
+            self.removed = []
             self._ra = {}
 
         def remote_available(self):
             return dict(self._ra)
+
+        def active_remote(self):
+            return {}
 
         def set_share_devices(self, on):
             self.share_devices = bool(on)
 
         def request_add_remote(self, aid, iid):
             self.added.append((aid, iid))
+
+        def request_remove_remote(self, uuid):
+            self.removed.append(uuid)
 
     hub = _FakeHub()
     hub._ra = {"ferrodac@rig-1": [DeviceDescriptor(
@@ -151,6 +158,55 @@ def test_devices_panel_lists_remote_available_and_add_routes(qapp):
     hub._ra = {}                                              # client left → section hides
     panel._rebuild_remote()
     assert panel._remote_label.isHidden()
+
+
+def test_devices_panel_active_remote_shows_remove_and_routes(qapp):
+    """A device we onboarded from another client appears in the Devices window with a
+    Remove button that asks the owning client to retire it — routed by uuid via
+    request_remove_remote (the reverse of the Add)."""
+    from qtpy.QtCore import QObject, Signal
+    from qtpy.QtWidgets import QPushButton
+    from ferrodac.core.engine import Engine
+    from ferrodac.core.manager import DeviceManager
+    from ferrodac.core.device import DeviceDescriptor, Interface, Status
+    from ferrodac.ui.docks import DevicesPanel
+
+    class _FakeHub(QObject):
+        remote_available_changed = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.share_devices = True
+            self.removed = []
+            self._active = {}
+
+        def remote_available(self):
+            return {}
+
+        def active_remote(self):
+            return dict(self._active)
+
+        def set_share_devices(self, on):
+            self.share_devices = bool(on)
+
+        def request_add_remote(self, aid, iid):
+            pass
+
+        def request_remove_remote(self, uuid):
+            self.removed.append(uuid)
+
+    hub = _FakeHub()
+    desc = DeviceDescriptor(instance_id="sim:psu:1", driver="fake_psu", name="Rig PSU",
+                            interface=Interface(kind="hub"), status=Status.DISCOVERED)
+    hub._active = {"ferrodac@rig-1": [("psu-uuid-1", desc)]}
+    mgr = DeviceManager([], engine=Engine(), registry=None)     # no local devices
+    panel = DevicesPanel(mgr, on_configure=lambda iid: None, hub=hub)
+
+    assert not panel._remote_label.isHidden() and "(1)" in panel._remote_label.text()
+    removes = [b for b in panel.findChildren(QPushButton) if b.text() == "Remove"]
+    assert removes, "no Remove button for the active remote device"
+    removes[0].click()
+    assert hub.removed == ["psu-uuid-1"]                        # routed by uuid, not instance_id
 
 
 def test_remote_options_surface_for_the_config_dialog(qapp):

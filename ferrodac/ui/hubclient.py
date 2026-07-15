@@ -37,8 +37,9 @@ class HubController(QObject):
     connection_changed = Signal(bool)     # connected ↔ disconnected (intent/mode)
     link_state = Signal(str, str)         # REAL gRPC link: connecting|connected|error|
     #                                       offline + detail (drives the button colour)
-    remote_available_changed = Signal()   # other clients' available devices changed (Devices menu)
+    remote_available_changed = Signal()   # other clients' available/active devices changed (Devices menu)
     _do_add = Signal(str)                 # marshal manager.add(instance_id) to the GUI thread
+    _do_remove = Signal(str)              # marshal manager.remove(instance_id) to the GUI thread
 
     def __init__(self, dashboard, engine, manager, parent=None, store=None,
                  resolver=None, video_store=None):
@@ -75,6 +76,7 @@ class HubController(QObject):
         # remote device addition: other clients' AVAILABLE devices (agent_id -> {iid ->
         # display DeviceDescriptor}), and whether WE advertise ours (opt-out, default on).
         self._remote_available: dict = {}
+        self._remote_active: dict = {}   # uuid -> (agent_id, display DeviceDescriptor) — active remotes
         self._share_devices = True
         self.addr = ""
         # These signals are emitted from raw (non-QThread) gRPC worker threads;
@@ -89,6 +91,7 @@ class HubController(QObject):
         self._doc_awareness.connect(self._on_doc_awareness_gui, Qt.QueuedConnection)
         self._doc_presence.connect(self._on_doc_presence_gui, Qt.QueuedConnection)
         self._do_add.connect(self._gui_add_device, Qt.QueuedConnection)
+        self._do_remove.connect(self._gui_remove_device, Qt.QueuedConnection)
 
     def set_projects(self, project_mgr, on_change) -> None:
         """Wire hub-project sync to the client ProjectManager (called by the app
@@ -152,7 +155,8 @@ class HubController(QObject):
                                    on_state=self._state_cb("agent"),
                                    on_command=self._on_agent_command,
                                    on_configure=self._on_agent_configure,
-                                   on_add_device=self._on_agent_add_device)
+                                   on_add_device=self._on_agent_add_device,
+                                   on_remove_device=self._on_agent_remove_device)
             self._agent.start()
             self._advertise_devices()          # active + (opt-out) available devices
             # per-reading protobuf conversion runs on its own bus pump, not the
@@ -613,6 +617,37 @@ class HubController(QObject):
     def _gui_add_device(self, instance_id: str) -> None:
         self.manager.add(instance_id, user=True)
 
+    def active_remote(self) -> dict:
+        """{agent_id: [(uuid, display DeviceDescriptor)]} — active devices we onboarded
+        from other clients over the hub (the removable ones)."""
+        out: dict = {}
+        for uuid, (aid, desc) in self._remote_active.items():
+            out.setdefault(aid, []).append((uuid, desc))
+        return out
+
+    def request_remove_remote(self, device_uuid: str) -> None:
+        """Devices menu → ask the owning client (by uuid) to retire an active remote
+        device (the reverse of request_add_remote). Non-blocking; the result shows on the
+        status line and the device then drops from the catalog on every viewer."""
+        if self._viewer is None:
+            return
+
+        def on_result(ok, detail):
+            self.status.emit("✓ device removed" if ok else f"⚠ remove failed: {detail}")
+        self._viewer.remove_remote_device(device_uuid, on_result=on_result)
+
+    def _on_agent_remove_device(self, instance_id):
+        """Another client asked us to retire one of OUR active devices → marshal the
+        remove to the GUI thread (manager.remove mutates + spawns threads). The device
+        then retires from the hub and greys out on every viewer. Reverse of add."""
+        if not self.manager.is_active(instance_id):
+            return True, "already removed"
+        self._do_remove.emit(instance_id)       # → _gui_remove_device on the GUI thread
+        return True, ""
+
+    def _gui_remove_device(self, instance_id: str) -> None:
+        self.manager.remove(instance_id)
+
     def _update_local(self) -> None:
         self._local = self.dashboard.local_uuids()
 
@@ -682,8 +717,13 @@ class HubController(QObject):
             options = [convert.option_from_proto(o) for o in dev.options]  # configure
             self.dashboard.add_remote_device(dev.uuid, dev.name, sources, sinks,
                                               options, online=dev.online)
+            self._remote_active[dev.uuid] = (dev.agent_id or "?",
+                                             self._display_descriptor(dev))
+            self.remote_available_changed.emit()   # refresh the Devices panel's remote list
         elif etype == "REMOVED":
             self.dashboard.set_remote_offline(dev.uuid)
+            if self._remote_active.pop(dev.uuid, None) is not None:
+                self.remote_available_changed.emit()
 
     def _on_remote_available(self, etype, dev) -> None:
         """Another client's AVAILABLE device (addable) → the Devices-menu store."""
