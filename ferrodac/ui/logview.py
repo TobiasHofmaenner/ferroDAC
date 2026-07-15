@@ -17,7 +17,7 @@ import logging
 from collections import deque
 from html import escape
 
-from qtpy.QtCore import QTimer
+from qtpy.QtCore import QSize, QTimer
 from qtpy.QtGui import QTextCursor
 from qtpy.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
                             QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
@@ -104,6 +104,12 @@ class LogPanel(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._drain)
         self._timer.start(250)
+
+    def sizeHint(self) -> QSize:
+        # A transport/log strip, not a main pane. Default to a handful of log lines
+        # so the bottom dock (tabbed with the thin Player bar) doesn't claim a third
+        # of the window with mostly-empty space — the user can still drag it taller.
+        return QSize(480, 132)
 
     # -- slots (GUI thread) --------------------------------------------------
     def _drain(self) -> None:

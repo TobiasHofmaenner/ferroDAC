@@ -2726,6 +2726,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._restore_and_enable_autosave)
         else:
             self._autosave_on = True
+            QTimer.singleShot(0, self._slim_bottom_dock)   # fresh start: after show()
 
     def _restore_and_enable_autosave(self):
         try:
@@ -2736,6 +2737,22 @@ class MainWindow(QMainWindow):
             self.setUpdatesEnabled(True)        # paint once, already assembled
         self._autosave_on = True
         self._recover_open_recordings()         # finalise any crash-interrupted REC
+        self._slim_bottom_dock()                # keep the transport/log strip modest even
+        #                                         over a saved-tall layout (restore ran above)
+
+    def _slim_bottom_dock(self):
+        """The Player is a one-row transport bar, so the bottom dock it shares (tabbed)
+        with the Log only needs room for a few log lines — not a third of the window.
+        Restored/default layouts tend to size that tabbed area to the log view's tall
+        native hint, leaving the raised Player tab mostly empty; pull it back to the
+        Log's modest sizeHint. The user can still drag it taller (it re-persists)."""
+        if getattr(self, "player_dock", None) is None:
+            return                              # no transport → the Log starts hidden
+        try:
+            h = self.log_panel.sizeHint().height()
+            self.resizeDocks([self.log_dock], [h], Qt.Vertical)
+        except Exception:
+            pass                                # sizing is cosmetic; never break startup
 
     def open_session(self, path: str) -> None:
         try:
