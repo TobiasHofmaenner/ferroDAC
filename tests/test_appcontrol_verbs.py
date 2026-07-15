@@ -186,6 +186,37 @@ def test_layout_rename_panel(control_surface):
         s.dispatch("layout.rename_panel", {"panel_id": pid, "title": "x"}, scope="read")
 
 
+@pytest.mark.ui
+def test_export_csv_and_window(control_surface, tmp_path):
+    w, s = control_surface
+    if getattr(w, "resolver", None) is None:
+        pytest.skip("no resolver/durable store in this build")
+    w.dashboard._sources["dev/x"] = SourcePort(
+        "dev/x", "X", "float", "V", "Dev", "device")
+
+    # export.csv (read) -> data.csv text over a window
+    out = assert_json_able(
+        s.dispatch("export.csv", {"t0": 1000.0, "t1": 1010.0}, scope="read"))
+    assert out["t0"] == 1000.0 and out["t1"] == 1010.0
+    assert isinstance(out["csv"], str)
+    if out["csv"]:
+        assert "time_epoch_s" in out["csv"]                # header written
+
+    # export.window (control) -> a self-contained bundle on disk
+    dest = str(tmp_path / "bundle")
+    out2 = assert_json_able(
+        s.dispatch("export.window", {"t0": 1000.0, "t1": 1010.0, "dest": dest},
+                   scope="control"))
+    assert out2["dest"] == dest and out2["manifest"].get("ferrodac_export")
+    assert os.path.isfile(os.path.join(dest, "manifest.json"))
+
+    with pytest.raises(ScopeError):                        # export.window is control
+        s.dispatch("export.window", {"dest": dest}, scope="read")
+    verbs = {v["name"]: v for v in s.describe()["verbs"]}
+    assert verbs["export.csv"]["kind"] == "query" and verbs["export.csv"]["scope"] == "read"
+    assert verbs["export.window"]["scope"] == "control"
+
+
 # -- tags --------------------------------------------------------------------
 @pytest.mark.ui
 def test_tag_update_edits_metadata_against_real_markers(control_surface):

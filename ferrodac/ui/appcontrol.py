@@ -885,6 +885,90 @@ def build_control_surface(app) -> ControlSurface:
                        "forward": {"type": "boolean"}},
                returns="the transport snapshot")
 
+    # -- export (CSV / bundle over a time window) ----------------------------
+    # NOT gui()-wrapped: export_window reads via the resolver (RAM+store+hub) and can be
+    # slow, so it runs OFF the GUI thread. But the source/marker/window SNAPSHOT is taken
+    # ON the GUI thread first (they're GUI-owned), then handed to export_window off-thread —
+    # exactly like the app's own _export_task.
+    def _export_inputs(p):
+        def snap():
+            tc = app.time_context
+            if p.get("t0") is not None and p.get("t1") is not None:
+                t0, t1 = float(p["t0"]), float(p["t1"])
+            elif tc is not None:
+                t0, t1 = tc.window
+            else:
+                t0, t1 = time.time() - 3600.0, time.time()
+            sw = getattr(app, "store_writer", None)
+            root = app._project_root() if hasattr(app, "_project_root") else None
+            return {"sources": app.dashboard.export_sources(),
+                    "tags": app.dashboard.markers.to_list(),
+                    "t0": float(t0), "t1": float(t1),
+                    "resolver": getattr(app, "resolver", None),
+                    "store": sw.store if sw is not None else None, "root": root}
+        d = gb.post_and_wait(snap, reraise=True)
+        if d["resolver"] is None:
+            raise ControlError("export unavailable — the durable store/resolver isn't ready")
+        if not d["sources"]:
+            raise ControlError("nothing to export — no data sources")
+        return d
+
+    def _export_csv(p):
+        d = _export_inputs(p)
+        import shutil
+        import tempfile
+        from ..store import export_window
+        tmp = tempfile.mkdtemp()
+        try:
+            export_window(tmp, d["sources"], d["resolver"], d["t0"], d["t1"],
+                          fill=bool(p.get("fill")), tags=d["tags"], store=d["store"])
+            path = os.path.join(tmp, "data.csv")
+            text = ""
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if len(text) > 2_000_000:
+            raise ControlError(
+                f"CSV is {len(text)} bytes (>2 MB) — narrow t0/t1, or use export.window "
+                "to write the bundle to disk")
+        return {"t0": d["t0"], "t1": d["t1"], "bytes": len(text),
+                "rows": max(0, text.count("\n") - 1), "csv": text}
+    s.query("export.csv", _export_csv,
+            description="Export the scalar data.csv for a time window and RETURN it as text "
+                        "(time_iso + time_epoch_s + one column per scalar source, read via the "
+                        "resolver = RAM+store+hub). Defaults to the current replay window + all "
+                        "curated sources; pass t0/t1 (unix s) + fill=true for forward-fill. "
+                        "Errors over ~2 MB — use export.window for large spans / traces.",
+            params={"t0": {"type": "number"}, "t1": {"type": "number"},
+                    "fill": {"type": "boolean"}},
+            returns="{t0, t1, bytes, rows, csv}")
+
+    def _export_window_verb(p):
+        d = _export_inputs(p)
+        import tempfile
+        from ..store import export_window
+        dest = p.get("dest")
+        if not dest:
+            stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(d["t1"]))
+            dest = os.path.join(tempfile.gettempdir(), f"ferrodac_export_{stamp}")
+        dest = str(dest)
+        manifest = export_window(dest, d["sources"], d["resolver"], d["t0"], d["t1"],
+                                 fill=bool(p.get("fill")), tags=d["tags"], store=d["store"],
+                                 media_root=d["root"])
+        return {"dest": dest, "t0": d["t0"], "t1": d["t1"],
+                "sources": len(manifest.get("sources", [])), "manifest": manifest}
+    s.register("export.window", _export_window_verb,
+               description="Export a full self-contained bundle for a time window to disk: "
+                           "data.csv (scalars) + trace_<n>.csv (spectra) + tags.csv + media + "
+                           "manifest.json (reimportable). Read via the resolver. Defaults to the "
+                           "current replay window; 'dest' overrides the folder (default a temp "
+                           "dir); fill=true forward-fills. Returns the dest path + manifest.",
+               params={"t0": {"type": "number"}, "t1": {"type": "number"},
+                       "fill": {"type": "boolean"}, "dest": {"type": "string"}},
+               returns="{dest, t0, t1, sources, manifest}")
+
     # -- media (phone-companion uploads; rides the same file+tag substrate) ---
     # A photo is a FILE (written VERBATIM) + an immutable media tag. GUI-wrapped:
     # markers.add emits Qt signals; the byte write is small. Reuses the app's
