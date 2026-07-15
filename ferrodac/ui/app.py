@@ -83,6 +83,12 @@ def _editor_args(command: str, path: str) -> list:
     return parts + [path]
 
 
+# The control API binds this port by default (stable address for a connector); overridable
+# via FERRODAC_CONTROL_PORT / the 'control/port' setting, or set to 0 to force ephemeral. A
+# busy default falls back to an OS-assigned port at start (still discoverable via connector.json).
+DEFAULT_CONTROL_PORT = 8765
+
+
 # --------------------------------------------------------------------------- #
 #  Main window — dockable shell
 # --------------------------------------------------------------------------- #
@@ -2507,30 +2513,53 @@ class MainWindow(QMainWindow):
         return self._localapi.port if self._localapi is not None else 0
 
     def _enable_control_api(self, on: bool):
+        QSettings("ferroDAC", "ferroDAC").setValue("control/enabled", bool(on))
         if on and self._localapi is None and self._control_surface is not None:
             from .. import __version__
             from ..net.localapi import LocalApiServer
-            self._localapi = LocalApiServer(
-                self._control_surface, self._connectors, version=__version__,
-                port=self._control_api_port(), on_audit=self._on_control_audit)
-            try:
-                self._localapi.start()
-                self.statusBar().showMessage(
-                    f"Local control API on 127.0.0.1:{self._localapi.port}", 6000)
-            except Exception as exc:         # noqa: BLE001
-                self._localapi = None
-                self.statusBar().showMessage(f"Control API failed to start: {exc}", 8000)
+            want = self._configured_control_port()
+            attempts = [want, 0] if want else [0]    # a busy pinned/default port → ephemeral
+            last = None
+            for p in attempts:
+                srv = LocalApiServer(
+                    self._control_surface, self._connectors, version=__version__,
+                    port=p, on_audit=self._on_control_audit)
+                try:
+                    srv.start()
+                    self._localapi = srv
+                    self.statusBar().showMessage(
+                        f"Local control API on 127.0.0.1:{srv.port}", 6000)
+                    return
+                except Exception as exc:     # noqa: BLE001 — try the next candidate port
+                    last = exc
+                    try:
+                        srv.stop()
+                    except Exception:
+                        pass
+            self.statusBar().showMessage(f"Control API failed to start: {last}", 8000)
         elif not on and self._localapi is not None:
             self._localapi.stop()
             self._localapi = None
             self.statusBar().showMessage("Local control API stopped", 4000)
 
+    def autostart_control_api(self) -> None:
+        """On by default: bring up the loopback control API on launch unless the user turned
+        it off (persisted 'control/enabled'). Called from the entry point AFTER show() — never
+        from __init__, so constructing a MainWindow (tests) never opens a port."""
+        try:
+            enabled = QSettings("ferroDAC", "ferroDAC").value(
+                "control/enabled", True, type=bool)
+        except Exception:                    # noqa: BLE001
+            enabled = True
+        if enabled:
+            self._enable_control_api(True)
+
     @staticmethod
-    def _control_api_port() -> int:
-        """The control-API port to bind: a PINNED port, or 0 for an OS-assigned ephemeral
-        one (then the ~/.config/ferrodac/connector.json discovery file carries it). The env
-        var FERRODAC_CONTROL_PORT wins; else the persisted 'control/port' setting; else 0.
-        Pin it (e.g. 8765) when you want to hand a connector a stable 127.0.0.1:<port>."""
+    def _configured_control_port() -> int:
+        """The control-API port to bind. FERRODAC_CONTROL_PORT wins; else the persisted
+        'control/port' setting; else DEFAULT_CONTROL_PORT. Set the env/setting to 0 to force
+        an OS-assigned ephemeral port (carried in ~/.config/ferrodac/connector.json). A busy
+        pinned/default port falls back to ephemeral at start."""
         env = os.environ.get("FERRODAC_CONTROL_PORT", "").strip()
         if env:
             try:
@@ -2538,9 +2567,12 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
         try:
-            return int(QSettings("ferroDAC", "ferroDAC").value("control/port", 0, type=int))
-        except Exception:                    # noqa: BLE001 — a bad setting → ephemeral
-            return 0
+            v = QSettings("ferroDAC", "ferroDAC").value("control/port", None)
+            if v is not None and str(v).strip() != "":
+                return int(v)
+        except Exception:                    # noqa: BLE001 — a bad setting → the default
+            pass
+        return DEFAULT_CONTROL_PORT
 
     def _on_control_audit(self, name, verb, ok, detail):
         logging.getLogger("ferrodac.control").info(

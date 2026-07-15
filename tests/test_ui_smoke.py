@@ -50,6 +50,22 @@ def test_mainwindow_constructs(qapp):
 
 
 @pytest.mark.ui
+def test_control_api_port_helpers(qapp, monkeypatch):
+    """The CONFIGURED bind-port (env/setting/default) and the RUNNING-port getter are
+    DISTINCT methods (an earlier same-name collision made the getter return the config)."""
+    from ferrodac.ui.app import MainWindow
+    monkeypatch.setenv("FERRODAC_CONTROL_PORT", "9191")
+    assert MainWindow._configured_control_port() == 9191        # env wins for the bind port
+    monkeypatch.setenv("FERRODAC_CONTROL_PORT", "notaport")     # bad env → ignored, no crash
+    assert isinstance(MainWindow._configured_control_port(), int)
+    w = _mainwindow(qapp)
+    try:
+        assert w._control_api_port() == 0            # not running → 0 (the getter, NOT the resolver)
+    finally:
+        w.close()
+
+
+@pytest.mark.ui
 def test_open_timeline_and_tick(qapp):
     w = _mainwindow(qapp)
     try:

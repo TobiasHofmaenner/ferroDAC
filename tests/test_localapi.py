@@ -85,6 +85,19 @@ def test_root_is_unauthenticated_bootstrap(server):
     assert "device.set_voltage" not in _json.dumps(d)     # no full verb list leaked at the root
 
 
+def test_start_raises_on_a_busy_port(server):
+    """start() RAISES if the port can't bind (a busy port), so _enable_control_api can fall
+    back to an ephemeral one instead of hanging / reporting a phantom port."""
+    srv, _ = server
+    tmp = tempfile.mkdtemp()
+    dup = LocalApiServer(ControlSurface(),
+                         ConnectorRegistry(path=os.path.join(tmp, "c.json")),
+                         port=srv.port, version="t", config_dir=tmp)   # same, already-bound port
+    with pytest.raises(Exception):
+        dup.start()
+    dup.stop()
+
+
 def test_pair_then_describe_and_command(server):
     srv, reg = server
     tok = _pair(srv, reg, scope="control")

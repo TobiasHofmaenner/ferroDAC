@@ -83,7 +83,12 @@ class LocalApiServer:
         for _ in range(500):              # wait for the socket to bind (≤5 s)
             if self._server.started:
                 break
+            if not self._thread.is_alive():   # _serve exited (e.g. port in use) — don't wait 5 s
+                break
             time.sleep(0.01)
+        if not self._server.started:      # bind failed → let the caller fall back / report
+            raise RuntimeError(
+                f"control API could not bind {self._host}:{self._req_port} (in use?)")
         self._port = self._bound_port()
         self._write_discovery()
         log.info("local control API on http://%s:%d", self._host, self._port)
