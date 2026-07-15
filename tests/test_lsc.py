@@ -421,6 +421,35 @@ def test_leak_event_maps_to_critical_severity(fake):
     assert tags[0].severity == "critical"
 
 
+@pytest.mark.parametrize("kind, detail, expected", [
+    ("vent-close", "Vent Valve", "Vent Valve closed"),      # issue #8: name the transition,
+    ("pump-on", "Scroll Pump", "Scroll Pump on"),           # not just the actuator
+    ("gv-open", "FIB Gate Valve", "FIB Gate Valve opened"),
+])
+def test_event_tag_label_names_the_transition(fake, kind, detail, expected):
+    """The tag label composes actuator + action so the timeline reads 'Vent Valve
+    closed', not 'Vent Valve' (issue #8). The action suffix is parsed off the kind
+    slug generically — no per-actuator table."""
+    dev = _device(fake)
+    tags = []
+    dev.set_tag_sink(tags.append)
+    fake.inject(f"!EVT,1000,{kind},{detail}")
+    assert _spin(lambda: len(tags) == 1)
+    assert tags[0].label == expected
+    assert tags[0].kind == kind                             # kind still the raw slug
+
+
+def test_event_tag_label_falls_back_when_detail_empty(fake):
+    """An unknown action suffix or a missing actuator name degrades to the raw kind,
+    so the label is never worse than the old `detail or kind` behaviour (issue #8)."""
+    dev = _device(fake)
+    tags = []
+    dev.set_tag_sink(tags.append)
+    fake.inject("!EVT,1000,fib-timeout,")                   # no detail → old behaviour: the kind
+    assert _spin(lambda: len(tags) == 1)
+    assert tags[0].label == "fib-timeout"                   # not a leading-space " fib-timeout"
+
+
 def test_event_delivered_without_any_poll(fake):
     """The fix for #4: an idle, never-polled device still delivers a front-panel event as
     a tag in real time — the reader thread surfaces it independent of MEAS?/_read."""

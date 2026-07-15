@@ -75,6 +75,12 @@ _EVENT_SEVERITY = {
     "fib-timeout": "warn",
 }
 
+# The transition slug's trailing action -> its human past-tense/state word, so a
+# tag label names the TRANSITION, not just the actuator ("Vent Valve closed", not
+# "Vent Valve"). Parsed generically off the kind slug (e.g. "vent-close" -> "close");
+# an unlisted suffix falls back to the raw kind (issue #8). No per-actuator table.
+_ACTION = {"open": "opened", "close": "closed", "on": "on", "off": "off"}
+
 
 class LSCError(Exception):
     """A protocol / link error. ``code`` is the instrument ERR code when the
@@ -709,11 +715,21 @@ class LSCDevice(BaseDevice):
 
     def _event_to_tag(self, evt: Event) -> Marker:
         sev = _EVENT_SEVERITY.get(evt.kind, "info")
+        # Compose the label from BOTH halves of the !EVT line so the timeline names
+        # the TRANSITION, not just the actuator: evt.detail is the actuator name
+        # ("Vent Valve") and evt.kind is the transition slug ("vent-close"). Parse
+        # the action suffix off the slug generically (issue #8). Degrade to the old
+        # `detail or kind` when either half is missing, so it's never worse than before.
+        if evt.detail and evt.kind:
+            action = _ACTION.get(evt.kind.rsplit("-", 1)[-1], evt.kind)
+            label = f"{evt.detail} {action}"      # "Vent Valve closed", "Scroll Pump on"
+        else:
+            label = evt.detail or evt.kind
         return Marker(
             id=uuid.uuid4().hex,
             t=time.time(),
             kind=evt.kind or "event",
-            label=evt.detail or evt.kind,
+            label=label,
             color=color_for(evt.kind, sev),
             origin_kind=ORIGIN_DEVICE,
             origin_id=self.data_id,
