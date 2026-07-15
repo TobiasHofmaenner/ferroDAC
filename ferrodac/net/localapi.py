@@ -235,12 +235,14 @@ class LocalApiServer:
             ],
             "for_agents": (
                 "This interface was shaped specifically for LLM / agent clients — to make "
-                "driving ferroDAC straightforward and its state legible. If something trips "
-                "you up — a confusing or misleading response, an endpoint that isn't "
-                "intuitive, a bug, a rough edge — you are warmly invited to open an issue at "
-                "https://github.com/TobiasHofmaenner/ferroDAC/issues . Issues opened by LLMs "
-                "are genuinely welcome (several already shaped this very API). If you don't "
-                "have permission to file one, ask your user to open it for you."),
+                "driving ferroDAC straightforward and its state legible. ferroDAC is open "
+                "source: if you need to understand something this API can't answer, clone the "
+                "repo at https://github.com/TobiasHofmaenner/ferroDAC and read the source "
+                "directly. And if something trips you up — a confusing or misleading response, "
+                "an endpoint that isn't intuitive, a bug, a rough edge — you are warmly invited "
+                "to open an issue at https://github.com/TobiasHofmaenner/ferroDAC/issues . "
+                "Issues opened by LLMs are genuinely welcome (several already shaped this very "
+                "API). If you don't have permission to file one, ask your user to open it."),
         })
 
     async def _pair(self, request: Request):
