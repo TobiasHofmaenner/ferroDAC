@@ -14,7 +14,7 @@ from ferrodac.core.control import ControlError
 from ferrodac.guidance import GuidanceLibrary, parse_frontmatter
 
 _BUILTINS = {"set-up-a-live-readout", "document-the-bench",
-             "annotate-an-experiment", "plot-live-external-data"}
+             "annotate-an-experiment", "plot-live-external-data", "add-a-device"}
 
 
 def test_builtin_playbooks_load():

@@ -239,6 +239,38 @@ def test_device_create_python_device(control_surface, monkeypatch, tmp_path):
         s.dispatch("device.create", {}, scope="read")
 
 
+@pytest.mark.ui
+def test_device_set_and_get_meta(control_surface, tmp_path):
+    from ferrodac.core.devicemeta import DeviceMeta
+    w, s = control_surface
+    w._devmeta = DeviceMeta(str(tmp_path / "device_meta.json"))   # isolate the journal store
+    psu = fake.FakePowerSupply.discover()[0]
+    w.manager._active[psu.instance_id] = psu
+
+    out = assert_json_able(s.dispatch(
+        "device.set_meta",
+        {"instance_id": psu.instance_id, "notes": "mounted on UHV port 3",
+         "asset_tag": "PSU-042"}, scope="control"))
+    assert out["notes"] == "mounted on UHV port 3" and out["asset_tag"] == "PSU-042"
+    assert out["driver"] == "fake_psu"                       # device-reported passes through
+
+    # a partial edit doesn't wipe the earlier fields
+    s.dispatch("device.set_meta",
+               {"instance_id": psu.instance_id, "cal_date": "2026-01-15"}, scope="control")
+    got = assert_json_able(
+        s.dispatch("device.get_meta", {"instance_id": psu.instance_id}, scope="read"))
+    assert got["notes"] == "mounted on UHV port 3"           # preserved
+    assert got["asset_tag"] == "PSU-042" and got["cal_date"] == "2026-01-15"
+
+    with pytest.raises(ControlError):                        # no fields given
+        s.dispatch("device.set_meta", {"instance_id": psu.instance_id}, scope="control")
+    with pytest.raises(ControlError):                        # unknown device
+        s.dispatch("device.set_meta", {"instance_id": "nope:0", "notes": "x"}, scope="control")
+    with pytest.raises(ScopeError):
+        s.dispatch("device.set_meta",
+                   {"instance_id": psu.instance_id, "notes": "y"}, scope="read")
+
+
 # -- projects ----------------------------------------------------------------
 @pytest.mark.ui
 def test_project_active_returns_full_metadata(control_surface):

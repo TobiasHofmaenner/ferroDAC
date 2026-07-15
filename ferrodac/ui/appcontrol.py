@@ -337,6 +337,26 @@ def build_control_surface(app) -> ControlSurface:
                params={"panel_id": {"type": "string"}, "id": {"type": "string"}},
                returns="{ok, removed}", destructive=True)
 
+    def _rename_panel(p):
+        pid = p.get("panel_id") or p.get("id")
+        if not pid:
+            raise ControlError("layout.rename_panel needs 'panel_id'")
+        if "title" not in p:
+            raise ControlError("layout.rename_panel needs 'title'")
+        pid, title = str(pid), str(p["title"])
+        panel = app.dashboard.panel(pid)
+        if panel is None:
+            raise ControlError(f"unknown panel: {pid}")
+        panel.set_display_name(title)                # sets panel.title (persisted) + plot title
+        app.dashboard.area.set_panel_title(panel, title)   # the dock / tab title
+        return {"ok": True, "panel_id": pid, "title": title}
+    s.register("layout.rename_panel", gui(_rename_panel),
+               description="Rename a panel's display title (the chart/dock/tab name shown "
+                           "in layout.get). Persists in the layout.",
+               params={"panel_id": {"type": "string"}, "id": {"type": "string"},
+                       "title": {"type": "string", "required": True}},
+               returns="{ok, panel_id, title}")
+
     # -- tags: edit + delete (delete is destructive) -------------------------
     def _tag_update(p):
         mid = str(p["id"])
@@ -591,6 +611,54 @@ def build_control_surface(app) -> ControlSurface:
                        "code": {"type": "string"}, "name": {"type": "string"}},
                returns="a device descriptor {instance_id, uuid, name, driver, status, "
                        "sources, sinks, last_error}")
+
+    def _device_set_meta(p):
+        iid = str(p["instance_id"])
+        desc = app.manager.descriptor(iid)
+        if desc is None:
+            raise ControlError(f"unknown device: {iid}")
+        from ..core.devicemeta import JOURNAL_FIELDS, device_key, merge_device_info
+        fields = {k: str(p[k]) for k in JOURNAL_FIELDS if k in p}
+        if not fields:
+            raise ControlError(
+                f"device.set_meta: give at least one of {list(JOURNAL_FIELDS)}")
+        store = app._device_meta()
+        key = device_key(desc)
+        merged = store.get(key)
+        merged.update(fields)                        # partial edit — don't wipe other fields
+        store.set(key, merged)
+        push = getattr(app, "_push_device_records", None)
+        if callable(push):
+            push()                                   # re-freeze provenance into the store
+        return merge_device_info(desc, store.get(key))
+    s.register("device.set_meta", gui(_device_set_meta),
+               description="Set a device's lab-journal metadata — the same fields the "
+                           "'Notes & journal' popup edits. This writes device_meta.json AND "
+                           "re-freezes the merged provenance into the data store (change-"
+                           "logged). Fields: notes, manufacturer, model, serial, firmware, "
+                           "cal_date, cal_due, cal_cert, asset_tag (give any subset; an empty "
+                           "string clears a field). Returns the merged journal.",
+               params={"instance_id": {"type": "string", "required": True},
+                       "notes": {"type": "string"}, "manufacturer": {"type": "string"},
+                       "model": {"type": "string"}, "serial": {"type": "string"},
+                       "firmware": {"type": "string"}, "cal_date": {"type": "string"},
+                       "cal_due": {"type": "string"}, "cal_cert": {"type": "string"},
+                       "asset_tag": {"type": "string"}},
+               returns="the merged journal (user values over device-reported)")
+
+    def _device_get_meta(p):
+        iid = str(p["instance_id"])
+        desc = app.manager.descriptor(iid)
+        if desc is None:
+            raise ControlError(f"unknown device: {iid}")
+        from ..core.devicemeta import device_key, merge_device_info
+        return merge_device_info(desc, app._device_meta().get(device_key(desc)))
+    s.query("device.get_meta", gui(_device_get_meta),
+            description="A device's merged lab-journal info (user metadata over the "
+                        "device-reported fields): name, driver, manufacturer, model, serial, "
+                        "firmware, cal_date/due/cert, asset_tag, notes.",
+            params={"instance_id": {"type": "string", "required": True}},
+            returns="{name, driver, manufacturer, model, serial, firmware, cal_*, asset_tag, notes}")
 
     # -- projects: metadata + local lifecycle --------------------------------
     def _project_active(_):

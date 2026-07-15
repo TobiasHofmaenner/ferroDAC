@@ -166,6 +166,26 @@ def test_layout_verbs_are_self_described(control_surface):
     assert "layout.routes" in read_verbs
 
 
+@pytest.mark.ui
+def test_layout_rename_panel(control_surface):
+    w, s = control_surface
+    pid = w.dashboard.add_panel("chart")
+    out = assert_json_able(
+        s.dispatch("layout.rename_panel", {"panel_id": pid, "title": "Battery V"},
+                   scope="control"))
+    assert out == {"ok": True, "panel_id": pid, "title": "Battery V"}
+    assert w.dashboard.panel(pid).title == "Battery V"          # canonical title updated
+    got = {p["id"]: p["title"] for p in s.dispatch("layout.get", scope="read")["panels"]}
+    assert got[pid] == "Battery V"                              # persisted in the layout
+
+    with pytest.raises(ControlError):                           # title required
+        s.dispatch("layout.rename_panel", {"panel_id": pid}, scope="control")
+    with pytest.raises(ControlError):                           # unknown panel
+        s.dispatch("layout.rename_panel", {"panel_id": "nope", "title": "x"}, scope="control")
+    with pytest.raises(ScopeError):
+        s.dispatch("layout.rename_panel", {"panel_id": pid, "title": "x"}, scope="read")
+
+
 # -- tags --------------------------------------------------------------------
 @pytest.mark.ui
 def test_tag_update_edits_metadata_against_real_markers(control_surface):
