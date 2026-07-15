@@ -102,6 +102,27 @@ def test_pair_then_describe_and_command(server):
         assert c.get("/query/device.voltage").json()["result"] == 12.0
 
 
+def test_command_body_accepts_flat_or_wrapped_params(server):
+    """Params may be sent FLAT ({"value": ...}) — what /describe's params suggest — or
+    WRAPPED ({"params": {...}}); both work, and confirm stays top-level (issue #5)."""
+    srv, reg = server
+    tok = _pair(srv, reg, scope="control")
+    with httpx.Client(base_url=_base(srv), timeout=5.0,
+                      headers={"Authorization": f"Bearer {tok}"}) as c:
+        assert c.post("/command/device.set_voltage",
+                      json={"value": 7.0}).json()["result"]["voltage"] == 7.0      # flat
+        assert c.post("/command/device.set_voltage",
+                      json={"params": {"value": 9.0}}).json()["result"]["voltage"] == 9.0  # wrapped
+        assert c.post("/command/device.set_voltage",
+                      json={"payload": {"value": 3.0}}).json()["result"]["voltage"] == 3.0  # payload
+    # a flat body + top-level confirm on a destructive (admin) verb
+    tok_a = _pair(srv, reg, scope="admin")
+    r = httpx.post(_base(srv) + "/command/project.delete",
+                   json={"id": "p1", "confirm": True},
+                   headers={"Authorization": f"Bearer {tok_a}"}, timeout=5.0)
+    assert r.status_code == 200 and r.json()["result"]["deleted"] == "p1"
+
+
 def test_auth_is_required_and_scope_is_enforced(server):
     srv, reg = server
     # no token → 401

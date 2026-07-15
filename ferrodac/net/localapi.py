@@ -198,7 +198,7 @@ class LocalApiServer:
                 "POST /pair": "begin pairing (no auth)",
                 "GET /pair/{id}": "poll a pairing; yields the token once approved (no auth)",
                 "GET /describe": "the scope-filtered catalog of verbs, each with params, scope and a 'destructive' flag — the source of truth for what you can do (bearer)",
-                "POST /command/{verb}": "run a command (mutating) verb; JSON body {payload?, confirm?} (bearer)",
+                "POST /command/{verb}": "run a command (mutating) verb; params in the JSON body either flat ({\"source_key\": ...}) or wrapped ({\"params\": {...}}), plus optional top-level {\"confirm\": true} (bearer)",
                 "GET /query/{verb}": "run a query (read) verb; params as ?key=value (bearer)",
                 "GET /events": "server-sent-events stream of state changes (bearer)",
             },
@@ -213,6 +213,7 @@ class LocalApiServer:
                 "Least privilege: reads need 'read', mutations need 'control', a few verbs need 'admin'. Ask for the smallest scope that does the job.",
                 "Destructive verbs (flagged in /describe) require {\"confirm\": true} in the command body — pass it deliberately.",
                 "Errors: 401 = missing/invalid token, 403 = scope too low or confirm missing, 400 = bad params or a verb error.",
+                "Command params go in the POST body — flat ({\"source_key\": ...}) or wrapped ({\"params\": {...}}), both accepted; confirm is always top-level. Query verbs take params in the URL (?key=value).",
                 "Consult a guidance playbook before a multi-step task for the recommended sequence.",
             ],
             "workflows": [
@@ -259,7 +260,7 @@ class LocalApiServer:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         verb = request.path_params["verb"]
         body = await _json_body(request)
-        payload = body.get("payload", body.get("params", {})) or {}
+        payload = _payload_of(body)
         confirm = bool(body.get("confirm", False))
         return await self._run_verb(conn, verb, payload, confirm)
 
@@ -338,6 +339,22 @@ async def _json_body(request: Request) -> dict:
         return json.loads(body) if body else {}
     except (ValueError, TypeError):
         return {}
+
+
+def _payload_of(body: dict) -> dict:
+    """A command verb's params may be sent WRAPPED — {"params": {...}} or {"payload":
+    {...}} — OR FLAT at the top level, which is what /describe's per-verb `params` naturally
+    suggests. Accept both (an explicit envelope wins); otherwise the whole body IS the
+    params, minus the reserved envelope keys. So `{"source_key": ...}` and
+    `{"params": {"source_key": ...}}` are equivalent, and `confirm` stays top-level either
+    way (issue #5)."""
+    if not isinstance(body, dict):
+        return {}
+    if isinstance(body.get("payload"), dict):
+        return body["payload"]
+    if isinstance(body.get("params"), dict):
+        return body["params"]
+    return {k: v for k, v in body.items() if k not in ("payload", "params", "confirm")}
 
 
 def _offer(queue: asyncio.Queue, item) -> None:
