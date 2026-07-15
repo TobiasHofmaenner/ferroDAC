@@ -66,6 +66,7 @@ class FakeSerial:
         self.streaming = False
         self.refuse = False                              # toggle → ERR,4
         self.is_open = True
+        self.commands = []                               # every line the host sent (for asserts)
 
     # -- pyserial surface the controller touches --
     def reset_input_buffer(self):
@@ -106,6 +107,7 @@ class FakeSerial:
         return str(v)                                    # int / bool → 0/1
 
     def _respond(self, line: str):
+        self.commands.append(line)                       # record for write-path assertions
         up = line.upper()
         if up == "*IDN?":
             return ["=" + self._idn]
@@ -218,6 +220,7 @@ def test_command_ok_and_err_parsing(fake):
 def test_command_setpoint_passes_arg(fake):
     with LSC("/dev/ttyUSB0") as lsc:
         assert lsc.command("pump", "SET", 3) == "OK"
+    assert "pump:SET 3" in fake.commands                  # the arg actually went on the wire
 
 
 def test_stream_on_off(fake):
@@ -386,3 +389,93 @@ def test_leak_event_maps_to_critical_severity(fake):
     dev._meas = None
     _read(dev, "p_loadlock")
     assert tags[0].severity == "critical"
+
+
+# -- fixes: platform dtype, robustness, resync, ERR-match -------------------- #
+
+def test_source_dtype_is_platform_float_for_enum_and_i32():
+    """enum/i32 sources carry a FLOAT on the data plane, so their ferroDAC dtype must be
+    a recognized one ("float"), NOT "str"/"int" — otherwise the router drops the channel
+    from curation/export/charts. bool stays "bool" (a recognized dtype)."""
+    en = mod._source_from_schema({"id": "st", "name": "State", "dtype": "enum",
+                                  "options": ["a", "b"]})
+    assert en.dtype == "float" and en.modality == Modality.STATUS
+    i32 = mod._source_from_schema({"id": "n", "name": "Count", "dtype": "i32"})
+    assert i32.dtype == "float" and i32.modality == Modality.SCALAR
+    bl = mod._source_from_schema({"id": "b", "name": "On", "dtype": "bool"})
+    assert bl.dtype == "bool"
+
+
+def test_malformed_meas_value_is_nan_not_crash(fake):
+    """A garbage (non-numeric, non-'nan') MEAS field maps to NaN, never a bare
+    ValueError out of meas() — _convert is total (mirrors the invalid→nan contract)."""
+    fake.meas["p_loadlock"] = "OL"                        # sensor overrange token, not a number
+    with LSC("/dev/ttyUSB0") as lsc:
+        m = lsc.meas()
+    assert math.isnan(m["p_loadlock"])
+
+
+def test_malformed_stream_frame_does_not_raise_out_of_command(fake):
+    """A malformed '#' frame interleaved before a reply must NOT raise a bare ValueError
+    out of the in-flight command — its bad value maps to NaN and the reply still returns."""
+    frames = []
+    with LSC("/dev/ttyUSB0", on_stream=frames.append) as lsc:
+        lsc.describe()
+        fake.inject("#5000,OL,1,1,idle")                  # arity-ok but first field is garbage
+        m = lsc.meas()
+        assert m["p_loadlock"] == pytest.approx(8.4e-07)  # reply still parsed
+    assert len(frames) == 1 and math.isnan(frames[0].values["p_loadlock"])
+
+
+def test_device_enum_value_not_in_options_is_bad(fake):
+    """An enum reading whose string is NOT one of the options → (nan,1) via the
+    opts.index branch (distinct from the 'nan' sentinel branch)."""
+    fake.meas["fib_state"] = "surprise"                   # a real string, not in options, not nan
+    dev = _device(fake)
+    v, st = _read(dev, "fib_state")
+    assert math.isnan(v) and st == 1
+
+
+def test_reply_beginning_ERR_but_not_an_error_is_data(fake, monkeypatch):
+    """A value that merely begins with 'ERR' (e.g. an enum state 'ERR_LEAK') is DATA,
+    not an instrument error — only 'ERR,'/'ERR' is an error (aligns with lsa31)."""
+    with LSC("/dev/ttyUSB0") as lsc:
+        monkeypatch.setattr(lsc, "_await_reply", lambda: "ERR_LEAK")
+        assert lsc.command("fib_state", "STATE?") == "ERR_LEAK"     # returned as data
+        monkeypatch.setattr(lsc, "_await_reply", lambda: 'ERR,4,"refused"')
+        with pytest.raises(LSCError) as ei:
+            lsc.command("vent", "ON")
+        assert ei.value.code == 4                          # a real =ERR still raises
+
+
+def test_timeout_desyncs_and_next_send_resyncs(fake):
+    """A reply timeout flags the link desynced; the next send discards any late/stale
+    reply first, so a command can never read the PREVIOUS command's reply."""
+    with LSC("/dev/ttyUSB0") as lsc:
+        fake._buf = bytearray()                           # nothing to read → timeout
+        with pytest.raises(LSCError, match="timeout"):
+            lsc._await_reply()
+        assert lsc._desynced is True
+        fake._buf = bytearray(b"=STALE\n")                # a late reply from the timed-out cmd
+        lsc._send("MEAS?")                                # resync: flush stale, then send
+        assert lsc._desynced is False
+        assert b"STALE" not in fake._buf                  # stale reply discarded…
+        assert fake._buf.startswith(b"=")                 # …only the fresh MEAS? reply remains
+
+
+def test_query_err_surface_raises_with_code(fake):
+    """describe/meas/state/stream errors surface as LSCError with the parsed code."""
+    with LSC("/dev/ttyUSB0") as lsc:
+        lsc.describe()
+        with pytest.raises(LSCError) as ei:
+            lsc.state("nonexistent")                       # =ERR,2,"No such state"
+        assert ei.value.code == 2
+
+
+def test_device_write_action_sends_do(fake):
+    """A device-level ACTION write sends '<sink>:DO' (only TOGGLE was covered)."""
+    dev = _device(fake)
+    action = next(s for s in dev._sinks if s.id == "fib_xfer")
+    fake.commands.clear()
+    dev._write(action, None)
+    assert "fib_xfer:DO" in fake.commands
