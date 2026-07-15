@@ -15,7 +15,7 @@ A **Python source** is a virtual device whose configuration is a block of Python
            with urllib.request.urlopen(
                    "https://api.example.com/fx?base=CHF&quote=EUR", timeout=5) as r:
                return {"rate": float(json.load(r)["rate"])}
-2. The source key is `"<uuid>/<source_id>"` from the returned descriptor (e.g. `"<uuid>/rate"`). Or `source.list` and match `origin` == the new `uuid`.
+2. Build the source key directly from the descriptor: `"<uuid>/<source_id>"` (e.g. `dev["uuid"] + "/rate"`). If you instead scan `source.list`, match on the key PREFIX being the uuid — note `source.list`'s `origin` is the device NAME, not the uuid.
 3. `layout.add_panel {kind: "chart"}`; `layout.route {source_key, sink_key: panel_id}` (check `attached`).
 4. `source.read {key}` — confirm the fetched value is arriving live.
 5. To change the script later: `device.config_set {instance_id, option: "code", value: <python>}` — it hot-reloads on the running device.
