@@ -66,6 +66,9 @@ class DeviceManager(QObject):
     device_added = Signal(str)      # a device the USER just added (instance_id) — NOT a
     #                                 discovery/session re-add; the UI auto-curates its
     #                                 channels into the active project (never on restore)
+    device_tag = Signal(object)     # a device raised a tag (Marker) — alarm / event /
+    #                                 gas-detected (DESIGN §7.3). Fired from a device's
+    #                                 poll thread; the app connects it with a QueuedConnection.
 
     def __init__(
         self,
@@ -138,6 +141,13 @@ class DeviceManager(QObject):
             self.available_changed.emit()
 
     # -- user actions --------------------------------------------------------
+    def _wire_tags(self, device) -> None:
+        """Give the device the channel to raise tags (alarms/events) into the app's
+        TagStore — the device→tag emitter path (DESIGN §7.3). The device fires it on its
+        poll thread; the app connects ``device_tag`` with a QueuedConnection."""
+        if hasattr(device, "set_tag_sink"):
+            device.set_tag_sink(self.device_tag.emit)
+
     def add(self, instance_id: str, *, user: bool = False) -> None:
         """Activate a device. ``user=True`` marks an explicit user add (the Devices
         panel) vs. an automatic discovery/session re-add (``_try_resolve``) — only the
@@ -152,6 +162,7 @@ class DeviceManager(QObject):
             uid = self._registry.register(device.fingerprint, friendly=device.name)
             device.set_uuid(uid)
         self._active[instance_id] = device
+        self._wire_tags(device)
         if hasattr(device, "mark_connecting"):
             device.mark_connecting()
         self.available_changed.emit()
@@ -182,6 +193,7 @@ class DeviceManager(QObject):
             uid = self._registry.register(device.fingerprint, friendly=device.name)
             device.set_uuid(uid)
         self._active[iid] = device
+        self._wire_tags(device)
         if hasattr(device, "mark_connecting"):
             device.mark_connecting()
         self.active_changed.emit()          # _available untouched → no available_changed

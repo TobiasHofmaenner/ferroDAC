@@ -112,6 +112,25 @@ def test_remove_calls_on_forget(qapp):
     engine.shutdown()
 
 
+def test_device_tag_channel_wired_on_add(qapp):
+    """A device added to the manager gets a tag channel (DESIGN §7.3): its emit_tag
+    reaches DeviceManager.device_tag. Before it is wired, emit_tag is a safe no-op."""
+    mgr = DeviceManager([], engine=None, registry=None)
+    got = []
+    mgr.device_tag.connect(got.append)
+
+    dev = _MintedDevice("pysrc-tag")
+    dev.emit_tag(object())                           # no sink yet → safe no-op, no crash
+    assert got == []
+
+    mgr.add_user_device(dev, user=True)
+    assert dev._tag_sink is not None                 # manager injected the device→tag sink
+    sentinel = object()
+    dev.emit_tag(sentinel)                           # device raises a tag…
+    qapp.processEvents()
+    assert got == [sentinel]                          # …it reached the manager's device_tag
+
+
 def test_remove_without_hook_is_safe(qapp):
     engine = Engine()
     mgr = DeviceManager([], engine=engine, registry=None)

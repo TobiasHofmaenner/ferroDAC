@@ -317,6 +317,9 @@ class MainWindow(QMainWindow):
         # a hub device that arrives → auto-curate it too (local devices get this via
         # device_added, but remote ones are injected straight into the dashboard)
         self.dashboard.remote_added.connect(self._curate_remote_device)
+        # a device raising a tag (alarm / event / gas-detected) → the shared TagStore
+        # (DESIGN §7.3). Emitted from the device's poll thread, so marshal to the GUI.
+        self.manager.device_tag.connect(self._on_device_tag, Qt.QueuedConnection)
         # project git history (DESIGN §8.2): boundary commits are immediate; doc edits
         # debounce through this timer so a burst of edits → one "settled" commit.
         self._commit_timer = QTimer(self)
@@ -1099,6 +1102,11 @@ class MainWindow(QMainWindow):
     def _set_source_lens_all(self, show_all: bool) -> None:
         self._sources_show_all = bool(show_all)
         self._apply_source_lens()
+
+    def _on_device_tag(self, marker) -> None:
+        """A device raised a tag (alarm/event) → merge it into the shared TagStore, from
+        which charts + the event log update. Runs on the GUI thread (QueuedConnection)."""
+        self.dashboard.markers.upsert(marker)
 
     def _curate_new_device(self, instance_id: str) -> None:
         """A just-added device's channels join the active project's curated list, so a
