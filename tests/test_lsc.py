@@ -4,6 +4,8 @@ emulates the instrument's line protocol (1,050,000/LF, demux by first byte) —
 no hardware. Protocol reference: lsc-firmware docs/programming-manual.md (DRAFT)."""
 import json
 import math
+import threading
+import time
 
 import pytest
 
@@ -67,10 +69,13 @@ class FakeSerial:
         self.refuse = False                              # toggle → ERR,4
         self.is_open = True
         self.commands = []                               # every line the host sent (for asserts)
+        self.drop_next_reply = False                     # simulate a device that misses one reply
+        self._lock = threading.Lock()                    # _buf is touched by the reader thread too
 
     # -- pyserial surface the controller touches --
     def reset_input_buffer(self):
-        self._buf = bytearray()
+        with self._lock:
+            self._buf = bytearray()
 
     def flush(self):
         pass
@@ -80,22 +85,26 @@ class FakeSerial:
 
     def write(self, data: bytes):
         line = data.decode().strip()
-        for resp in self._respond(line):
-            self._buf += (resp + "\n").encode()
+        resps = self._respond(line)                      # mutates state, not _buf
+        with self._lock:
+            for resp in resps:
+                self._buf += (resp + "\n").encode()
         return len(data)
 
     def read_until(self, term=b"\n"):
-        idx = self._buf.find(term)
-        if idx == -1:
-            return b""                                   # timeout (no full line)
-        end = idx + len(term)
-        out = bytes(self._buf[:end])
-        del self._buf[:end]
-        return out
+        with self._lock:
+            idx = self._buf.find(term)
+            if idx == -1:
+                return b""                               # timeout (no full line)
+            end = idx + len(term)
+            out = bytes(self._buf[:end])
+            del self._buf[:end]
+            return out
 
     def inject(self, text: str):
         """Push an unsolicited device→host line (event/stream frame)."""
-        self._buf += (text + "\n").encode()
+        with self._lock:
+            self._buf += (text + "\n").encode()
 
     # -- the instrument --
     @staticmethod
@@ -108,6 +117,9 @@ class FakeSerial:
 
     def _respond(self, line: str):
         self.commands.append(line)                       # record for write-path assertions
+        if self.drop_next_reply:                         # device misses this reply → host times out
+            self.drop_next_reply = False
+            return []
         up = line.upper()
         if up == "*IDN?":
             return ["=" + self._idn]
@@ -147,11 +159,31 @@ class FakeSerial:
 
 @pytest.fixture
 def fake(monkeypatch):
-    """Route LSC.open at a FakeSerial; returns the shared instance."""
+    """Route LSC.open at a FakeSerial; yields the shared instance and, on teardown,
+    disconnects any LSCDevice built via _device() so its reader thread stops (and the
+    shared _active_ports/_cache class state is left clean between tests)."""
     fs = FakeSerial()
+    fs.devices = []                                      # LSCDevices to tear down
     monkeypatch.setattr(mod.serial, "Serial", lambda *a, **k: fs)
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
-    return fs
+    yield fs
+    for d in fs.devices:
+        try:
+            d._disconnect()
+        except Exception:
+            pass
+
+
+def _spin(cond, timeout=2.0, interval=0.005):
+    """Wait for cond() to become truthy (the reader thread delivers asynchronously).
+    Uses a real Event.wait — time.sleep is monkeypatched to a no-op in these tests."""
+    ev = threading.Event()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        ev.wait(interval)
+    return bool(cond())
 
 
 # -- controller: link + identity --------------------------------------------- #
@@ -281,7 +313,8 @@ def _device(fake) -> LSCDevice:
     dev = LSCDevice(ProbeResult(port="/dev/ttyUSB0", serial="0001",
                                 firmware="demo-0.1", product="LSCIAKTHFIHELIOS",
                                 schema=json.loads(json.dumps(SCHEMA))))
-    dev._connect()
+    dev._connect()                                       # starts the background reader thread
+    fake.devices.append(dev)                             # → disconnected on fixture teardown
     return dev
 
 
@@ -370,10 +403,8 @@ def test_event_becomes_device_origin_tag(fake):
     dev = _device(fake)
     tags = []
     dev.set_tag_sink(tags.append)
-    fake.inject("!EVT,142760,fib-request,FIB")            # surfaced during MEAS?
-    dev._meas = None
-    _read(dev, "p_loadlock")
-    assert len(tags) == 1
+    fake.inject("!EVT,142760,fib-request,FIB")            # reader thread delivers it
+    assert _spin(lambda: len(tags) == 1)
     tag = tags[0]
     assert tag.kind == "fib-request"
     assert tag.origin_kind == ORIGIN_DEVICE
@@ -386,9 +417,21 @@ def test_leak_event_maps_to_critical_severity(fake):
     tags = []
     dev.set_tag_sink(tags.append)
     fake.inject("!EVT,999,leak,chamber")
-    dev._meas = None
-    _read(dev, "p_loadlock")
+    assert _spin(lambda: len(tags) == 1)
     assert tags[0].severity == "critical"
+
+
+def test_event_delivered_without_any_poll(fake):
+    """The fix for #4: an idle, never-polled device still delivers a front-panel event as
+    a tag in real time — the reader thread surfaces it independent of MEAS?/_read."""
+    dev = _device(fake)
+    tags = []
+    dev.set_tag_sink(tags.append)
+    assert fake.meas_count == 0                           # nothing has polled the device
+    fake.inject("!EVT,5000,vent-close,Vent Valve")        # a physical button press
+    assert _spin(lambda: len(tags) == 1)                  # …becomes a tag with no poll at all
+    assert fake.meas_count == 0
+    assert tags[0].kind == "vent-close" and tags[0].origin_kind == ORIGIN_DEVICE
 
 
 # -- fixes: platform dtype, robustness, resync, ERR-match -------------------- #
@@ -470,6 +513,25 @@ def test_query_err_surface_raises_with_code(fake):
         with pytest.raises(LSCError) as ei:
             lsc.state("nonexistent")                       # =ERR,2,"No such state"
         assert ei.value.code == 2
+
+
+def test_reader_hard_resyncs_after_timeout(fake):
+    """SAFETY (concurrency review): after a reader-mode command times out, its LATE reply
+    must not be read by the NEXT command — otherwise a refused write could look accepted.
+    The hard resync (stop→flush buffer+queue→restart reader) drops the stale reply."""
+    lsc = LSC("/dev/ttyUSB0", timeout=0.1)               # short timeout → fast test
+    lsc.open()
+    lsc.describe()                                        # synchronous handshake (reader off)
+    lsc.start_reader()
+    try:
+        fake.drop_next_reply = True                      # the device misses this command's reply
+        with pytest.raises(LSCError, match="timeout"):
+            lsc.command("vent", "ON")                    # → times out, flags a resync
+        fake.inject("=OK")                               # the missed reply arrives LATE (stale)
+        m = lsc.meas()                                   # the NEXT command hard-resyncs first…
+        assert "p_loadlock" in m and "fib_state" in m    # …and reads ITS OWN MEAS reply, not "=OK"
+    finally:
+        lsc.close()
 
 
 def test_device_write_action_sends_do(fake):

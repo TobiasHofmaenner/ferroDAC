@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import json
 import math
+import queue
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -139,6 +141,15 @@ class LSC:
         self._sinks: Optional[list] = None
         self._desynced = False                 # a timed-out reply may have left the stream
         #                                        offset by one → resync on the next send (§6)
+        # Optional background reader (start_reader): decouples '!'/'#' delivery from polling
+        # (issue #4). When running it OWNS port reads — '=' replies go to _reply_q, '#'/'!'
+        # are dispatched to the callbacks the moment they arrive — and commands read their
+        # reply off the queue under _txn_lock (one reply ↔ one command).
+        self._reply_q: "queue.Queue" = queue.Queue()
+        self._txn_lock = threading.Lock()
+        self._reader: "Optional[threading.Thread]" = None
+        self._reader_stop = threading.Event()
+        self._resync_needed = False            # a reader-mode timeout → hard-resync next txn
 
     # -- link ----------------------------------------------------------------- #
     def open(self) -> "LSC":
@@ -155,6 +166,7 @@ class LSC:
         return self
 
     def close(self) -> None:
+        self.stop_reader()                     # stop reading before the port goes away
         if self._ser is not None:
             try:
                 self._ser.close()
@@ -167,15 +179,70 @@ class LSC:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    # -- background reader (decouples '!'/'#' delivery from polling, issue #4) - #
+    def start_reader(self) -> None:
+        """Own the port from a background thread so '!' events and '#' frames are
+        dispatched the moment they arrive — independent of whether anything is polling.
+        Commands then read their '=' reply from a queue under _txn_lock. Idempotent.
+        Do NOT mix with the synchronous read_message() pull API — the reader owns reads."""
+        if self._reader is not None:
+            return
+        try:                                   # clean start: drop any residue — a late reply
+            if self._ser is not None:          # from a timed-out handshake read, or in-transit
+                self._ser.reset_input_buffer() # stale bytes on a hard resync (safe: no reader yet,
+        except Exception:                      # on_event already dispatched handshake events)
+            pass
+        self._drain_reply_q()
+        self._desynced = False
+        self._resync_needed = False
+        self._reader_stop.clear()
+        self._reader = threading.Thread(target=self._reader_loop,
+                                        name=f"lsc-reader-{self.port}", daemon=True)
+        self._reader.start()
+
+    def stop_reader(self) -> None:
+        self._reader_stop.set()
+        t, self._reader = self._reader, None
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=2.0)
+
+    def _reader_loop(self) -> None:
+        while not self._reader_stop.is_set():
+            try:
+                raw = self._readline()             # read_until returns as soon as a line lands
+            except Exception:                      # port closing / I/O error
+                if self._reader_stop.is_set():
+                    break
+                self._reader_stop.wait(0.05)       # brief backoff, still stop-responsive
+                continue
+            if raw is None:                        # no full line this cycle
+                self._reader_stop.wait(0.02)       # yield (not busy) + check stop
+                continue
+            c = raw[0]
+            if c == "=":
+                self._reply_q.put(raw[1:])         # a command's reply → the waiting transaction
+            elif c == "#":
+                self._dispatch(self.on_stream, self._parse_frame(raw))
+            elif c == "!":
+                self._dispatch(self.on_event, self._parse_event(raw))
+            # else: bare/unknown line — skip
+
+    def _drain_reply_q(self) -> None:
+        try:
+            while True:
+                self._reply_q.get_nowait()         # discard stale '=' from a prior timeout
+        except queue.Empty:
+            pass
+
     # -- low-level line I/O + demux ------------------------------------------- #
     def _send(self, line: str) -> None:
         if self._ser is None:
             raise LSCError("port not open")
-        if self._desynced:                     # a prior timeout may have left a late reply in
-            try:                               # the buffer → discard it so THIS command's reply
-                self._ser.reset_input_buffer() # is the next '=' we read (deliberate resync, §6)
-            except Exception:
-                pass
+        if self._desynced and self._reader is None:   # synchronous mode only: a prior timeout
+            try:                               # may have left a late reply in the buffer → discard
+                self._ser.reset_input_buffer() # it so THIS command's reply is the next '=' (§6).
+            except Exception:                  # (reader mode resyncs by draining _reply_q instead,
+                pass                           #  so buffered '!' events are never lost.)
             self._desynced = False
         try:
             self._ser.write(line.encode("ascii") + TERM)
@@ -185,9 +252,10 @@ class LSC:
 
     def _readline(self) -> Optional[str]:
         """One LF-terminated line, stripped; None on timeout / blank."""
-        if self._ser is None:
+        ser = self._ser                        # snapshot: check-then-use is atomic vs close()
+        if ser is None:
             raise LSCError("port not open")
-        data = self._ser.read_until(TERM)
+        data = ser.read_until(TERM)
         if not data:
             return None
         text = data.decode("ascii", "replace").strip("\r\n \t")
@@ -211,10 +279,16 @@ class LSC:
         return None                            # bare / unknown line — ignore
 
     def _await_reply(self) -> str:
-        """Return the next ``=`` reply's payload, surfacing any interleaved
-        ``#``/``!`` lines through the callbacks (the device serialises a pending
-        reply before its ``#``/``!`` — but a stream frame emitted mid-exchange
-        can still precede it, so we skip/surface until the ``=`` arrives)."""
+        """Return the next ``=`` reply's payload. In READER mode the reader thread owns
+        reads and has already dispatched any interleaved ``#``/``!`` — the reply waits on
+        ``_reply_q``. In synchronous mode we read directly, surfacing interleaved
+        ``#``/``!`` through the callbacks until the ``=`` arrives."""
+        if self._reader is not None:
+            try:
+                return self._reply_q.get(timeout=max(self.timeout * 2, 0.3))
+            except queue.Empty:
+                self._resync_needed = True     # a late reply may be in-transit → hard-resync next txn,
+                raise LSCError("no reply (timeout)")   # so it can't be misread as the next command's
         for _ in range(10000):
             raw = self._readline()
             if raw is None:
@@ -293,10 +367,22 @@ class LSC:
             return float("nan")                # garbage field → invalid reading, never a crash
 
     # -- transactions --------------------------------------------------------- #
+    def _transact(self, line: str) -> str:
+        """Send a line and return its ``=`` reply payload, serialized so exactly one
+        reply maps to one command (the poll and control paths share the port)."""
+        with self._txn_lock:
+            if self._reader is not None:
+                if self._resync_needed:        # a prior timeout may have left a late reply in-transit
+                    self.stop_reader()         # → HARD resync: flush the serial buffer AND the queue by
+                    self.start_reader()        #   restarting the reader, so it can't be misread as ours
+                else:
+                    self._drain_reply_q()      # normal: just drop any already-queued stale '='
+            self._send(line)
+            return self._await_reply()
+
     def _query(self, line: str) -> str:
         """Send a command/query; return the ``=`` payload, raising on ``=ERR``."""
-        self._send(line)
-        payload = self._await_reply()
+        payload = self._transact(line)
         if payload == "ERR" or payload.startswith("ERR,"):   # NOT a value like "ERR_LEAK"
             code, msg = self._parse_err(payload)
             raise LSCError(f"query {line!r} error {code}: {msg}", code=code)
@@ -348,8 +434,7 @@ class LSC:
         payload, or raises :class:`LSCError` (with ``.code``) on ``=ERR`` — a
         refused command NEVER silently looks accepted (manual §6)."""
         line = f"{sink_id}:{verb}" + ("" if arg is None else f" {arg}")
-        self._send(line)
-        payload = self._await_reply()
+        payload = self._transact(line)
         if payload == "ERR" or payload.startswith("ERR,"):   # NOT a value like "ERR_LEAK"
             code, msg = self._parse_err(payload)
             raise LSCError(f"command {line!r} error {code}: {msg}", code=code)
@@ -490,9 +575,9 @@ class LSCDevice(BaseDevice):
         # for at most a half-period — the lsa31 polling model.
         self._meas: Optional[dict] = None
         self._meas_at = 0.0
-        # !EVT lines the link surfaced while awaiting replies, drained → tags via the
-        # BaseDevice emit_tag() channel (the platform injects the sink; §7.3).
-        self._events: list = []
+        # !EVT lines become device-origin tags via BaseDevice.emit_tag() (§7.3). Delivery
+        # is driven by the LSC controller's background reader thread — the moment an event
+        # arrives, NOT gated on a MEAS?/poll cycle (issue #4).
 
     # -- discovery -------------------------------------------------------------- #
     @classmethod
@@ -524,7 +609,8 @@ class LSCDevice(BaseDevice):
             finally:
                 self._lsc = None
         lsc = LSC(self._port)
-        lsc.on_event = self._events.append        # surface !EVT into the drain queue
+        lsc.on_event = self._on_event             # capture events even DURING the handshake
+        #                                           (the tag sink is already wired by the manager)
         lsc.open()
         try:
             parsed = _parse_idn(lsc.idn())
@@ -541,11 +627,14 @@ class LSCDevice(BaseDevice):
                     self._sink_values[sink.id] = self._parse_state(sink, lsc.state(sink.id))
                 except Exception:
                     pass                          # sink without a readable state
+            # Background reader: events (a leak, a front-panel valve press) reach the
+            # timeline in real time even while the device sits idle — no MEAS?/poll needed
+            # (issue #4). Inside the try so a failure here still closes the port.
+            lsc.start_reader()
         except Exception:
             lsc.close()
             raise
         self._lsc = lsc
-        self._events.clear()
         with type(self)._cls_lock:
             type(self)._active_ports.add(self._port)
             type(self)._cache.pop(self._port, None)
@@ -575,23 +664,21 @@ class LSCDevice(BaseDevice):
 
     # -- data plane -------------------------------------------------------------- #
     def _fresh_meas(self) -> dict:
-        """The poll cycle's shared MEAS? (re-queried at most once per half-period),
-        draining any events the exchange surfaced into device-origin tags. The
-        io_lock is held by the caller."""
+        """The poll cycle's shared MEAS? (re-queried at most once per half-period). The
+        io_lock is held by the caller. (Event tags are delivered by the reader thread, not
+        here — see _on_event / issue #4.)"""
         now = time.monotonic()
         max_age = 0.5 / max(self._rate_hz or 1.0, 1e-3)
         if self._meas is None or (now - self._meas_at) > max_age:
             self._meas = self._lsc.meas()
             self._meas_at = now
-            self._drain_events()
         return self._meas
 
-    def _drain_events(self) -> None:
-        if not self._events:
-            return
-        pending, self._events = self._events, []
-        for evt in pending:
-            self.emit_tag(self._event_to_tag(evt))    # base forwards to the platform sink
+    def _on_event(self, evt: Event) -> None:
+        """A !EVT surfaced by the controller's reader thread → a device-origin tag, in
+        real time and independent of polling (issue #4). Runs on the reader thread;
+        emit_tag's injected sink marshals to the GUI thread."""
+        self.emit_tag(self._event_to_tag(evt))
 
     def _event_to_tag(self, evt: Event) -> Marker:
         sev = _EVENT_SEVERITY.get(evt.kind, "info")
