@@ -141,7 +141,7 @@ class ShellyConfigWidget(DeviceConfigWidget):
 
 
 # --------------------------------------------------------------------------- #
-#  Python source: an in-app editor for the driver's poll(ctx) body.
+#  Python device: an in-app editor for the driver's poll(ctx) body.
 # --------------------------------------------------------------------------- #
 from qtpy.QtWidgets import QPlainTextEdit  # noqa: E402
 
@@ -151,9 +151,9 @@ _PY_SOURCE_HINT = (
     "SOURCES declaration.")
 
 
-@register_config_widget("python_source")
-class PythonSourceConfigWidget(DeviceConfigWidget):
-    """A "Python source" device runs a block of user Python on its poll thread; the
+@register_config_widget("python_device")
+class PythonDeviceConfigWidget(DeviceConfigWidget):
+    """A "Python device" device runs a block of user Python on its poll thread; the
     code lives in an ``Option(key="code")``. The single-line option row the dialog
     renders for a normal Option can't hold a code block, so this panel *owns the
     options* (``owns_options = True`` → ConfigDialog skips its auto-rendered rows) and
@@ -168,7 +168,7 @@ class PythonSourceConfigWidget(DeviceConfigWidget):
     other external edits still land).
     """
 
-    driver = "python_source"
+    driver = "python_device"
     owns_options = True                 # ConfigDialog suppresses the generic option rows
 
     def __init__(self, controller, parent=None):

@@ -1,14 +1,14 @@
 ---
 id: plot-live-external-data
 title: Plot live external data
-when_to_use: Chart a value that ISN'T a lab instrument — an HTTP endpoint, a web API, or a computed quantity (e.g. a live CHF/EUR FX rate). Use a Python source.
+when_to_use: Chart a value that ISN'T a lab instrument — an HTTP endpoint, a web API, or a computed quantity (e.g. a live CHF/EUR FX rate). Use a Python device.
 tags: [python-source, webhook, http, chart, routing]
 verbs_used: [device.create, device.config_set, device.config_get, source.list, layout.add_panel, layout.route, source.read]
 ---
-A **Python source** is a virtual device whose configuration is a block of Python the app EXECUTES on a timer; each returned value is emitted as a Reading and routes like any real channel. This subsumes a webhook — the code can fetch an HTTP endpoint. You can create and drive one **entirely over the API** with `device.create`.
+A **Python device** is a virtual device whose configuration is a block of Python the app EXECUTES on a timer; each returned value is emitted as a Reading and routes like any real channel. This subsumes a webhook — the code can fetch an HTTP endpoint. You can create and drive one **entirely over the API** with `device.create`.
 
 ## Steps
-1. `device.create {kind: "python_source", code: <python>}` — create + activate a Python source with your `poll(ctx)` script in ONE call. It returns `{instance_id, uuid, sources, last_error}`. If `last_error` is non-null the code didn't compile — fix it and `device.config_set` the "code" option. A minimal CHF poller (declare the channel, then `poll(ctx)` returns the number):
+1. `device.create {kind: "python_device", code: <python>}` — create + activate a Python device with your `poll(ctx)` script in ONE call. It returns `{instance_id, uuid, sources, last_error}`. If `last_error` is non-null the code didn't compile — fix it and `device.config_set` the "code" option. A minimal CHF poller (declare the channel, then `poll(ctx)` returns the number):
        SOURCES = [{"id": "rate", "name": "CHF/EUR", "unit": ""}]
        import urllib.request, json
        def poll(ctx):
@@ -26,7 +26,7 @@ A **Python source** is a virtual device whose configuration is a block of Python
 device.create, device.config_set, device.config_get, source.list, layout.add_panel, layout.route, source.read
 
 ```skeleton
-dev = command("device.create", {"kind": "python_source", "code":
+dev = command("device.create", {"kind": "python_device", "code":
     ("SOURCES=[{'id':'rate','name':'CHF/EUR','unit':''}]\n"
      "import urllib.request, json\n"
      "def poll(ctx):\n"

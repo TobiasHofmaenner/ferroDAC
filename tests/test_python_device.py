@@ -1,12 +1,12 @@
-"""PYTHON SOURCE driver: user Python runs on the poll thread, each returned value
+"""PYTHON DEVICE driver: user Python runs on the poll thread, each returned value
 becomes a Reading. Headless / Qt-free — build the device, drive _read cycles, assert
 values; a bad script -> NaN + last_error; a code edit hot-swaps the sources.
 The defs file is redirected to a tmp dir so the suite never touches ~/.config."""
 import pytest
 
-import ferrodac.devices.python_source as mod
+import ferrodac.devices.python_device as mod
 from ferrodac.core.device import RateMode
-from ferrodac.devices.python_source import PythonSourceDevice
+from ferrodac.devices.python_device import PythonDevice
 
 
 DET = '''
@@ -44,7 +44,7 @@ def _isolate_cfg(tmp_path, monkeypatch):
 
 
 def _dev(code):
-    d = PythonSourceDevice.new()
+    d = PythonDevice.new()
     d.set_option("code", code)             # -> _on_option -> _recompile + save_def
     return d
 
@@ -55,9 +55,9 @@ def _next_cycle(d):
 
 # -- identity / defaults --------------------------------------------------------
 def test_new_defaults_and_starter_sources():
-    d = PythonSourceDevice.new()
+    d = PythonDevice.new()
     desc = d.describe()
-    assert desc.driver == "python_source"
+    assert desc.driver == "python_device"
     assert desc.instance_id.startswith("python:")
     assert desc.hardware_id == desc.instance_id           # STABLE fingerprint
     assert d.discoverable is False and d.async_config is True
@@ -68,7 +68,7 @@ def test_new_defaults_and_starter_sources():
 
 
 def test_starter_template_compiles_and_polls():
-    d = PythonSourceDevice.new()
+    d = PythonDevice.new()
     srcs = {s.id: s for s in d.describe().sources}
     (sine, _), (ramp, _) = d._read(srcs["sine"]), d._read(srcs["ramp"])
     assert -1.0 <= sine <= 1.0
@@ -154,7 +154,7 @@ def test_hot_reload_changes_sources():
 def test_persistence_roundtrip_and_delete():
     d = _dev(DET)
     assert mod.load_defs().get(d.instance_id) == DET     # _on_option persisted the edit
-    d2 = PythonSourceDevice.restore(d.instance_id)        # rehydrate from disk
+    d2 = PythonDevice.restore(d.instance_id)        # rehydrate from disk
     assert [s.id for s in d2.describe().sources] == ["a", "b"]
     assert d2._read(d2.describe().sources[0]) == (1.5, 0)
     mod.delete_def(d.instance_id)
@@ -163,9 +163,9 @@ def test_persistence_roundtrip_and_delete():
 
 def test_restore_all_rehydrates_active_set():
     a = _dev(DET)
-    b = PythonSourceDevice.new()
+    b = PythonDevice.new()
     b.set_option("code", "def poll(ctx):\n    return 5\n")
-    restored = {d.instance_id: d for d in PythonSourceDevice.restore_all()}
+    restored = {d.instance_id: d for d in PythonDevice.restore_all()}
     assert a.instance_id in restored and b.instance_id in restored
 
 
@@ -176,7 +176,7 @@ def test_check_ok_reports_source_count():
 
 
 def test_check_reports_compile_error():
-    d = PythonSourceDevice.new()
+    d = PythonDevice.new()
     d.set_option("code", "def poll(ctx):\n    return }{\n")
     r = d.check()
     assert not r.ok and "error" in r.summary.lower()
@@ -185,3 +185,51 @@ def test_check_reports_compile_error():
 def test_check_reports_raising_poll():
     r = _dev(BAD_RUNTIME).check()
     assert not r.ok and "boom" in r.summary
+
+
+# -- sinks (control inputs) -----------------------------------------------------
+SINKS_CODE = '''
+SOURCES = [{"id": "target_rb", "name": "Target readback", "unit": ""}]
+SINKS = [
+    {"id": "target", "name": "Target", "kind": "setpoint", "value": 0.0},
+    {"id": "power",  "name": "Power",  "kind": "toggle",   "value": False},
+    {"id": "zero",   "name": "Zero",   "kind": "action"},
+]
+WRITES = []
+def write(ctx, sink_id, value):
+    WRITES.append((sink_id, value))
+def poll(ctx):
+    return {"target_rb": ctx.sink("target")}   # read the setpoint back
+'''
+
+
+def test_sinks_advertised_written_and_read_back():
+    from ferrodac.core.device import SinkKind
+    d = _dev(SINKS_CODE)
+    sinks = {s.id: s for s in d.describe().sinks}
+    assert set(sinks) == {"target", "power", "zero"}
+    assert sinks["target"].kind == SinkKind.SETPOINT
+    assert sinks["power"].kind == SinkKind.TOGGLE
+    assert sinks["zero"].kind == SinkKind.ACTION
+    assert d._sink_values == {"target": 0.0, "power": False}    # ACTION carries no value
+
+    # a setpoint write runs the user's write(ctx, id, value) AND holds the value
+    d.write("target", 5.0)
+    assert d._ns["WRITES"][-1] == ("target", 5.0)
+    assert d._sink_values["target"] == 5.0
+    # poll() reads the setpoint back via ctx.sink -> the readback source reflects it
+    src = {s.id: s for s in d.describe().sources}["target_rb"]
+    _next_cycle(d)
+    assert d._read(src) == (5.0, 0)
+
+    # toggle + action writes dispatch too
+    d.write("power", True)
+    assert d._sink_values["power"] is True
+    d.write("zero")                            # ACTION: no value, not stored
+    assert d._ns["WRITES"][-1] == ("zero", None)
+    assert "zero" not in d._sink_values
+
+
+def test_no_sinks_by_default():
+    d = PythonDevice.new()
+    assert d.describe().sinks == []            # the starter declares only SOURCES

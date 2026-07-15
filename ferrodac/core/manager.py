@@ -167,7 +167,7 @@ class DeviceManager(QObject):
         self._run_async(_connect_and_stream, on_finished=self.active_changed.emit)
 
     def add_user_device(self, device, *, user: bool = True) -> None:
-        """Activate a device the APP minted itself (a Python source, or any
+        """Activate a device the APP minted itself (a Python device, or any
         discoverable=False driver) — one that never came from a discovery scan. Mirrors
         add() but injects the live object straight into _active instead of pulling it
         from _available: the discovery worker OWNS _available and purges any entry its
@@ -200,7 +200,7 @@ class DeviceManager(QObject):
         if device is None:
             return
         self.active_changed.emit()
-        # A user-minted device (Python source) persists its definition so it survives a
+        # A user-minted device (Python device) persists its definition so it survives a
         # restart; an explicit user remove must drop that def too, else it'd be re-minted
         # on the next launch. on_forget() is the device's own cleanup hook — absent (a
         # no-op) on hardware drivers. remove() is ALWAYS user-initiated (never a transient

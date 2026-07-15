@@ -210,13 +210,13 @@ def test_device_verbs_are_self_described(control_surface):
 
 
 @pytest.mark.ui
-def test_device_create_python_source(control_surface, monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))   # isolate the python_sources defs
+def test_device_create_python_device(control_surface, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))   # isolate the python_devices defs
     w, s = control_surface
 
-    # default: a python source with the starter template (sine + ramp), activated
+    # default: a python device with the starter template (sine + ramp), activated
     out = assert_json_able(s.dispatch("device.create", {}, scope="control"))
-    assert out["driver"] == "python_source" and out["instance_id"].startswith("python:")
+    assert out["driver"] == "python_device" and out["instance_id"].startswith("python:")
     assert out["uuid"] and out["last_error"] is None       # got a uuid; starter compiled
     assert {sk["id"] for sk in out["sources"]} == {"sine", "ramp"}
     assert w.manager.is_active(out["instance_id"])

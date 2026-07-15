@@ -27,17 +27,17 @@ class _FakeController:
 
 
 def _widget(qapp):
-    from ferrodac.ui.device_config import PythonSourceConfigWidget
-    return PythonSourceConfigWidget(_FakeController())
+    from ferrodac.ui.device_config import PythonDeviceConfigWidget
+    return PythonDeviceConfigWidget(_FakeController())
 
 
 @pytest.mark.ui
 def test_registered_owns_options(qapp):
     from ferrodac.ui.device_config import (DEVICE_CONFIG_WIDGETS,
-                                           PythonSourceConfigWidget)
-    assert DEVICE_CONFIG_WIDGETS["python_source"] is PythonSourceConfigWidget
-    assert PythonSourceConfigWidget.owns_options is True
-    assert PythonSourceConfigWidget.driver == "python_source"
+                                           PythonDeviceConfigWidget)
+    assert DEVICE_CONFIG_WIDGETS["python_device"] is PythonDeviceConfigWidget
+    assert PythonDeviceConfigWidget.owns_options is True
+    assert PythonDeviceConfigWidget.driver == "python_device"
 
 
 @pytest.mark.ui

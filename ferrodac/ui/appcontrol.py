@@ -563,13 +563,13 @@ def build_control_surface(app) -> ControlSurface:
                returns="{ok, instance_id, hz}")
 
     def _device_create(p):
-        kind = str(p.get("kind") or "python_source")
-        if kind != "python_source":
+        kind = str(p.get("kind") or "python_device")
+        if kind != "python_device":
             raise ControlError(
-                f"device.create: unsupported kind {kind!r} (only 'python_source' in v1)")
-        from ..devices.python_source import PythonSourceDevice, save_def
-        dev = PythonSourceDevice.new(code=p.get("code"),
-                                     name=str(p.get("name") or "Python Source"))
+                f"device.create: unsupported kind {kind!r} (only 'python_device' in v1)")
+        from ..devices.python_device import PythonDevice, save_def
+        dev = PythonDevice.new(code=p.get("code"),
+                                     name=str(p.get("name") or "Python Device"))
         # the compile result, captured BEFORE activation — add_user_device runs connect()
         # on a worker thread, and connect() clears last_error (it's also the transport-
         # error slot), which would otherwise race away a code error.
@@ -581,13 +581,13 @@ def build_control_surface(app) -> ControlSurface:
         return out
     s.register("device.create", gui(_device_create),
                description="Create a NEW user-minted device and activate it (v1: a "
-                           "'python_source' — a virtual device whose channels are produced "
+                           "'python_device' — a virtual device whose channels are produced "
                            "by Python you supply). Optionally pass initial 'code' (a "
                            "poll(ctx) script; default = the starter template) + a 'name'. "
                            "Edit later with device.config_set (option 'code'). Returns the "
                            "descriptor incl. 'last_error' if the code didn't compile; then "
                            "route its source(s) — key '<uuid>/<source_id>' — with layout.route.",
-               params={"kind": {"type": "string", "enum": ["python_source"]},
+               params={"kind": {"type": "string", "enum": ["python_device"]},
                        "code": {"type": "string"}, "name": {"type": "string"}},
                returns="a device descriptor {instance_id, uuid, name, driver, status, "
                        "sources, sinks, last_error}")

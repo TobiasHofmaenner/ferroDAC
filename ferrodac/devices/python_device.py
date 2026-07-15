@@ -1,4 +1,4 @@
-"""Python Source — a virtual device whose "config" is a block of Python that the
+"""Python Device — a virtual device whose "config" is a block of Python that the
 app EXECUTES on the device poll thread; each value it returns becomes a Reading and
 routes like any other source.
 
@@ -49,29 +49,40 @@ from ..core.device import (
     Option,
     RateControl,
     RateMode,
+    Sink,
+    SinkKind,
     Source,
 )
 
-log = logging.getLogger("ferrodac.python_source")
+log = logging.getLogger("ferrodac.python_device")
+
+# SINKS declaration kind string -> SinkKind (the control-sink types the app renders).
+_SINK_KINDS = {"action": SinkKind.ACTION, "setpoint": SinkKind.SETPOINT,
+               "toggle": SinkKind.TOGGLE, "enum": SinkKind.ENUM}
 
 
 # --------------------------------------------------------------------------- #
 #  Starter template (the default `code` option)
 # --------------------------------------------------------------------------- #
 STARTER_CODE = '''\
-"""Python Source — this code runs on the device poll thread. Each value returned
+"""Python Device — this code runs on the device poll thread. Each value returned
 by poll(ctx) becomes a Reading and routes like any other source.
 
   SOURCES     (optional)  a list of {"id","name","unit"} dicts declaring channels.
   setup(ctx)  (optional)  runs once when the code is (re)compiled.
   poll(ctx)   (required)  runs once per sample; return {source_id: value}
                           (or a single number for a one-channel source).
+  SINKS       (optional)  control inputs to advertise: [{"id","name","kind"}],
+                          kind = setpoint | toggle | enum | action.
+  write(ctx, sink_id, value)  (optional)  runs when a sink is set (device.set_sink
+                          or the UI) — do something with value (POST, drive hardware).
 
 ctx.t         wall-clock time (seconds)
 ctx.state     a dict that persists across polls (counters / clients live here)
 ctx.last      the previous poll's dict result
 ctx.log(m)    log a message (shown by the Check button)
 ctx.option(k) read a device option by key
+ctx.sink(k)   read a control sink's current value (what was last written to it)
 
 NOTE: this code runs IN-PROCESS with full trust, the same as a plugin. There is no
 sandbox -- only paste code you would run yourself.
@@ -109,6 +120,16 @@ def poll(ctx):
 #     with urllib.request.urlopen(url, timeout=5) as r:
 #         data = json.load(r)
 #     return {"temp": data["temperature"]}
+#
+# --- Example: a device with a controllable setpoint (a SINK) ----------------
+# SINKS   = [{"id": "target", "name": "Target", "kind": "setpoint", "value": 0.0}]
+# SOURCES = [{"id": "target_rb", "name": "Target readback", "unit": ""}]
+#
+# def write(ctx, sink_id, value):
+#     ctx.log(f"set {sink_id} = {value}")        # e.g. POST it to an instrument
+#
+# def poll(ctx):
+#     return {"target_rb": ctx.sink("target")}   # read the setpoint back
 '''
 
 
@@ -116,8 +137,8 @@ def poll(ctx):
 #  Persistence — a small JSON defs file: {instance_id: code}
 # --------------------------------------------------------------------------- #
 def defs_path() -> str:
-    """Path of the defs file that lets Python sources survive a restart."""
-    return os.path.join(default_config_dir(), "python_sources.json")
+    """Path of the defs file that lets Python devices survive a restart."""
+    return os.path.join(default_config_dir(), "python_devices.json")
 
 
 def load_defs() -> dict:
@@ -153,7 +174,7 @@ def save_def(instance_id: str, code: str) -> None:
         defs[str(instance_id)] = str(code)
         _write_defs(defs)
     except OSError as exc:                  # noqa: BLE001
-        log.warning("python_source: could not persist %s: %s", instance_id, exc)
+        log.warning("python_device: could not persist %s: %s", instance_id, exc)
 
 
 def delete_def(instance_id: str) -> None:
@@ -164,7 +185,7 @@ def delete_def(instance_id: str) -> None:
             del defs[str(instance_id)]
             _write_defs(defs)
     except OSError as exc:                  # noqa: BLE001
-        log.warning("python_source: could not delete %s: %s", instance_id, exc)
+        log.warning("python_device: could not delete %s: %s", instance_id, exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -185,7 +206,7 @@ class _Ctx:
     """The small object handed to setup(ctx) / poll(ctx). Deliberately tiny and
     JSON-agnostic — user code stashes whatever it likes in ``state``."""
 
-    def __init__(self, device: "PythonSourceDevice"):
+    def __init__(self, device: "PythonDevice"):
         self._device = device
         self.state: dict = {}
         self._last: dict = {}
@@ -203,28 +224,33 @@ class _Ctx:
 
     def log(self, msg) -> None:
         self._logs.append(str(msg))
-        log.debug("python_source[%s]: %s", self._device.instance_id, msg)
+        log.debug("python_device[%s]: %s", self._device.instance_id, msg)
 
     def option(self, key: str):
         """Read a device option by key (e.g. a URL you added as an option)."""
         return self._device._option_values.get(key)
 
+    def sink(self, key: str):
+        """The current value of a control SINK — what someone last wrote to it (via
+        device.set_sink or the UI). Lets poll() read a setpoint/toggle back."""
+        return self._device._sink_values.get(key)
+
 
 # --------------------------------------------------------------------------- #
 #  The driver
 # --------------------------------------------------------------------------- #
-class PythonSourceDevice(BaseDevice):
+class PythonDevice(BaseDevice):
     """A virtual device whose channels are produced by user-supplied Python.
 
     discoverable=False (it is minted from the Devices menu, never scanned) and
     async_config=True (compiling + a probe poll may block, so the manager applies the
     ``code`` option off the GUI thread)."""
 
-    driver = "python_source"
+    driver = "python_device"
     discoverable = False
     async_config = True                    # (re)compiling + a probe poll can block
 
-    def __init__(self, instance_id: str, code: str, name: str = "Python Source"):
+    def __init__(self, instance_id: str, code: str, name: str = "Python Device"):
         # State the exec model needs, set BEFORE super().__init__ (which builds the
         # placeholder sources) so a first _recompile below can replace them safely.
         self._ns: dict = {}                # the compiled user namespace
@@ -243,22 +269,22 @@ class PythonSourceDevice(BaseDevice):
             rate=RateControl(mode=RateMode.SETTABLE, default_hz=1.0,
                              min_hz=0.1, max_hz=20.0),
             hardware_id=instance_id,        # STABLE fingerprint == the id (restore/dedup)
-            model="Python source",
+            model="Python device",
             manufacturer="ferroDAC",
         )
         self._recompile(code)
 
     # -- minting / restore ---------------------------------------------------
     @classmethod
-    def new(cls, code: "str | None" = None, name: str = "Python Source") -> "PythonSourceDevice":
+    def new(cls, code: "str | None" = None, name: str = "Python Device") -> "PythonDevice":
         """A fresh instance with a unique id. Defaults to the starter template; pass
         ``code`` to create it pre-populated (e.g. the device.create verb over the API).
         The caller then persists it with ``save_def(dev.instance_id, dev.code)``."""
         return cls(instance_id=f"python:{uuid.uuid4().hex[:8]}",
-                   code=code if code else STARTER_CODE, name=str(name or "Python Source"))
+                   code=code if code else STARTER_CODE, name=str(name or "Python Device"))
 
     @classmethod
-    def restore(cls, instance_id: str, code: "str | None" = None) -> "PythonSourceDevice":
+    def restore(cls, instance_id: str, code: "str | None" = None) -> "PythonDevice":
         """Rebuild a saved source. ``code`` defaults to the persisted def (then the
         starter, if the id is unknown)."""
         if code is None:
@@ -266,8 +292,8 @@ class PythonSourceDevice(BaseDevice):
         return cls(instance_id=instance_id, code=code)
 
     @classmethod
-    def restore_all(cls) -> "list[PythonSourceDevice]":
-        """Every persisted Python source — call on startup to rehydrate the active set."""
+    def restore_all(cls) -> "list[PythonDevice]":
+        """Every persisted Python device — call on startup to rehydrate the active set."""
         return [cls(instance_id=iid, code=code) for iid, code in load_defs().items()]
 
     def on_forget(self) -> None:
@@ -292,14 +318,15 @@ class PythonSourceDevice(BaseDevice):
         """Compile + exec ``text`` into a fresh namespace, run setup(ctx), derive the
         sources. Returns ``(ns, ctx, sources)``; RAISES on any stage (syntax, exec,
         setup, or an inference poll). The caller decides what a failure means."""
-        ns = {"__name__": "ferrodac_python_source", "__builtins__": builtins}
-        exec(compile(text, "<python_source>", "exec"), ns)   # noqa: S102 — by design
+        ns = {"__name__": "ferrodac_python_device", "__builtins__": builtins}
+        exec(compile(text, "<python_device>", "exec"), ns)   # noqa: S102 — by design
         ctx = _Ctx(self)
         setup = ns.get("setup")
         if callable(setup):
             setup(ctx)
         sources = self._derive_sources(ns, ctx)
-        return ns, ctx, sources
+        sinks = self._derive_sinks(ns)
+        return ns, ctx, sources, sinks
 
     def _derive_sources(self, ns: dict, ctx: _Ctx) -> list:
         """Channels from (in order): a SOURCES/CHANNELS list, a sources() function,
@@ -331,22 +358,42 @@ class PythonSourceDevice(BaseDevice):
         sid = str(item)
         return Source(id=sid, name=sid)
 
+    def _derive_sinks(self, ns: dict) -> list:
+        """Control sinks from an optional module-level SINKS list. Each item is a dict
+        {id, name?, kind?, value?, choices?}; kind ∈ action/setpoint/toggle/enum
+        (default setpoint; a bare string id = a setpoint). Absent SINKS -> no sinks."""
+        spec = ns.get("SINKS")
+        return [self._make_sink(item) for item in spec] if spec else []
+
+    @staticmethod
+    def _make_sink(item) -> Sink:
+        if not isinstance(item, dict):
+            item = {"id": str(item)}
+        sid = str(item.get("id") or _slug(item.get("name", ""))) or "sink"
+        kind = _SINK_KINDS.get(str(item.get("kind", "setpoint")).lower(), SinkKind.SETPOINT)
+        params = tuple(item.get("choices") or item.get("params") or ())   # ENUM options
+        return Sink(id=sid, name=str(item.get("name") or sid),
+                    kind=kind, params=params, value=item.get("value"))
+
     def _recompile(self, text: str) -> None:
         """Apply new code. On success: swap in the namespace, ctx and sources, clear
         the error, invalidate the cache. On ANY failure: set ``last_error`` to the
         last traceback line and KEEP the previous namespace + sources (a broken edit
         never blanks a live device). Either way, re-announce (_mark_sink_dirty)."""
         try:
-            ns, ctx, sources = self._build(text or "")
+            ns, ctx, sources, sinks = self._build(text or "")
         except Exception:                          # noqa: BLE001 — surface, don't crash
             self._last_error = _last_line(traceback.format_exc())
-            log.warning("python_source[%s]: compile failed: %s",
+            log.warning("python_device[%s]: compile failed: %s",
                         self._instance_id, self._last_error)
             self._mark_sink_dirty()                # re-announce so the UI shows the error
             return
         if not sources:                            # never leave a zombie with 0 channels
             sources = [Source(id="value", name="value")]
-        self._ns, self._ctx, self._sources = ns, ctx, sources
+        self._ns, self._ctx, self._sources, self._sinks = ns, ctx, sources, sinks
+        prev = getattr(self, "_sink_values", {})   # keep values for ids that persist
+        self._sink_values = {s.id: prev.get(s.id, s.value)
+                             for s in sinks if s.kind != SinkKind.ACTION}
         self._cache_valid = False
         self._runtime_err = False
         self._last_error = None
@@ -408,6 +455,16 @@ class PythonSourceDevice(BaseDevice):
         except (TypeError, ValueError):
             return float("nan"), 1
 
+    def _write(self, schema, value) -> None:
+        """A control sink was written (device.set_sink / the UI). Dispatch to the user's
+        write(ctx, sink_id, value) if defined. BaseDevice.write() stores the value in
+        _sink_values AFTER this returns (so poll() reads it back via ctx.sink(id)); a
+        device with no write() still 'holds' the setpoint that way. A raising write()
+        propagates as a write failure to the caller."""
+        fn = self._ns.get("write")
+        if callable(fn):
+            fn(self._ctx, schema.id, value)
+
     # -- diagnostics ---------------------------------------------------------
     def check(self) -> CheckResult:
         """Compile the current code and run poll once — the config GUI's "Check"
@@ -415,7 +472,7 @@ class PythonSourceDevice(BaseDevice):
         and success (with the channel count + a note on what poll returned)."""
         code = self._option_values.get("code") or ""
         try:
-            ns, ctx, sources = self._build(code)
+            ns, ctx, sources, sinks = self._build(code)
         except Exception:                          # noqa: BLE001
             tb = traceback.format_exc()
             return CheckResult(False, f"Code error: {_last_line(tb)}", 0, detail=tb)
@@ -428,11 +485,13 @@ class PythonSourceDevice(BaseDevice):
             tb = traceback.format_exc()
             return CheckResult(False, f"poll(ctx) raised: {_last_line(tb)}",
                                len(sources), detail=tb)
-        n = len(sources)
+        n, m = len(sources), len(sinks)
         if isinstance(result, dict):
             keys = ", ".join(str(k) for k in list(result)[:8])
             detail = f"poll() returned {len(result)} value(s): {keys}"
         else:
             detail = f"poll() returned a scalar ({result!r})."
-        return CheckResult(True, f"OK - compiled, {n} source{'' if n == 1 else 's'}, "
-                           f"poll ran.", n, detail)
+        summary = (f"OK - compiled, {n} source{'' if n == 1 else 's'}"
+                   + (f", {m} sink{'' if m == 1 else 's'}" if m else "")
+                   + ", poll ran.")
+        return CheckResult(True, summary, n, detail)

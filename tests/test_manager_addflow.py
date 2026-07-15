@@ -19,7 +19,7 @@ from ferrodac.core.manager import DeviceManager
 
 
 class _MintedDevice(BaseDevice):
-    """A stand-in for PythonSourceDevice: discoverable=False, minted by hand and
+    """A stand-in for PythonDevice: discoverable=False, minted by hand and
     handed to add_user_device rather than found by a scan."""
 
     driver = "test_minted"
