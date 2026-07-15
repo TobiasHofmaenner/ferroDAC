@@ -2512,7 +2512,7 @@ class MainWindow(QMainWindow):
             from ..net.localapi import LocalApiServer
             self._localapi = LocalApiServer(
                 self._control_surface, self._connectors, version=__version__,
-                on_audit=self._on_control_audit)
+                port=self._control_api_port(), on_audit=self._on_control_audit)
             try:
                 self._localapi.start()
                 self.statusBar().showMessage(
@@ -2524,6 +2524,23 @@ class MainWindow(QMainWindow):
             self._localapi.stop()
             self._localapi = None
             self.statusBar().showMessage("Local control API stopped", 4000)
+
+    @staticmethod
+    def _control_api_port() -> int:
+        """The control-API port to bind: a PINNED port, or 0 for an OS-assigned ephemeral
+        one (then the ~/.config/ferrodac/connector.json discovery file carries it). The env
+        var FERRODAC_CONTROL_PORT wins; else the persisted 'control/port' setting; else 0.
+        Pin it (e.g. 8765) when you want to hand a connector a stable 127.0.0.1:<port>."""
+        env = os.environ.get("FERRODAC_CONTROL_PORT", "").strip()
+        if env:
+            try:
+                return int(env)
+            except ValueError:
+                pass
+        try:
+            return int(QSettings("ferroDAC", "ferroDAC").value("control/port", 0, type=int))
+        except Exception:                    # noqa: BLE001 — a bad setting → ephemeral
+            return 0
 
     def _on_control_audit(self, name, verb, ok, detail):
         logging.getLogger("ferrodac.control").info(

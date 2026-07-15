@@ -6,6 +6,7 @@ with its own asyncio loop; the blocking command dispatch (which may marshal to t
 thread) runs in a threadpool so it never stalls the loop. Auth is a per-connector bearer
 token (ConnectorRegistry). Qt-free — the ControlSurface's GUI handlers do the marshalling.
 
+  GET  /                                   -> what the app is + how to pilot it   (no auth)
   POST /pair {name, scope}                 -> {pairing_id, verification_code}   (no auth)
   GET  /pair/{id}                          -> {status, token?}          (no auth; one-shot)
   GET  /describe                           -> scope-filtered verb catalog        (bearer)
@@ -14,8 +15,11 @@ token (ConnectorRegistry). Qt-free — the ControlSurface's GUI handlers do the 
   GET  /events                             -> SSE state-change stream            (bearer)
   GET  /health                             -> {ok, name, version}               (no auth)
 
-A discovery file (~/.config/ferrodac/connector.json, {port, pid}) lets a same-user
-client find the port.
+`GET /` is the cold-start door: a client given only the base URL learns from it what the
+app is, how to pair/authenticate, the endpoint map, and how to drive it well — the protocol
+self-describes, not just the verbs (`/describe`). A discovery file
+(~/.config/ferrodac/connector.json, {host, port, pid}) additionally lets a same-user client
+find an OS-assigned port; a pinned port makes even that unnecessary.
 """
 
 from __future__ import annotations
@@ -131,6 +135,7 @@ class LocalApiServer:
     # -- ASGI app ------------------------------------------------------------
     def _build_app(self) -> Starlette:
         return Starlette(routes=[
+            Route("/", self._root, methods=["GET"]),
             Route("/health", self._health, methods=["GET"]),
             Route("/pair", self._pair, methods=["POST"]),
             Route("/pair/{pairing_id}", self._pair_poll, methods=["GET"]),
@@ -148,6 +153,80 @@ class LocalApiServer:
 
     async def _health(self, request: Request):
         return JSONResponse({"ok": True, "name": self._name, "version": self._version})
+
+    async def _root(self, request: Request):
+        """Cold-start discovery (no auth): what the app is, what it can do, how to
+        authenticate, the endpoint map, and how to pilot it well. A client handed only
+        the base URL can bootstrap from here; the full verb catalog is behind /describe
+        once paired. Describes the app and protocol — not the caller."""
+        try:
+            verbs = self._surface.describe("admin").get("verbs", [])
+        except Exception:                          # never let discovery fail
+            verbs = []
+        areas = sorted({v["name"].split(".", 1)[0] for v in verbs if v.get("name")})
+        return JSONResponse({
+            "app": self._name,
+            "version": self._version,
+            "about": (
+                "ferroDAC is a local-first laboratory data-acquisition, control and "
+                "documentation platform. It streams live readings from lab instruments, "
+                "charts and records them to plain files (Zarr + CSV + Markdown), and lets "
+                "you annotate the timeline, run experiments, and export results. This "
+                "loopback HTTP API exposes the running app's own functions as a set of "
+                "self-describing 'verbs', so an external program can pilot the app."),
+            "capabilities": [
+                "Read live and historical device data — sources are scalars, spectra/traces, or video",
+                "Control instruments — sinks are setpoints, toggles, actions and enums",
+                "Build the dashboard — add chart/readout panels and route sources onto them",
+                "Annotate — drop tags on the shared timeline; devices raise their own alarm tags",
+                "Document — write project notes and docs alongside the data",
+                "Record and export — record a labelled span (auto-exports a bundle), or pull a CSV for a window",
+                "Manage projects and the shared hub; author Python devices that compute or fetch external data",
+            ],
+            "auth": {
+                "scheme": "per-connector bearer token, scoped read < control < admin",
+                "handshake": [
+                    "POST /pair {\"name\": \"<who you are>\", \"scope\": \"read|control|admin\"} -> {pairing_id, verification_code}",
+                    "A person approves the pairing inside the app, confirming the verification_code and granting a scope",
+                    "GET /pair/{pairing_id} until status == 'approved' -> {token}  (returned once — store it)",
+                    "Send 'Authorization: Bearer <token>' on every /describe, /command, /query and /events request",
+                ],
+            },
+            "endpoints": {
+                "GET /": "this document (no auth)",
+                "GET /health": "liveness + name/version (no auth)",
+                "POST /pair": "begin pairing (no auth)",
+                "GET /pair/{id}": "poll a pairing; yields the token once approved (no auth)",
+                "GET /describe": "the scope-filtered catalog of verbs, each with params, scope and a 'destructive' flag — the source of truth for what you can do (bearer)",
+                "POST /command/{verb}": "run a command (mutating) verb; JSON body {payload?, confirm?} (bearer)",
+                "GET /query/{verb}": "run a query (read) verb; params as ?key=value (bearer)",
+                "GET /events": "server-sent-events stream of state changes (bearer)",
+            },
+            "verbs": {
+                "count": len(verbs),
+                "areas": areas,
+                "catalog": "GET /describe after pairing — read verbs from there, never hardcode them",
+                "how_to": "the guidance.list / guidance.get verbs return step-by-step playbooks (the HOW) that complement /describe (the WHAT)",
+            },
+            "piloting": [
+                "Discover first: after pairing, GET /describe and drive off it — don't assume a verb or its params exist.",
+                "Least privilege: reads need 'read', mutations need 'control', a few verbs need 'admin'. Ask for the smallest scope that does the job.",
+                "Destructive verbs (flagged in /describe) require {\"confirm\": true} in the command body — pass it deliberately.",
+                "Errors: 401 = missing/invalid token, 403 = scope too low or confirm missing, 400 = bad params or a verb error.",
+                "Consult a guidance playbook before a multi-step task for the recommended sequence.",
+            ],
+            "workflows": [
+                "Live readout: query source.list -> command layout.add_panel {kind:'chart'} -> layout.route to show a source",
+                "Annotate an event: tag.add {label, t?} marks the shared timeline",
+                "Run an experiment: record.start {label} -> drive the instruments -> record.stop (auto-exports a labelled bundle)",
+                "Bring in external data: device.create a Python device that fetches/computes, then chart it like any source",
+                "Get results out: export.csv for a time window (returns the CSV), or export.window for a full reimportable bundle",
+            ],
+            "notes": [
+                "This server binds 127.0.0.1 only — a connector on another machine goes through the hub, not here.",
+                "Everything is plain files on the operator's disk; changes are real and immediate — prefer 'read' scope while exploring.",
+            ],
+        })
 
     async def _pair(self, request: Request):
         body = await _json_body(request)

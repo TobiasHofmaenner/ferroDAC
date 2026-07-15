@@ -66,6 +66,25 @@ def test_health_needs_no_auth(server):
     assert r.status_code == 200 and r.json()["ok"] is True
 
 
+def test_root_is_unauthenticated_bootstrap(server):
+    """GET / (no auth) is the cold-start door: a client given only the base URL learns
+    what the app is, how to pair, the endpoint map, and how to pilot it — the protocol
+    self-describes. The full verb catalog is NOT leaked here (that's behind /describe)."""
+    import json as _json
+    srv, _ = server
+    r = httpx.get(_base(srv) + "/", timeout=5.0)          # no Authorization header
+    assert r.status_code == 200
+    d = r.json()
+    assert d["app"] and "self-describing" in d["about"]
+    assert any("/pair" in step for step in d["auth"]["handshake"])   # the handshake is spelled out
+    assert "POST /pair" in d["endpoints"] and "GET /describe" in d["endpoints"]
+    assert d["workflows"] and d["piloting"]               # how-to + best practices present
+    # areas are derived from the live surface, but the catalog itself stays behind auth
+    assert d["verbs"]["count"] == 3
+    assert set(d["verbs"]["areas"]) == {"device", "project"}
+    assert "device.set_voltage" not in _json.dumps(d)     # no full verb list leaked at the root
+
+
 def test_pair_then_describe_and_command(server):
     srv, reg = server
     tok = _pair(srv, reg, scope="control")
