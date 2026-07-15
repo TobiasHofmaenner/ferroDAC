@@ -119,6 +119,7 @@ class BaseDevice(Device):
         self._streaming = False
         self._thread: Optional[threading.Thread] = None
         self._emit = None
+        self._tag_sink = None            # platform-injected device→tag channel (§7.3)
         # Platform-owned per-device serialization (threading contract, above).
         # Re-entrant so a driver's own `with self._io_lock` (legacy) nests safely.
         self._io_lock = threading.RLock()
@@ -350,6 +351,26 @@ class BaseDevice(Device):
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         self._emit = None
+
+    # -- device → tag channel (DESIGN §7.3) ---------------------------------- #
+    def set_tag_sink(self, sink) -> None:
+        """Platform hook: install the ``callable(Marker)`` that carries this device's
+        emitted tags to the app's TagStore. Injected by the DeviceManager when the
+        device goes active (the tag analogue of the ``start(emit)`` reading sink);
+        ``None`` disables emission. A driver never sets this itself."""
+        self._tag_sink = sink
+
+    def emit_tag(self, marker) -> None:
+        """Raise a device-origin tag — an alarm, event or gas-detected crossing (§7.3).
+        A driver builds a :class:`Marker` (origin=device) and calls this; it forwards to
+        the platform-injected sink, and is a safe no-op until one is wired. Runs on the
+        acquisition (poll) thread — the sink marshals to the GUI thread."""
+        sink = self._tag_sink
+        if sink is not None:
+            try:
+                sink(marker)
+            except Exception:              # a tag must never break acquisition
+                pass
 
     def _poll_loop(self) -> None:
         while self._streaming:
