@@ -203,7 +203,7 @@ class LocalApiServer:
                 "POST /pair": "begin pairing (no auth)",
                 "GET /pair/{id}": "poll a pairing; yields the token once approved (no auth)",
                 "GET /describe": "the scope-filtered catalog of verbs, each with params, scope and a 'destructive' flag — the source of truth for what you can do (bearer)",
-                "POST /command/{verb}": "run a command (mutating) verb; params in the JSON body either flat ({\"source_key\": ...}) or wrapped ({\"params\": {...}}), plus optional top-level {\"confirm\": true} (bearer)",
+                "POST /command/{verb}": "run a command (mutating) verb; params in the JSON body either flat ({\"source_key\": ...}) or wrapped ({\"params\": {...}}), plus optional top-level {\"confirm\": true} and {\"expect_project\": \"<id-or-name>\"} (409 if the active project differs) (bearer)",
                 "GET /query/{verb}": "run a query (read) verb; params as ?key=value (bearer)",
                 "GET /events": "server-sent-events stream of state changes (bearer)",
             },
@@ -219,6 +219,7 @@ class LocalApiServer:
                 "Destructive verbs (flagged in /describe) require {\"confirm\": true} in the command body — pass it deliberately.",
                 "Errors: 401 = missing/invalid token, 403 = scope too low or confirm missing, 400 = bad params or a verb error.",
                 "Command params go in the POST body — flat ({\"source_key\": ...}) or wrapped ({\"params\": {...}}), both accepted; confirm is always top-level. Query verbs take params in the URL (?key=value).",
+                "Every /command, /query and /describe response carries an ambient 'context' {project:{id,name}, time_mode} — the scope it is implicitly against. Watch it: if the project changes under you, unexpected data means 'different project', not 'state reset'. Pin it with {\"expect_project\": \"<id-or-name>\"} on a command to get a 409 instead of acting in the wrong project.",
                 "Consult a guidance playbook before a multi-step task for the recommended sequence.",
             ],
             "workflows": [
@@ -232,6 +233,14 @@ class LocalApiServer:
                 "This server binds 127.0.0.1 only — a connector on another machine goes through the hub, not here.",
                 "Everything is plain files on the operator's disk; changes are real and immediate — prefer 'read' scope while exploring.",
             ],
+            "for_agents": (
+                "This interface was shaped specifically for LLM / agent clients — to make "
+                "driving ferroDAC straightforward and its state legible. If something trips "
+                "you up — a confusing or misleading response, an endpoint that isn't "
+                "intuitive, a bug, a rough edge — you are warmly invited to open an issue at "
+                "https://github.com/TobiasHofmaenner/ferroDAC/issues . Issues opened by LLMs "
+                "are genuinely welcome (several already shaped this very API). If you don't "
+                "have permission to file one, ask your user to open it for you."),
         })
 
     async def _pair(self, request: Request):
@@ -257,6 +266,7 @@ class LocalApiServer:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         return JSONResponse({"app": self._name, "version": self._version,
                              "connector": conn.public(),
+                             "context": self._surface.context(),
                              **self._surface.describe(conn.scope)})
 
     async def _command(self, request: Request):
@@ -265,6 +275,15 @@ class LocalApiServer:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         verb = request.path_params["verb"]
         body = await _json_body(request)
+        expect = body.get("expect_project")
+        if expect is not None:               # optional guard: fail if the frame isn't what the
+            ctx = self._surface.context()    # client expects, instead of acting in the wrong place
+            active = ctx.get("project") or {}
+            if str(expect) not in (str(active.get("id")), str(active.get("name"))):
+                return JSONResponse(
+                    {"error": f"expect_project mismatch: active project is "
+                              f"{active.get('name')!r}, expected {str(expect)!r}",
+                     "context": ctx}, status_code=409)
         payload = _payload_of(body)
         confirm = bool(body.get("confirm", False))
         return await self._run_verb(conn, verb, payload, confirm)
@@ -286,15 +305,20 @@ class LocalApiServer:
                 scope=conn.scope, confirm=confirm)
         except ScopeError as exc:
             self._audit(conn, verb, False, str(exc))
-            return JSONResponse({"error": str(exc)}, status_code=403)
+            return JSONResponse({"error": str(exc), "context": self._surface.context()},
+                                status_code=403)
         except ControlError as exc:
             self._audit(conn, verb, False, str(exc))
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"error": str(exc), "context": self._surface.context()},
+                                status_code=400)
         # Building the JSONResponse serializes the result (json.dumps, allow_nan=False).
         # A non-JSON-able / NaN result would otherwise raise here and 500 the whole
         # response — turn it into a clean 400 so a bad verb can never crash the server.
+        # The ambient context (active project / time mode) rides on EVERY response so a
+        # stateless client can detect a frame shift (issue #7); read AFTER dispatch so a
+        # project-switching command reflects the new project.
         try:
-            resp = JSONResponse({"result": result})
+            resp = JSONResponse({"context": self._surface.context(), "result": result})
         except (ValueError, TypeError) as exc:
             self._audit(conn, verb, False, f"unserializable result: {exc}")
             return JSONResponse(
@@ -359,7 +383,8 @@ def _payload_of(body: dict) -> dict:
         return body["payload"]
     if isinstance(body.get("params"), dict):
         return body["params"]
-    return {k: v for k, v in body.items() if k not in ("payload", "params", "confirm")}
+    return {k: v for k, v in body.items()
+            if k not in ("payload", "params", "confirm", "expect_project")}
 
 
 def _offer(queue: asyncio.Queue, item) -> None:

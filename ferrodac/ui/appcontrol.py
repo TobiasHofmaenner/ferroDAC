@@ -1135,4 +1135,24 @@ def build_control_surface(app) -> ControlSurface:
             params={"id": {"type": "string", "required": True}},
             returns="{id, title, when_to_use, tags, verbs_used, body, source}")
 
+    # Ambient context stamped onto every API response (issue #7): the active project a
+    # scoped response is implicitly against + the time mode, so a stateless client can tell
+    # "state changed" from "different project active". Best-effort attribute reads (simple
+    # values → atomic), so no GUI hop per response.
+    def _ambient_context():
+        ctx: dict = {"project": None}
+        try:
+            pm = getattr(app, "_project_mgr", None)
+            proj = getattr(pm, "active", None) if pm is not None else None
+            if proj is not None:
+                ctx["project"] = {"id": getattr(proj, "id", None),
+                                  "name": getattr(proj, "name", None)}
+            tc = getattr(app, "time_context", None)
+            if tc is not None:
+                ctx["time_mode"] = getattr(tc.mode, "value", str(tc.mode))
+        except Exception:                   # noqa: BLE001 — context is best-effort
+            pass
+        return ctx
+    s.set_context_provider(_ambient_context)
+
     return s

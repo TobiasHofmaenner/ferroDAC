@@ -136,6 +136,37 @@ def test_command_body_accepts_flat_or_wrapped_params(server):
     assert r.status_code == 200 and r.json()["result"]["deleted"] == "p1"
 
 
+def test_responses_carry_context_and_expect_project_guard(server):
+    """Every command/query/describe response carries an ambient 'context' (project +
+    time_mode) so a stateless client can tell 'state changed' from 'different project'; a
+    command may pin the project with expect_project (409 on mismatch) — issue #7."""
+    srv, reg = server
+    srv._surface.set_context_provider(
+        lambda: {"project": {"id": "p1", "name": "LSC_Demo"}, "time_mode": "live"})
+    tok = _pair(srv, reg, scope="control")
+    with httpx.Client(base_url=_base(srv), timeout=5.0,
+                      headers={"Authorization": f"Bearer {tok}"}) as c:
+        # a QUERY response carries the context
+        rq = c.get("/query/device.voltage").json()
+        assert rq["context"]["project"]["name"] == "LSC_Demo"
+        assert rq["context"]["time_mode"] == "live"
+        # a COMMAND response echoes it too (the tight feedback loop for a builder client)
+        rc = c.post("/command/device.set_voltage", json={"value": 5.0}).json()
+        assert rc["result"]["voltage"] == 5.0 and rc["context"]["project"]["id"] == "p1"
+        # expect_project MATCHES (by name) → runs
+        assert c.post("/command/device.set_voltage",
+                      json={"value": 6.0, "expect_project": "LSC_Demo"}).status_code == 200
+        # expect_project MISMATCHES → 409, and the command did NOT run
+        bad = c.post("/command/device.set_voltage",
+                     json={"value": 999.0, "expect_project": "OTHER"})
+        assert bad.status_code == 409 and "expect_project" in bad.json()["error"]
+        assert c.get("/query/device.voltage").json()["result"] == 6.0   # 999 not applied
+    # DESCRIBE carries the context as well
+    d = httpx.get(_base(srv) + "/describe",
+                  headers={"Authorization": f"Bearer {tok}"}, timeout=5.0).json()
+    assert d["context"]["project"]["name"] == "LSC_Demo"
+
+
 def test_auth_is_required_and_scope_is_enforced(server):
     srv, reg = server
     # no token → 401

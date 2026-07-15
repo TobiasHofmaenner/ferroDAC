@@ -56,6 +56,23 @@ class ControlSurface:
         self._verbs: dict[str, Verb] = {}
         self._subs: list = []               # event subscribers: cb(event: dict)
         self._lock = threading.RLock()
+        self._context_provider = None       # () -> ambient scope dict (active project, time…)
+
+    # -- ambient context (§ the scope every response is implicitly against) ---
+    def set_context_provider(self, fn) -> None:
+        """Register a callable returning the AMBIENT scope a response is implicitly against
+        — the active project, the time mode. The API layer stamps it onto every response so a
+        stateless client can tell 'state changed' from 'different project active' (issue #7)."""
+        self._context_provider = fn
+
+    def context(self) -> dict:
+        fn = self._context_provider
+        if fn is None:
+            return {}
+        try:
+            return dict(fn() or {})
+        except Exception:                   # noqa: BLE001 — context is best-effort, never fatal
+            return {}
 
     # -- registration (the app / core modules call this) --------------------
     def register(self, name: str, handler: Callable[[dict], Any], *,
