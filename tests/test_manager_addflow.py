@@ -131,6 +131,45 @@ def test_device_tag_channel_wired_on_add(qapp):
     assert got == [sentinel]                          # …it reached the manager's device_tag
 
 
+def test_device_prompt_channel_wired_on_add(qapp):
+    """A device added to the manager gets a request channel (core.interaction): its ask()
+    reaches DeviceManager.device_prompt, carrying BOTH the Prompt and the on_response
+    callback. Before it is wired, ask() is a safe no-op — the tag channel's twin."""
+    from ferrodac.core.interaction import Prompt
+
+    mgr = DeviceManager([], engine=None, registry=None)
+    got = []
+    mgr.device_prompt.connect(lambda pr, cb: got.append((pr, cb)))
+
+    dev = _MintedDevice("pysrc-prompt")
+    dev.ask(Prompt("d", "?"), lambda a: None)        # no sink yet → safe no-op, no crash
+    assert got == []
+
+    mgr.add_user_device(dev, user=True)
+    assert dev._prompt_sink is not None              # manager injected the device→prompt sink
+    prompt = Prompt(dev.data_id, "Retract the arm?")
+    cb = lambda a: None                              # noqa: E731 — the driver's response cb
+    dev.ask(prompt, cb)                              # device raises a request…
+    qapp.processEvents()
+    assert got == [(prompt, cb)]                     # …it reached device_prompt with its callback
+
+
+def test_remove_emits_device_removed_for_prompt_withdrawal(qapp):
+    """remove() announces the device's ids on device_removed so the app can withdraw its
+    open requests (core.interaction) — carries (uuid, instance_id)."""
+    engine = Engine()
+    mgr = DeviceManager([], engine=engine, registry=None)
+    dev = _MintedDevice("pysrc-rm")
+    mgr.add_user_device(dev, user=True)
+    assert _spin(qapp, lambda: dev.connected)
+
+    seen = []
+    mgr.device_removed.connect(seen.append)
+    mgr.remove(dev.instance_id)
+    assert seen == [(getattr(dev, "uuid", None), "pysrc-rm")]
+    engine.shutdown()
+
+
 def test_remove_without_hook_is_safe(qapp):
     engine = Engine()
     mgr = DeviceManager([], engine=engine, registry=None)

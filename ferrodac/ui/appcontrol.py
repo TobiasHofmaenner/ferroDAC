@@ -17,8 +17,34 @@ import os
 import time
 
 from ..core.control import ControlError, ControlSurface
+from ..core.interaction import ACKNOWLEDGE, CHOICE, CONFIRM
 from ..core.media import MediaError
 from ..core.tag import SEVERITIES, marker_to_dict
+
+
+def _coerce_answer(prompt, answer):
+    """Validate/coerce a control-surface answer to the shape the prompt's ``kind`` expects,
+    BEFORE it reaches the driver callback. The GUI can only ever produce well-typed answers,
+    but a connector/agent POSTs free JSON — an unchecked ``"no"`` string to a confirm reads
+    truthy and could drive hardware. Raises :class:`ControlError` on a mismatch (fail safe)."""
+    kind = getattr(prompt, "kind", CONFIRM)
+    if kind == CONFIRM:
+        if not isinstance(answer, bool):
+            raise ControlError(
+                f"answer for a 'confirm' request must be a boolean (true/false), not {answer!r}")
+        return answer
+    if kind == ACKNOWLEDGE:
+        return True                      # an acknowledge is just 'seen' — the value is moot
+    if kind == CHOICE:
+        opts = list(getattr(prompt, "options", None) or [])
+        if answer not in opts:
+            raise ControlError(f"answer for a 'choice' request must be one of {opts}")
+        return answer
+    # TEXT (and any unknown kind) — a string; a missing/None answer is not one
+    if answer is None:
+        raise ControlError("answer for a 'text' request must be a string")
+    return str(answer)
+
 
 # The photo categories a companion (phone) upload can be filed under — a fixed,
 # closed set ('generic' is the catch-all). Shared with the companion server.
@@ -688,6 +714,49 @@ def build_control_surface(app) -> ControlSurface:
                         "firmware, cal_date/due/cert, asset_tag, notes.",
             params={"instance_id": {"type": "string", "required": True}},
             returns="{name, driver, manufacturer, model, serial, firmware, cal_*, asset_tag, notes}")
+
+    # -- device requests (the device→app→device prompt channel, core.interaction) --
+    # A device can ASK the operator something mid-workflow and needs a correlated
+    # answer before it proceeds. These make prompts answerable by an agent too (and,
+    # later, remote-answerable via the hub) — the SAME store the inbox/toast resolve
+    # through, so it's first-responder-wins.
+    def _device_prompts(_):
+        return app.interactions.to_list()
+    s.query("device.prompts", gui(_device_prompts),
+            description="List OPEN device requests — questions a device raised that need an "
+                        "operator answer before it proceeds. Answer one with device.respond. "
+                        "'kind' says how to answer: confirm→bool, choice→one of 'options', "
+                        "text→string, acknowledge→true. 'severity' critical means it is "
+                        "blocking + sticky (never auto-resolves).",
+            returns="[{id, device_id, question, kind, title, options, severity, timeout, "
+                    "on_timeout, created}]")
+
+    def _device_respond(p):
+        pid = str(p.get("id") or "")
+        if not pid:
+            raise ControlError("device.respond needs 'id'")
+        if "answer" not in p:
+            raise ControlError("device.respond needs 'answer' (per the prompt's kind — see "
+                               "device.prompts)")
+        prompt = app.interactions.get(pid)
+        if prompt is None:                         # unknown / already answered — not a no-op
+            raise ControlError(
+                f"no open request {pid!r} (already answered? check device.prompts)")
+        answer = _coerce_answer(prompt, p.get("answer"))   # a wrong-typed answer must not drive hardware
+        by = f"connector:{p['_caller']}" if p.get("_caller") else "connector"
+        ok = app.interactions.resolve(pid, answer, by=by)
+        if not ok:                                 # lost the race to another responder
+            raise ControlError(f"request {pid!r} was already answered (first-responder-wins)")
+        return {"ok": True, "id": pid, "answer": answer}
+    s.register("device.respond", gui(_device_respond),
+               description="Answer an OPEN device request by id (see device.prompts). 'answer' "
+                           "matches the prompt's kind: a bool for confirm, one of 'options' for "
+                           "choice, a string for text, true for acknowledge. First responder "
+                           "wins — resolving invokes the device's callback once, the prompt "
+                           "closes, and a provenance tag records the outcome.",
+               params={"id": {"type": "string", "required": True},
+                       "answer": {"type": "any"}},
+               returns="{ok, id, answer}")
 
     # -- projects: metadata + local lifecycle --------------------------------
     def _project_active(_):

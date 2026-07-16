@@ -69,6 +69,13 @@ class DeviceManager(QObject):
     device_tag = Signal(object)     # a device raised a tag (Marker) — alarm / event /
     #                                 gas-detected (DESIGN §7.3). Fired from a device's
     #                                 poll thread; the app connects it with a QueuedConnection.
+    device_prompt = Signal(object, object)  # a device raised an operator REQUEST — carries
+    #                                 (Prompt, on_response). The request/response analogue of
+    #                                 device_tag (core.interaction); same poll-thread → GUI
+    #                                 QueuedConnection marshalling.
+    device_removed = Signal(object)  # a device was REMOVED (user remove) — carries its
+    #                                 (uuid, instance_id). The app withdraws that device's
+    #                                 open prompts so none linger with a dead-driver callback.
 
     def __init__(
         self,
@@ -142,11 +149,15 @@ class DeviceManager(QObject):
 
     # -- user actions --------------------------------------------------------
     def _wire_tags(self, device) -> None:
-        """Give the device the channel to raise tags (alarms/events) into the app's
-        TagStore — the device→tag emitter path (DESIGN §7.3). The device fires it on its
-        poll thread; the app connects ``device_tag`` with a QueuedConnection."""
+        """Give the device its platform-INJECTED device→app channels, so a driver needs
+        zero per-device plumbing: the device→tag emitter (DESIGN §7.3) and the
+        device→app→device request/response channel (core.interaction). The device fires
+        both on its poll/reader thread; the app connects ``device_tag`` / ``device_prompt``
+        with a QueuedConnection to marshal them onto the GUI thread."""
         if hasattr(device, "set_tag_sink"):
             device.set_tag_sink(self.device_tag.emit)
+        if hasattr(device, "set_prompt_sink"):
+            device.set_prompt_sink(self.device_prompt.emit)
 
     def add(self, instance_id: str, *, user: bool = False) -> None:
         """Activate a device. ``user=True`` marks an explicit user add (the Devices
@@ -212,6 +223,9 @@ class DeviceManager(QObject):
         if device is None:
             return
         self.active_changed.emit()
+        # Retire any operator REQUESTS this device left open, so they can't linger in the
+        # inbox with a callback into a driver we're about to disconnect (core.interaction).
+        self.device_removed.emit((getattr(device, "uuid", None), instance_id))
         # A user-minted device (Python device) persists its definition so it survives a
         # restart; an explicit user remove must drop that def too, else it'd be re-minted
         # on the next launch. on_forget() is the device's own cleanup hook — absent (a

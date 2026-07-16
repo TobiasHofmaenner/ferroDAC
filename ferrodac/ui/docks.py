@@ -193,7 +193,7 @@ class SourceCard(QFrame):
 # --------------------------------------------------------------------------- #
 class DeviceCard(QFrame):
     def __init__(self, desc: DeviceDescriptor, active: bool, on_action,
-                 on_configure=None, parent=None):
+                 on_configure=None, awaiting=False, parent=None):
         super().__init__(parent)
         self.setObjectName("DeviceCard")
         self.setStyleSheet(
@@ -216,6 +216,12 @@ class DeviceCard(QFrame):
         header.addWidget(title)
         header.addWidget(sub)
         header.addStretch(1)
+        if awaiting:                    # a device→app→device request is open (core.interaction)
+            wait = QLabel("⏳ awaiting operator")
+            wait.setStyleSheet("color:#ffd54f; font-weight:700; font-size:11px;")
+            wait.setToolTip("This device asked the operator a question — answer it in "
+                            "the Requests inbox")
+            header.addWidget(wait)
         if active and on_configure is not None and (desc.sinks or desc.options):
             cfg = QPushButton("Configure…")
             cfg.clicked.connect(lambda: on_configure(desc.instance_id))
@@ -689,11 +695,13 @@ class RemoteControlDialog(QDialog):
 #  Devices panel (left dock)
 # --------------------------------------------------------------------------- #
 class DevicesPanel(QWidget):
-    def __init__(self, manager: DeviceManager, on_configure, hub=None, parent=None):
+    def __init__(self, manager: DeviceManager, on_configure, hub=None,
+                 interactions=None, parent=None):
         super().__init__(parent)
         self.manager = manager
         self.on_configure = on_configure
         self._hub = hub
+        self._interactions = interactions   # PendingInteractions — the '⏳ awaiting' badge
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
@@ -717,6 +725,8 @@ class DevicesPanel(QWidget):
         root.addWidget(self._remote_scroll, 1)
         manager.available_changed.connect(self._rebuild_available)
         manager.active_changed.connect(self._rebuild_active)
+        if interactions is not None:            # an open/answered request → re-badge cards
+            interactions.changed.connect(self._rebuild_active)
         if hub is not None:
             hub.remote_available_changed.connect(self._rebuild_remote)
         self._rebuild_available()
@@ -753,9 +763,12 @@ class DevicesPanel(QWidget):
         on_action = (self.manager.remove if active
                      else lambda iid: self.manager.add(iid, user=True))
         for desc in sorted(descs, key=lambda d: d.name):
+            awaiting = bool(active and self._interactions is not None
+                            and self._interactions.has_pending(
+                                getattr(desc, "uuid", None), desc.instance_id))
             layout.addWidget(
                 DeviceCard(desc, active, on_action,
-                           self.on_configure if active else None)
+                           self.on_configure if active else None, awaiting=awaiting)
             )
         layout.addStretch(1)
 
@@ -984,7 +997,8 @@ class DevicesWindow(QMainWindow):
     cramped dock — Available + Active devices, add/remove/configure. Just hosts a
     DevicesPanel; the panel is unchanged."""
 
-    def __init__(self, manager: DeviceManager, on_configure, hub=None, parent=None):
+    def __init__(self, manager: DeviceManager, on_configure, hub=None,
+                 interactions=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ferroDAC — Devices")
         self.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -992,7 +1006,8 @@ class DevicesWindow(QMainWindow):
         self.setStyleSheet(
             "QMainWindow,QWidget{background:#0e1116;color:#c7d0db;}"
             "QScrollArea{border:none;}")
-        self.panel = DevicesPanel(manager, on_configure, hub=hub)
+        self.panel = DevicesPanel(manager, on_configure, hub=hub,
+                                  interactions=interactions)
         self.setCentralWidget(self.panel)
 
 

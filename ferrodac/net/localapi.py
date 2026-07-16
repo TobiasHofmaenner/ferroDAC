@@ -184,6 +184,7 @@ class LocalApiServer:
                 "Control instruments — sinks are setpoints, toggles, actions and enums",
                 "Build the dashboard — add chart/readout panels and route sources onto them",
                 "Annotate — drop tags on the shared timeline; devices raise their own alarm tags",
+                "Answer device requests — a device can ask the operator a question mid-workflow (device.prompts / device.respond)",
                 "Document — write project notes and docs alongside the data",
                 "Record and export — record a labelled span (auto-exports a bundle), or pull a CSV for a window",
                 "Manage projects and the shared hub; author Python devices that compute or fetch external data",
@@ -225,6 +226,7 @@ class LocalApiServer:
             "workflows": [
                 "Live readout: query source.list -> command layout.add_panel {kind:'chart'} -> layout.route to show a source",
                 "Annotate an event: tag.add {label, t?} marks the shared timeline",
+                "Answer a device: poll device.prompts for open requests -> device.respond {id, answer} when a device needs an operator answer to proceed",
                 "Run an experiment: record.start {label} -> drive the instruments -> record.stop (auto-exports a labelled bundle)",
                 "Bring in external data: device.create a Python device that fetches/computes, then chart it like any source",
                 "Get results out: export.csv for a time window (returns the CSV), or export.window for a full reimportable bundle",
@@ -304,7 +306,7 @@ class LocalApiServer:
         try:
             result = await run_in_threadpool(
                 self._surface.dispatch, verb, payload,
-                scope=conn.scope, confirm=confirm)
+                scope=conn.scope, confirm=confirm, caller=conn.name)
         except ScopeError as exc:
             self._audit(conn, verb, False, str(exc))
             return JSONResponse({"error": str(exc), "context": self._surface.context()},
