@@ -228,6 +228,7 @@ class LocalApiServer:
                 "Annotate an event: tag.add {label, t?} marks the shared timeline",
                 "Answer a device: poll device.prompts for open requests -> device.respond {id, answer} when a device needs an operator answer to proceed",
                 "Run an experiment: record.start {label} -> drive the instruments -> record.stop (auto-exports a labelled bundle)",
+                "Use another client's instrument: hub.connect -> device.remote_list -> device.add_remote {agent_id, instance_id}; its channels then appear in source.list",
                 "Bring in external data: device.create a Python device that fetches/computes, then chart it like any source",
                 "Get results out: export.csv for a time window (returns the CSV), or export.window for a full reimportable bundle",
             ],

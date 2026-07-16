@@ -555,6 +555,55 @@ def build_control_surface(app) -> ControlSurface:
                params={"uuid": {"type": "string", "required": True}},
                returns="{ok, requested, note}", destructive=True)
 
+    def _device_remote_list(_):
+        hub = getattr(app, "hub", None)
+        if hub is None or not getattr(hub, "connected", False):
+            raise ControlError("not connected to a hub (see hub.connect) — remote devices are "
+                               "instruments shared by OTHER clients on the same hub")
+        available = [{**_dev_dict(d), "agent_id": aid}
+                     for aid, devs in hub.remote_available().items() for d in devs]
+        active = [{**_dev_dict(d), "agent_id": aid, "uuid": u}
+                  for aid, devs in hub.active_remote().items() for (u, d) in devs]
+        return {"available": available, "active": active}
+    s.query("device.remote_list", gui(_device_remote_list),
+            description="List the hub's REMOTE devices — instruments shared by OTHER clients on "
+                        "the same hub. 'available' are addable (onboard with device.add_remote "
+                        "{agent_id, instance_id}); 'active' are ones we already onboarded (remove "
+                        "with device.remove_remote {uuid}). Once added, a remote device's channels "
+                        "appear in source.list as remote-origin ports — NOT in device.list, which "
+                        "is LOCAL devices only.",
+            returns="{available:[{agent_id, instance_id, name, driver, sources, sinks}], "
+                    "active:[{agent_id, uuid, name, driver, sources, sinks}]}")
+
+    def _device_add_remote(p):
+        agent_id = str(p.get("agent_id") or "")
+        iid = str(p.get("instance_id") or "")
+        if not agent_id or not iid:
+            raise ControlError("device.add_remote needs 'agent_id' and 'instance_id' "
+                               "(see device.remote_list)")
+        hub = getattr(app, "hub", None)
+        if hub is None or not getattr(hub, "connected", False):
+            raise ControlError("not connected to a hub (see hub.connect)")
+        offered = {(aid, d.instance_id)
+                   for aid, devs in hub.remote_available().items() for d in devs}
+        if (agent_id, iid) not in offered:          # don't ack a silent no-op (issue #6)
+            raise ControlError(
+                f"no available remote device {iid!r} on agent {agent_id!r} — see "
+                f"device.remote_list")
+        hub.request_add_remote(agent_id, iid)
+        return {"ok": True, "requested": {"agent_id": agent_id, "instance_id": iid},
+                "note": "the owning client onboards it over the hub; it then appears in "
+                        "device.remote_list 'active' and its channels in source.list (async)"}
+    s.register("device.add_remote", gui(_device_add_remote),
+               description="Onboard a device shared by ANOTHER client over the hub — add it as if "
+                           "it were local (the reverse of device.remove_remote). Pick an "
+                           "'available' entry from device.remote_list and pass its agent_id + "
+                           "instance_id. Async: the owning client onboards it; then it shows in "
+                           "device.remote_list 'active' and its channels in source.list.",
+               params={"agent_id": {"type": "string", "required": True},
+                       "instance_id": {"type": "string", "required": True}},
+               returns="{ok, requested, note}")
+
     def _device_config_get(p):
         iid = str(p["instance_id"])
         desc = app.manager.descriptor(iid)

@@ -270,6 +270,63 @@ def test_device_remove_remote_registered_and_guards(control_surface):
         s.dispatch("device.remove_remote", {"uuid": "nope"}, scope="control", confirm=True)
 
 
+@pytest.mark.ui
+def test_device_remote_list_and_add_remote(control_surface):
+    """device.remote_list enumerates the hub's remote devices (addable + active); device.add_remote
+    routes the onboard to the owning client (request_add_remote) and validates the id."""
+    from ferrodac.core.device import DeviceDescriptor, Interface, Status
+
+    w, s = control_surface
+    verbs = {v["name"]: v for v in s.describe()["verbs"]}
+    assert verbs["device.remote_list"]["scope"] == "read"        # a read query
+    assert verbs["device.add_remote"]["scope"] == "control"
+    assert verbs["device.add_remote"]["destructive"] is False    # adding is not destructive
+
+    # not connected to a hub → a clear error (not a silent empty result)
+    with pytest.raises(ControlError):
+        s.dispatch("device.remote_list", scope="read")
+    with pytest.raises(ControlError):
+        s.dispatch("device.add_remote", {"agent_id": "a", "instance_id": "b"}, scope="control")
+
+    class _FakeHub:
+        connected = True
+
+        def __init__(self):
+            self.added = []
+
+        def remote_available(self):
+            return {"ferrodac@rig-1": [DeviceDescriptor(
+                instance_id="lsc:1", driver="lsc", name="LSC",
+                interface=Interface(kind="hub"), status=Status.DISCOVERED)]}
+
+        def active_remote(self):
+            return {"ferrodac@rig-1": [("uuid-xyz", DeviceDescriptor(
+                instance_id="psu:1", driver="psu", name="PSU", uuid="uuid-xyz",
+                interface=Interface(kind="hub"), status=Status.CONNECTED))]}
+
+        def request_add_remote(self, aid, iid):
+            self.added.append((aid, iid))
+
+        def disconnect(self):
+            pass                                # MainWindow.closeEvent calls this on teardown
+
+    w.hub = _FakeHub()
+    listed = assert_json_able(s.dispatch("device.remote_list", scope="read"))
+    assert [d["instance_id"] for d in listed["available"]] == ["lsc:1"]
+    assert listed["available"][0]["agent_id"] == "ferrodac@rig-1"       # grouped by client
+    assert listed["active"][0]["uuid"] == "uuid-xyz"                    # active remote (removable)
+
+    out = s.dispatch("device.add_remote",
+                     {"agent_id": "ferrodac@rig-1", "instance_id": "lsc:1"}, scope="control")
+    assert out["ok"] and out["requested"]["instance_id"] == "lsc:1"
+    assert w.hub.added == [("ferrodac@rig-1", "lsc:1")]                 # routed to the owning client
+
+    # an id that isn't offered errors (no silent no-op — issue #6 shape)
+    with pytest.raises(ControlError):
+        s.dispatch("device.add_remote",
+                   {"agent_id": "ferrodac@rig-1", "instance_id": "ghost"}, scope="control")
+
+
 # -- tags --------------------------------------------------------------------
 @pytest.mark.ui
 def test_tag_update_edits_metadata_against_real_markers(control_surface):
