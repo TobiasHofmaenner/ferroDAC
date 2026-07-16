@@ -583,6 +583,39 @@ def test_first_connect_all_retries_fail_behaves_as_today(fake):
     assert "/dev/ttyUSB0" not in PORTS_IN_USE            # arbiter untouched on failure
 
 
+def test_lsc_is_reconnectable():
+    assert LSCDevice.reconnectable is True                    # opts into the supervisor (#10)
+
+
+def test_reader_flags_link_down_and_stops_on_a_hard_error(fake):
+    """A HARD serial error (device unplugged / re-enumerated) makes the reader set link_down
+    and STOP — instead of spinning a dead FD forever (issue #10)."""
+    import serial
+    lsc = LSC("/dev/ttyUSB0", timeout=0.05)
+    lsc.open()
+    lsc.start_reader()
+    try:
+        fake.read_until = lambda *a, **k: (_ for _ in ()).throw(serial.SerialException("gone"))
+        assert _spin(lambda: lsc.link_down, timeout=2.0)      # the reader flagged the drop…
+        assert _spin(lambda: not lsc._reader.is_alive())      # …and its thread exited (no spin)
+    finally:
+        lsc.stop_reader()
+
+
+def test_link_healthy_reports_dead_on_hard_error_or_repeated_meas_fail(fake):
+    """_link_healthy() → False on a hard link-down OR after LINK_DEAD_AFTER MEAS? transport
+    failures — the transport-failure signal the supervisor keys on, never a value (issue #10)."""
+    dev = _device(fake)
+    assert dev._link_healthy() is True                        # freshly connected
+    dev._lsc._link_down.set()
+    assert dev._link_healthy() is False                       # hard link-down
+    dev._lsc._link_down.clear()
+    dev._xport_fails = mod.LINK_DEAD_AFTER
+    assert dev._link_healthy() is False                       # quiet drop (repeated MEAS? fails)
+    dev._xport_fails = 0
+    assert dev._link_healthy() is True                        # recovered
+
+
 def test_reader_hard_resyncs_after_timeout(fake):
     """SAFETY (concurrency review): after a reader-mode command times out, its LATE reply
     must not be read by the NEXT command — otherwise a refused write could look accepted.

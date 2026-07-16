@@ -63,6 +63,11 @@ _NULL_GUARD = _NullGuard()
 class BaseDevice(Device):
     driver = "base"   # registry skips this; real drivers override
     serialize_io = True   # platform serializes _read/_write/_connect per device
+    reconnectable = False   # opt-in: the poll-loop supervisor auto-reconnects a dropped link
+    #                         (DESIGN §21.1). ONLY for drivers whose _connect/_disconnect
+    #                         reopen a physical link with no destructive side effects — never
+    #                         sims / cloud / software / camera / drivers that self-heal.
+    reconnect_backoff = 2.0   # seconds between throttled auto-reconnect attempts (§21.1)
 
     def __init__(
         self,
@@ -385,12 +390,57 @@ class BaseDevice(Device):
                     value, status = float("nan"), 1
                 if emit is not None:
                     emit(Reading(self.data_id, src.id, now, value, status))
+            self._supervise()                   # auto-reconnect a dropped link (opt-in, §21.1)
             interval = 1.0 / (self._rate_hz or 1.0)
             remaining = interval - (time.monotonic() - cycle)
             while self._streaming and remaining > 0:
                 chunk = min(remaining, 0.05)
                 time.sleep(chunk)
                 remaining -= chunk
+
+    # -- reconnect supervisor (DESIGN §21.1) ---------------------------------- #
+    def _supervise(self) -> None:
+        """Auto-reconnect a dropped link, once per poll cycle. OPT-IN: a no-op unless the
+        driver sets ``reconnectable`` (its _connect/_disconnect genuinely reopen a physical
+        link with no destructive side effects). Keys ONLY on the driver's ``_link_healthy()``
+        verdict — a transport FAILURE, never a value — so a channel that legitimately reads
+        NaN can't trip it. On a confirmed dead link: status → ERROR, run the low-level
+        ``_disconnect`` (frees the port lock + arbiter), then reconnect on a throttled backoff
+        while the port is present, and resume on success. Runs on the poll thread."""
+        if not self.reconnectable:
+            return
+        if self._status == Status.ERROR:                 # -- reconnect phase --
+            if self._port_present() and self._throttle("reconnect", self.reconnect_backoff):
+                try:
+                    with self._guard():
+                        self._connect()
+                except Exception as exc:                 # noqa: BLE001 — stay ERROR, retry later
+                    self._last_error = str(exc)
+                else:
+                    self._status = Status.CONNECTED
+                    self._last_error = None
+            return
+        if self._link_healthy() is False:                # -- the driver reports the link DOWN --
+            self._status = Status.ERROR
+            self._last_error = "link lost — auto-reconnecting"
+            try:
+                with self._guard():
+                    self._disconnect()
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def _link_healthy(self):
+        """A ``reconnectable`` driver's verdict on its link for the supervisor: ``False`` = it
+        is DOWN (a transport failure — an exception / a hard link-down flag, NOT a value),
+        ``True`` = alive, ``None`` = no opinion (the default; the device is never
+        auto-reconnected). Only serial-transport failures should ever return ``False``."""
+        return None
+
+    def _port_present(self) -> bool:
+        """Whether the device's physical port still exists — the supervisor won't hammer a
+        reconnect at a physically-removed device. Default ``True``; serial drivers override
+        to check ``serial.tools.list_ports.comports()``."""
+        return True
 
     # -- hooks for subclasses -------------------------------------------------
     def _connect(self) -> None: ...
