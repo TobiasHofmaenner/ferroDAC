@@ -509,6 +509,9 @@ class ProjectManager:
         self._hub_cache = os.path.abspath(hub_cache_dir) if hub_cache_dir else \
             os.path.join(os.path.dirname(self.registry_path) or ".", "hub_cache")
         self._active: str = ""
+        self._pending_active: str = ""   # a persisted-active id not resolvable at cold start —
+        #                                  typically a hub project synced only AFTER connect;
+        #                                  kept so the app can land on it once it materialises.
         self._load_registry()
 
     # -- registry (the tracked-folder list) ----------------------------------
@@ -531,10 +534,15 @@ class ProjectManager:
                 if proj.id:
                     self._by_id[proj.id] = proj
         self._active = active if active in self._by_id else ""
+        # A persisted-active id we can't resolve yet (a hub project not synced at cold start)
+        # is REMEMBERED, not discarded — so once the hub delivers it the app can land on it.
+        self._pending_active = active if (active and active not in self._by_id) else ""
 
     def _save_registry(self) -> None:
         reg = {"projects": [p.path for p in self._by_id.values()],
-               "active": self._active}
+               # keep remembering an unresolved hub active id across restarts (don't let a
+               # local display-fallback overwrite it) until it's resolved or explicitly changed
+               "active": self._pending_active or self._active}
         try:
             os.makedirs(os.path.dirname(self.registry_path) or ".", exist_ok=True)
             tmp = self.registry_path + ".tmp"
@@ -573,9 +581,16 @@ class ProjectManager:
     def set_active(self, pid: str) -> bool:
         if pid in self._by_id or pid in self._hub_by_id:
             self._active = pid
-            self._save_registry()                    # hub ids are persisted too, but
-            return True                              # resolve to local on a cold start
+            self._pending_active = ""                # an explicit activation supersedes the
+            self._save_registry()                    # remembered (pending) hub id
+            return True
         return False
+
+    @property
+    def pending_active(self) -> str:
+        """A persisted-active id awaiting resolution — a hub project that was active last
+        session but isn't synced yet. The app lands on it once the hub delivers it."""
+        return self._pending_active
 
     # -- hub projects (synced records, cached as folders; the hub is truth) --
     def apply_hub_record(self, rec: dict):
@@ -600,6 +615,8 @@ class ProjectManager:
         self._hub_by_id.pop(pid, None)
         if self._active == pid:
             self._active = ""                        # caller picks a local fallback
+        if self._pending_active == pid:              # the awaited project was deleted → stop
+            self._pending_active = ""                # remembering it
 
     def clear_hub(self) -> None:
         """Forget all hub projects (e.g. on disconnect — they're not offline). Fall
@@ -653,5 +670,7 @@ class ProjectManager:
         if not self._by_id:
             self.track(default_dir, self.DEFAULT_NAME)
         if not self._active:
-            self.set_active(self.projects()[0].id)
+            # DISPLAY fallback only — set _active directly, NOT via set_active(), so a
+            # remembered pending (hub) active id survives to be restored once the hub syncs.
+            self._active = self.projects()[0].id
         return self.active

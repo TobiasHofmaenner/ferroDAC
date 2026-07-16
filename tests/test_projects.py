@@ -168,6 +168,42 @@ def test_apply_hub_record_lww():
     mgr.apply_hub_record(_rec("h1", "v3", version=3))         # newer wins
     mgr.apply_hub_record(_rec("h1", "stale", version=2))      # older ignored
     assert mgr.get("h1").name == "v3"
+
+
+def test_hub_active_id_survives_cold_start_and_is_restorable():
+    """A hub project active at quit isn't in the local registry at a cold start (it syncs only
+    after the hub connects). Its id is REMEMBERED (pending_active) and kept in the registry —
+    not overwritten by the local display fallback — so the app can land on it once it arrives."""
+    d = tempfile.mkdtemp()
+    reg = os.path.join(d, "projects.json")
+    with open(reg, "w") as fh:
+        json.dump({"projects": [], "active": "h1"}, fh)       # a hub project was active at quit
+    mgr = ProjectManager(reg, hub_cache_dir=os.path.join(d, "cache"))
+    mgr.ensure_default(default_dir=os.path.join(d, "def"))    # cold start: h1 not synced yet
+    # h1 is remembered as pending; a local Default is only the DISPLAY fallback
+    assert mgr.pending_active == "h1"
+    assert mgr.active is not None and mgr.active.id != "h1"
+    with open(reg) as fh:                                     # …registry still names h1 active
+        assert json.load(fh)["active"] == "h1"
+    # the hub delivers h1 → landing on it clears the pending marker + persists h1
+    mgr.apply_hub_record(_rec("h1", "Shared", version=1))
+    assert mgr.get("h1") is not None
+    assert mgr.set_active("h1") is True
+    assert mgr.pending_active == ""
+    with open(reg) as fh:
+        assert json.load(fh)["active"] == "h1"
+
+
+def test_local_active_project_is_unaffected_by_pending_logic():
+    """The common local case is untouched: a local active project has no pending marker and
+    the registry persists it (not a phantom)."""
+    d = tempfile.mkdtemp()
+    reg = os.path.join(d, "projects.json")
+    mgr = ProjectManager(reg)
+    default = mgr.ensure_default(default_dir=os.path.join(d, "def"))
+    assert mgr.pending_active == "" and mgr.active.id == default.id
+    with open(reg) as fh:
+        assert json.load(fh)["active"] == default.id
     # a tombstone drops it
     assert mgr.apply_hub_record(_rec("h1", "", version=4, deleted=True)) is None
     assert mgr.get("h1") is None

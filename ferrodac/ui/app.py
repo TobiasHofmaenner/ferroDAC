@@ -1428,7 +1428,24 @@ class MainWindow(QMainWindow):
         """Hub projects arrived / changed / vanished (sync or disconnect) — refresh
         the Projects views. Runs on the GUI thread (queued from the sync)."""
         self._push_pending_shares()                       # a provisioned repo just echoed back?
+        self._restore_pending_hub_project()               # land on the last-active hub project
         self._refresh_explorer()
+
+    def _restore_pending_hub_project(self) -> None:
+        """If a HUB project was the active one last session, it couldn't be restored during
+        __init__ (the hub wasn't connected yet, so it wasn't in the registry) — the app fell
+        back to a local project. Once the hub delivers that project, land on it and restore its
+        full working session (layout + arrangement + devices). Fires once per launch."""
+        if getattr(self, "_hub_restore_done", False):
+            return
+        mgr = getattr(self, "_project_mgr", None)
+        if mgr is None:
+            return
+        pid = mgr.pending_active
+        if not pid or mgr.get(pid) is None:               # nothing pending, or not synced yet
+            return
+        self._hub_restore_done = True                     # one-shot
+        self._switch_project(pid)                         # full restore via the (fixed) switch path
 
     # -- docs (reference files filed under the project) ----------------------
     def _add_doc(self) -> None:
@@ -1581,17 +1598,22 @@ class MainWindow(QMainWindow):
         self._apply_source_lens()                         # follow the channel lens too
         p = mgr.active
         names = p.layouts()
-        if names:                                  # open the FIRST named layout, made live
-            path = p.layout_path(names[0])
+        path = p.layout_path(names[0]) if names else p.layout_path("Default")
+        if os.path.exists(p.working_path):
+            # FULL restore — the target's live working session carries the panel ARRANGEMENT
+            # and its saved DEVICES, not just the layout model. Switching a project (or
+            # reopening a hub one) used to import only ["layout"], dropping both. geometry=False
+            # keeps the window chrome put across a mid-session switch.
+            self.open_session(p.working_path, geometry=False)
+        elif names:                                # a named layout but no working session yet
             layout = {}
             try:
                 with open(path, encoding="utf-8") as fh:
                     layout = json.load(fh).get("layout", {})
             except Exception:                      # noqa: BLE001
                 layout = {}
-            self.dashboard.import_layout(layout)   # swap panels/routes/markers only
-        else:                                      # no named layout yet → create a default one
-            path = p.layout_path("Default")
+            self.dashboard.import_layout(layout)
+        else:                                      # brand-new project → a default layout
             self.dashboard.import_layout({})
             if not self.dashboard.panels():
                 self.dashboard.add_panel("chart")  # a default chart to start from
@@ -2824,22 +2846,24 @@ class MainWindow(QMainWindow):
         except Exception:
             pass                                # sizing is cosmetic; never break startup
 
-    def open_session(self, path: str) -> None:
+    def open_session(self, path: str, *, geometry: bool = True) -> None:
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
         except Exception as exc:
             self.statusBar().showMessage(f"Could not open layout: {exc}", 5000)
             return
-        # rebuild the model first (so docks exist), then restore Qt geometry
+        # rebuild the model first (so docks exist), then restore Qt state
         self.dashboard.import_layout(data.get("layout", {}))
         self.manager.request_devices(data.get("devices", []))
         dock = data.get("dock", {})
-        if dock.get("workspace"):
+        if dock.get("workspace"):                   # the panel ARRANGEMENT — always restore it
             self.workspace.restoreState(QByteArray.fromBase64(dock["workspace"].encode()))
-        if dock.get("geometry"):
+        # the main-window chrome (geometry + outer dock layout) only on a full/startup restore;
+        # a mid-session project switch keeps the window put (geometry=False).
+        if geometry and dock.get("geometry"):
             self.restoreGeometry(QByteArray.fromBase64(dock["geometry"].encode()))
-        if dock.get("window"):
+        if geometry and dock.get("window"):
             self.restoreState(QByteArray.fromBase64(dock["window"].encode()))
         self._remember(path)
         self.statusBar().showMessage(f"Loaded {os.path.basename(path)}", 4000)
