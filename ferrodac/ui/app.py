@@ -33,11 +33,12 @@ from qtpy.QtWidgets import (
 from ..core.engine import Engine
 from ..core.history import HistoryBuffer
 from ..core.manager import DeviceManager
-from ..core.markers import RECORDING
+from ..core.markers import ORIGIN_DEVICE, RECORDING
 from ..core.projects import ProjectManager
 from ..core.registry import load_builtin_drivers
 from ._common import color_for, fmt
 from .hubclient import ConnectHubDialog, HubController
+from .interactions import PendingInteractions, RequestsPanel, RequestToast
 from .logview import LogPanel, QtLogHandler, SyncStatusWidget
 from .panels import PANEL_TYPES
 from .tasks import run_task
@@ -326,6 +327,15 @@ class MainWindow(QMainWindow):
         # a device raising a tag (alarm / event / gas-detected) → the shared TagStore
         # (DESIGN §7.3). Emitted from the device's poll thread, so marshal to the GUI.
         self.manager.device_tag.connect(self._on_device_tag, Qt.QueuedConnection)
+        # a device raising an operator REQUEST (core.interaction) → the shared
+        # PendingInteractions store, which the inbox / toast / control surface all
+        # answer through (first-responder-wins). Also from the device's poll/reader
+        # thread → QueuedConnection. On resolve we auto-emit a provenance tag.
+        self.interactions = PendingInteractions(self)
+        self.manager.device_prompt.connect(self._on_device_prompt, Qt.QueuedConnection)
+        self.interactions.added.connect(self._on_prompt_added)
+        self.interactions.resolved.connect(self._on_prompt_resolved)
+        self._requests_toast = RequestToast(self.interactions, self._device_name_for, self)
         # project git history (DESIGN §8.2): boundary commits are immediate; doc edits
         # debounce through this timer so a burst of edits → one "settled" commit.
         self._commit_timer = QTimer(self)
@@ -377,6 +387,17 @@ class MainWindow(QMainWindow):
         self.events_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.RightDockWidgetArea, self.events_dock)
 
+        # Requests: the operator inbox for device→app→device prompts (core.interaction).
+        # A persistent list with a pending badge; each row's answer controls are
+        # auto-generated from the prompt's kind. The dock title carries the live count.
+        self.requests_panel = RequestsPanel(self.interactions, self._device_name_for)
+        self.requests_dock = QDockWidget("Requests", self)
+        self.requests_dock.setObjectName("RequestsDock")
+        self.requests_dock.setWidget(self.requests_panel)
+        self.requests_dock.setMinimumWidth(280)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.requests_dock)
+        self.interactions.changed.connect(self._refresh_requests_badge)
+
         # Docs: an in-app markdown/LaTeX view of the project's README/notes. The
         # QtWebEngine view is created LAZILY (on first show) so launch + the UI
         # tests don't spin up Chromium, and the app still runs if WebEngine is
@@ -391,7 +412,8 @@ class MainWindow(QMainWindow):
 
         self.tabifyDockWidget(self.sources_dock, self.sinks_dock)
         self.tabifyDockWidget(self.sinks_dock, self.events_dock)
-        self.tabifyDockWidget(self.events_dock, self.docs_dock)
+        self.tabifyDockWidget(self.events_dock, self.requests_dock)
+        self.tabifyDockWidget(self.requests_dock, self.docs_dock)
         self.docs_dock.setVisible(False)
         self.sources_dock.raise_()
 
@@ -504,6 +526,7 @@ class MainWindow(QMainWindow):
         view.addAction(self.sources_dock.toggleViewAction())
         view.addAction(self.sinks_dock.toggleViewAction())
         view.addAction(self.events_dock.toggleViewAction())
+        view.addAction(self.requests_dock.toggleViewAction())
         view.addAction(self.docs_dock.toggleViewAction())
         if getattr(self, "player_dock", None) is not None:
             view.addAction(self.player_dock.toggleViewAction())
@@ -604,7 +627,8 @@ class MainWindow(QMainWindow):
         """The Devices manager (Available + Active, add/remove/configure) as a window."""
         if getattr(self, "_devices_win", None) is None:
             win = DevicesWindow(self.manager, self._open_config,
-                                hub=getattr(self, "hub", None), parent=self)
+                                hub=getattr(self, "hub", None),
+                                interactions=self.interactions, parent=self)
             win.destroyed.connect(lambda: setattr(self, "_devices_win", None))
             self._devices_win = win
         self._devices_win.show()
@@ -1113,6 +1137,62 @@ class MainWindow(QMainWindow):
         """A device raised a tag (alarm/event) → merge it into the shared TagStore, from
         which charts + the event log update. Runs on the GUI thread (QueuedConnection)."""
         self.dashboard.markers.upsert(marker)
+
+    # -- device → app → device requests (core.interaction) -------------------
+    def _device_name_for(self, device_id: str) -> str:
+        """A friendly name for a prompt's raising device (by uuid or instance_id),
+        falling back to the id — for the inbox/toast card header."""
+        for d in self.manager.active_descriptors():
+            if device_id in (getattr(d, "uuid", None), d.instance_id):
+                return d.name
+        return device_id
+
+    def _on_device_prompt(self, prompt, on_response) -> None:
+        """A device raised an operator REQUEST → file it in the shared store (which pops
+        the toast + fills the inbox). Runs on the GUI thread (QueuedConnection); the
+        driver's on_response is invoked here when the operator answers."""
+        self.interactions.add(prompt, on_response)
+
+    def _on_prompt_added(self, prompt) -> None:
+        """A new request arrived → pop the non-blocking arrival toast and (for a critical
+        one) surface the Requests inbox. Never a hard modal — the operator can keep working."""
+        self._requests_toast.present(prompt)
+        if prompt.is_critical:
+            self.requests_dock.show()
+            self.requests_dock.raise_()
+        # a badge/hint in the status bar so the count is visible even with the dock hidden
+        self.statusBar().showMessage(
+            f"Device request: {self._device_name_for(prompt.device_id)} — "
+            f"{prompt.title or prompt.question}", 8000)
+
+    def _on_prompt_resolved(self, entry) -> None:
+        """A request was answered (by ANY surface) → drop an origin=device provenance TAG
+        recording the outcome + who answered, so the timeline carries the interaction as a
+        fact (reuses the tag path, like an emitted device event)."""
+        prompt = entry.prompt
+        answer = entry.answer
+        if answer is True:
+            shown = "Yes"
+        elif answer is False:
+            shown = "No"
+        elif answer is None:
+            shown = "(no answer)"
+        else:
+            shown = str(answer)
+        self.dashboard.markers.add(
+            entry.answered_at or time.time(),
+            label=f"↩ {shown}",
+            comment=f"{prompt.title or prompt.question} — answered by {entry.answered_by}",
+            kind="interaction", origin_kind=ORIGIN_DEVICE, origin_id=prompt.device_id,
+            scope=f"device:{prompt.device_id}", severity=prompt.severity,
+            payload={"prompt_id": prompt.id, "kind": prompt.kind, "answer": answer,
+                     "answered_by": entry.answered_by, "question": prompt.question},
+            immutable=True)
+
+    def _refresh_requests_badge(self) -> None:
+        """Keep the Requests dock title showing the pending count (a persistent badge)."""
+        n = self.interactions.count()
+        self.requests_dock.setWindowTitle(f"Requests ({n})" if n else "Requests")
 
     def _curate_new_device(self, instance_id: str) -> None:
         """A just-added device's channels join the active project's curated list, so a
@@ -3173,6 +3253,12 @@ class MainWindow(QMainWindow):
             self.dashboard.set_time_window(*self.time_context.window)
         self.chart_feed.reconcile(force=True)        # navigation → re-derive mode, redraw
         #                                              owned envelopes / go-live history
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        toast = getattr(self, "_requests_toast", None)
+        if toast is not None and toast.isVisible():
+            toast.reposition()                    # keep the request banner top-right
 
     def closeEvent(self, event):  # noqa: N802
         if getattr(self, "_localapi", None) is not None:

@@ -120,6 +120,7 @@ class BaseDevice(Device):
         self._thread: Optional[threading.Thread] = None
         self._emit = None
         self._tag_sink = None            # platform-injected device→tag channel (§7.3)
+        self._prompt_sink = None         # platform-injected device→app→device request channel
         # Platform-owned per-device serialization (threading contract, above).
         # Re-entrant so a driver's own `with self._io_lock` (legacy) nests safely.
         self._io_lock = threading.RLock()
@@ -370,6 +371,29 @@ class BaseDevice(Device):
             try:
                 sink(marker)
             except Exception:              # a tag must never break acquisition
+                pass
+
+    # -- device → app → device request/response channel ---------------------- #
+    def set_prompt_sink(self, sink) -> None:
+        """Platform hook: install the ``callable(Prompt, on_response)`` that carries this
+        device's operator REQUESTS to the app's PendingInteractions store. Injected by the
+        DeviceManager when the device goes active (the request/response analogue of the
+        tag sink); ``None`` disables it. A driver never sets this itself."""
+        self._prompt_sink = sink
+
+    def ask(self, prompt, on_response=None) -> None:
+        """Raise a device-initiated REQUEST the operator must answer before the device
+        proceeds — "Have you retracted the arm? [Yes]/[No]" (the fourth primitive, see
+        core.interaction). A driver builds a :class:`Prompt` and calls this with an
+        ``on_response(answer)`` callback (the driver then, e.g., sends an ack command);
+        it forwards to the platform-injected sink and is a safe no-op until one is wired.
+        Runs on the acquisition/reader thread — the sink marshals to the GUI thread, and
+        the store invokes ``on_response`` there (once, first-responder-wins)."""
+        sink = self._prompt_sink
+        if sink is not None:
+            try:
+                sink(prompt, on_response)
+            except Exception:              # a prompt must never break acquisition
                 pass
 
     def _poll_loop(self) -> None:

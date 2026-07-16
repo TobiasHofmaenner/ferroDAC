@@ -689,6 +689,46 @@ def build_control_surface(app) -> ControlSurface:
             params={"instance_id": {"type": "string", "required": True}},
             returns="{name, driver, manufacturer, model, serial, firmware, cal_*, asset_tag, notes}")
 
+    # -- device requests (the device→app→device prompt channel, core.interaction) --
+    # A device can ASK the operator something mid-workflow and needs a correlated
+    # answer before it proceeds. These make prompts answerable by an agent too (and,
+    # later, remote-answerable via the hub) — the SAME store the inbox/toast resolve
+    # through, so it's first-responder-wins.
+    def _device_prompts(_):
+        return app.interactions.to_list()
+    s.query("device.prompts", gui(_device_prompts),
+            description="List OPEN device requests — questions a device raised that need an "
+                        "operator answer before it proceeds. Answer one with device.respond. "
+                        "'kind' says how to answer: confirm→bool, choice→one of 'options', "
+                        "text→string, acknowledge→true. 'severity' critical means it is "
+                        "blocking + sticky (never auto-resolves).",
+            returns="[{id, device_id, question, kind, title, options, severity, timeout, "
+                    "on_timeout, created}]")
+
+    def _device_respond(p):
+        pid = str(p.get("id") or "")
+        if not pid:
+            raise ControlError("device.respond needs 'id'")
+        if "answer" not in p:
+            raise ControlError("device.respond needs 'answer' (per the prompt's kind — see "
+                               "device.prompts)")
+        if app.interactions.get(pid) is None:      # unknown / already answered — not a no-op
+            raise ControlError(
+                f"no open request {pid!r} (already answered? check device.prompts)")
+        ok = app.interactions.resolve(pid, p.get("answer"), by="connector")
+        if not ok:                                 # lost the race to another responder
+            raise ControlError(f"request {pid!r} was already answered (first-responder-wins)")
+        return {"ok": True, "id": pid, "answer": p.get("answer")}
+    s.register("device.respond", gui(_device_respond),
+               description="Answer an OPEN device request by id (see device.prompts). 'answer' "
+                           "matches the prompt's kind: a bool for confirm, one of 'options' for "
+                           "choice, a string for text, true for acknowledge. First responder "
+                           "wins — resolving invokes the device's callback once, the prompt "
+                           "closes, and a provenance tag records the outcome.",
+               params={"id": {"type": "string", "required": True},
+                       "answer": {"type": "any"}},
+               returns="{ok, id, answer}")
+
     # -- projects: metadata + local lifecycle --------------------------------
     def _project_active(_):
         return _project_dict(_active_project(app))
