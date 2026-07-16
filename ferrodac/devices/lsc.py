@@ -43,6 +43,7 @@ from typing import Callable, Optional
 
 from ..core.base import BaseDevice
 from ..core.serial_arbiter import PORTS_IN_USE, SERIAL_LOCK
+from ..core.serial_connect import open_and_identify
 from ..core.tag import ORIGIN_DEVICE, Marker, color_for
 from ..core.device import (
     Interface,
@@ -486,22 +487,20 @@ def probe_port(port: str) -> Optional[ProbeResult]:
     """Identify an LSC on a port; opens, identifies, reads the schema, *closes*."""
     if not HAVE_SERIAL:
         return None
+    lsc = LSC(port, timeout=1.0)
     try:
-        lsc = LSC(port, timeout=1.0).open()
-    except Exception:
-        return None
-    try:
-        parsed = _parse_idn(lsc.idn())
+        parsed = open_and_identify(lsc, _parse_idn, attempts=2)   # open+warm-up+retried *IDN? (#9)
         if parsed is None:
             return None
         sn, fw, product = parsed
-        schema = lsc.describe()               # self-describing discovery (§4)
+        lsc._desynced = True                  # resync before DESCRIBE? — a sacrificial *IDN?'s
+        schema = lsc.describe()               # late reply mustn't corrupt it (§4 discovery)
         return ProbeResult(port=port, serial=sn, firmware=fw,
                            product=product, schema=schema)
     except Exception:
         return None
     finally:
-        lsc.close()
+        lsc.close()                           # safe no-op if open() itself failed
 
 
 # --------------------------------------------------------------------------- #
@@ -637,14 +636,16 @@ class LSCDevice(BaseDevice):
                 self._lsc = None
         lsc = LSC(self._port)
         lsc.on_event = self._on_event             # capture events even DURING the handshake
-        #                                           (the tag sink is already wired by the manager)
-        lsc.open()
+        #                                           (the tag sink is already wired by the manager;
+        #                                            the reader is off, so idn() dispatches !EVT
+        #                                            synchronously — start_reader() is after identify)
         try:
-            parsed = _parse_idn(lsc.idn())
+            parsed = open_and_identify(lsc, _parse_idn)   # open+warm-up+retried *IDN? (#9)
             if parsed is None:
                 raise RuntimeError("not an LSC on this port")
             self._firmware = parsed[1]
-            lsc.describe()                        # refresh the positional schema (§4)
+            lsc._desynced = True                  # resync before DESCRIBE? so a sacrificial *IDN?'s
+            lsc.describe()                        # late reply can't corrupt the positional schema (§4)
             # Seed each writable sink from the REAL instrument state (least
             # surprise — a running pump keeps pumping; we show the truth).
             for sink in self._sinks:

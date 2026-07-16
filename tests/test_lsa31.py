@@ -38,6 +38,8 @@ class FakeSerial:
         self._out = b""
         self.meas_count = 0                    # MEAS? transactions (cache test)
         self.is_open = True
+        self.idn_fail = 0                      # first N *IDN? return ERR (first-connect #9)
+        self.commands = []                     # every line the host sent (for asserts)
 
     # -- pyserial surface the controller touches --
     def reset_input_buffer(self):
@@ -63,9 +65,13 @@ class FakeSerial:
         return f"{v:.5e}" if not math.isnan(v) else "nan"
 
     def _respond(self, line: str) -> str:
+        self.commands.append(line)
         cmd = line.upper()
         s = self.state
         if cmd == "*IDN?":
+            if self.idn_fail > 0:                  # first-connect transient / leftover (#9)
+                self.idn_fail -= 1
+                return 'ERR,1,"Unknown command"'
             return self._idn
         if cmd == "*CLS":
             return "OK"
@@ -107,6 +113,8 @@ def fake(monkeypatch):
     fs = FakeSerial()
     monkeypatch.setattr(mod.serial, "Serial", lambda *a, **k: fs)
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    import ferrodac.core.serial_connect as sc           # the handshake helper's own settle sleep
+    monkeypatch.setattr(sc.time, "sleep", lambda s: None)
     return fs
 
 
@@ -158,6 +166,51 @@ def test_probe_port_identifies_and_closes(fake):
     assert res is not None and res.serial == "LSA31-000042"
     assert res.firmware == "0.7.0"
     assert not fake.is_open                    # probe never holds the port
+
+
+def test_first_connect_retries_past_a_transient_idn_err(fake):
+    """A first *IDN? that returns ERR (a first-write transient / a device-side leftover) no
+    longer fails the connect — the shared handshake retries past it (issue #9)."""
+    fake.idn_fail = 1
+    assert probe_port("/dev/ttyACM0") is not None         # discovery recovers past the ERR
+    fake.idn_fail = 1
+    dev = _device(fake)                                   # …and so does _connect
+    assert dev._lsa is not None
+
+
+def test_warmup_writes_lone_terminator_before_first_idn(fake):
+    probe_port("/dev/ttyACM0")
+    assert "" in fake.commands
+    assert fake.commands.index("") < fake.commands.index("*IDN?")
+
+
+def test_open_is_exclusive_on_posix_only(monkeypatch):
+    """LSA3.1 open() now takes POSIX exclusive access (it was MISSING — the real #6 gap)."""
+    captured = {}
+    monkeypatch.setattr(mod.serial, "Serial",
+                        lambda port, baud, **kw: (captured.update(kw), FakeSerial())[1])
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    import ferrodac.core.serial_connect as sc
+    monkeypatch.setattr(sc.sys, "platform", "linux")
+    LSA31("/dev/ttyACM0").open()
+    assert captured.get("exclusive") is True
+    captured.clear()
+    monkeypatch.setattr(sc.sys, "platform", "win32")
+    LSA31("/dev/ttyACM0").open()
+    assert "exclusive" not in captured
+
+
+def test_first_connect_all_retries_fail_behaves_as_today(fake):
+    """Every *IDN? failing → discovery None, _connect raises, port left clean (never-worse)."""
+    from ferrodac.core.serial_arbiter import PORTS_IN_USE
+    PORTS_IN_USE.discard("/dev/ttyACM0")                  # clean any leak from a prior test
+    fake.idn_fail = 99
+    assert probe_port("/dev/ttyACM0") is None
+    fake.idn_fail = 99
+    dev = LSA31Device(mod.ProbeResult(port="/dev/ttyACM0", serial="X", firmware="Y"))
+    with pytest.raises(RuntimeError, match="not an LSA3.1"):
+        dev._connect()
+    assert "/dev/ttyACM0" not in PORTS_IN_USE            # the FAILED connect didn't add it
 
 
 # -- BaseDevice wrapper -------------------------------------------------------- #
