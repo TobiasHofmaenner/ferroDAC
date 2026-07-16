@@ -43,6 +43,7 @@ from typing import Callable, Optional
 
 from ..core.base import BaseDevice
 from ..core.serial_arbiter import PORTS_IN_USE, SERIAL_LOCK
+from ..core.serial_connect import open_and_identify
 from ..core.tag import ORIGIN_DEVICE, Marker, color_for
 from ..core.device import (
     Interface,
@@ -63,8 +64,14 @@ except Exception:  # pragma: no cover
     serial = None
     HAVE_SERIAL = False
 
+# A HARD read error = the device is gone (unplug / FTDI re-enumeration / controller reset),
+# distinct from a quiet-line read timeout. The reader stops + flags link-down on these so the
+# supervisor can auto-reconnect instead of spinning a dead FD forever (issue #10).
+_HARD_ERRORS = (serial.SerialException, OSError) if HAVE_SERIAL else (OSError,)
+
 BAUD = 1050000       # NEVER 1200 — that is the bootloader trigger (manual §1)
 TERM = b"\n"
+LINK_DEAD_AFTER = 3   # consecutive MEAS? transport failures before the link is declared dead (#10)
 PROBE_RETRY_S = 30.0  # re-probe a port whose probe FAILED after this cooldown, so a transient
 #                       glitch can't stick a live device as undiscoverable forever (issue #6)
 
@@ -159,6 +166,7 @@ class LSC:
         self._reader: "Optional[threading.Thread]" = None
         self._reader_stop = threading.Event()
         self._resync_needed = False            # a reader-mode timeout → hard-resync next txn
+        self._link_down = threading.Event()    # the reader hit a HARD error → device gone (#10)
 
     # -- link ----------------------------------------------------------------- #
     def open(self) -> "LSC":
@@ -171,12 +179,19 @@ class LSC:
             kw["exclusive"] = True         # POSIX TIOCEXCL: a stray reader/screen/cat on the
             #                                port can't silently corrupt a live link (issue #6)
         self._ser = serial.Serial(self.port, self.baud, **kw)
+        self._link_down.clear()                # a fresh open → the link is up (#10)
         time.sleep(0.15)                       # let the FTDI device settle after open
         try:
             self._ser.reset_input_buffer()     # drop boot noise (only safe moment to)
         except Exception:
             pass
         return self
+
+    @property
+    def link_down(self) -> bool:
+        """The reader thread hit a HARD I/O error (the device is gone) — the device layer's
+        supervisor watches this to auto-reconnect instead of polling a dead FD (issue #10)."""
+        return self._link_down.is_set()
 
     def close(self) -> None:
         self.stop_reader()                     # stop reading before the port goes away
@@ -223,10 +238,14 @@ class LSC:
         while not self._reader_stop.is_set():
             try:
                 raw = self._readline()             # read_until returns as soon as a line lands
-            except Exception:                      # port closing / I/O error
+            except _HARD_ERRORS:                   # the device is GONE (unplug / re-enumeration)
+                if not self._reader_stop.is_set(): # (a deliberate close raises too — don't flag it)
+                    self._link_down.set()          # signal the supervisor + STOP spinning a dead
+                break                              # FD, instead of retrying it forever (issue #10)
+            except Exception:                      # a generic/unexpected blip → brief backoff
                 if self._reader_stop.is_set():
                     break
-                self._reader_stop.wait(0.05)       # brief backoff, still stop-responsive
+                self._reader_stop.wait(0.05)       # still stop-responsive
                 continue
             if raw is None:                        # no full line this cycle
                 self._reader_stop.wait(0.02)       # yield (not busy) + check stop
@@ -486,22 +505,20 @@ def probe_port(port: str) -> Optional[ProbeResult]:
     """Identify an LSC on a port; opens, identifies, reads the schema, *closes*."""
     if not HAVE_SERIAL:
         return None
+    lsc = LSC(port, timeout=1.0)
     try:
-        lsc = LSC(port, timeout=1.0).open()
-    except Exception:
-        return None
-    try:
-        parsed = _parse_idn(lsc.idn())
+        parsed = open_and_identify(lsc, _parse_idn, attempts=2)   # open+warm-up+retried *IDN? (#9)
         if parsed is None:
             return None
         sn, fw, product = parsed
-        schema = lsc.describe()               # self-describing discovery (§4)
+        lsc._desynced = True                  # resync before DESCRIBE? — a sacrificial *IDN?'s
+        schema = lsc.describe()               # late reply mustn't corrupt it (§4 discovery)
         return ProbeResult(port=port, serial=sn, firmware=fw,
                            product=product, schema=schema)
     except Exception:
         return None
     finally:
-        lsc.close()
+        lsc.close()                           # safe no-op if open() itself failed
 
 
 # --------------------------------------------------------------------------- #
@@ -547,6 +564,9 @@ def _sink_from_schema(s: dict) -> Sink:
 class LSCDevice(BaseDevice):
     driver = "lsc"
     discoverable = True
+    reconnectable = True             # a physical serial link — the platform supervisor auto-
+    #                                  reconnects a dropped one (issue #10); its _connect/
+    #                                  _disconnect reopen the port cleanly (no destructive side).
 
     _cache: dict = {}                # port -> ProbeResult | None
     _probe_cooldown: dict = {}       # port -> earliest monotonic re-probe time (failed probes)
@@ -589,6 +609,8 @@ class LSCDevice(BaseDevice):
         # for at most a half-period — the lsa31 polling model.
         self._meas: Optional[dict] = None
         self._meas_at = 0.0
+        self._xport_fails = 0            # consecutive MEAS? transport FAILURES (link-dead signal
+        #                                 for the reconnect supervisor — a raise, never a value #10)
         # !EVT lines become device-origin tags via BaseDevice.emit_tag() (§7.3). Delivery
         # is driven by the LSC controller's background reader thread — the moment an event
         # arrives, NOT gated on a MEAS?/poll cycle (issue #4).
@@ -637,14 +659,16 @@ class LSCDevice(BaseDevice):
                 self._lsc = None
         lsc = LSC(self._port)
         lsc.on_event = self._on_event             # capture events even DURING the handshake
-        #                                           (the tag sink is already wired by the manager)
-        lsc.open()
+        #                                           (the tag sink is already wired by the manager;
+        #                                            the reader is off, so idn() dispatches !EVT
+        #                                            synchronously — start_reader() is after identify)
         try:
-            parsed = _parse_idn(lsc.idn())
+            parsed = open_and_identify(lsc, _parse_idn)   # open+warm-up+retried *IDN? (#9)
             if parsed is None:
                 raise RuntimeError("not an LSC on this port")
             self._firmware = parsed[1]
-            lsc.describe()                        # refresh the positional schema (§4)
+            lsc._desynced = True                  # resync before DESCRIBE? so a sacrificial *IDN?'s
+            lsc.describe()                        # late reply can't corrupt the positional schema (§4)
             # Seed each writable sink from the REAL instrument state (least
             # surprise — a running pump keeps pumping; we show the truth).
             for sink in self._sinks:
@@ -662,6 +686,7 @@ class LSCDevice(BaseDevice):
             lsc.close()
             raise
         self._lsc = lsc
+        self._xport_fails = 0                      # fresh link (also resets after auto-reconnect)
         with type(self)._cls_lock:
             type(self)._active_ports.add(self._port)
             type(self)._cache.pop(self._port, None)
@@ -683,6 +708,27 @@ class LSCDevice(BaseDevice):
             with type(self)._cls_lock:        # ALWAYS free the port, on any teardown path (#6)
                 type(self)._active_ports.discard(self._port)
 
+    # -- reconnect supervisor hooks (issue #10) ------------------------------- #
+    def _link_healthy(self):
+        """Report the link DOWN (a transport failure, never a value) so the platform
+        supervisor auto-reconnects: the controller flagged a hard I/O error (device gone),
+        or MEAS? has failed LINK_DEAD_AFTER times in a row (a lingering-handle quiet drop),
+        or we're already torn down. Otherwise alive."""
+        lsc = self._lsc
+        if lsc is None or lsc.link_down or self._xport_fails >= LINK_DEAD_AFTER:
+            return False
+        return True
+
+    def _port_present(self) -> bool:
+        """Don't hammer a reconnect at a physically-removed device — only retry while the
+        serial node still exists (issue #10)."""
+        if not HAVE_SERIAL:
+            return False
+        try:
+            return self._port in {p.device for p in serial.tools.list_ports.comports()}
+        except Exception:                     # noqa: BLE001 — enumeration hiccup → assume present
+            return True
+
     @staticmethod
     def _parse_state(sink: Sink, raw: str):
         raw = raw.strip()
@@ -703,8 +749,13 @@ class LSCDevice(BaseDevice):
         now = time.monotonic()
         max_age = 0.5 / max(self._rate_hz or 1.0, 1e-3)
         if self._meas is None or (now - self._meas_at) > max_age:
-            self._meas = self._lsc.meas()
+            try:
+                self._meas = self._lsc.meas()
+            except Exception:
+                self._xport_fails += 1        # a transport FAILURE (a raise) — link-dead signal
+                raise                          # (the supervisor keys on this, never on a value #10)
             self._meas_at = now
+            self._xport_fails = 0             # a good acquisition → the link is alive
         return self._meas
 
     def _on_event(self, evt: Event) -> None:

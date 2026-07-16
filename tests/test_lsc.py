@@ -70,6 +70,7 @@ class FakeSerial:
         self.is_open = True
         self.commands = []                               # every line the host sent (for asserts)
         self.drop_next_reply = False                     # simulate a device that misses one reply
+        self.idn_fail = 0                                # first N *IDN? return ERR (first-connect #9)
         self._lock = threading.Lock()                    # _buf is touched by the reader thread too
 
     # -- pyserial surface the controller touches --
@@ -122,6 +123,9 @@ class FakeSerial:
             return []
         up = line.upper()
         if up == "*IDN?":
+            if self.idn_fail > 0:                        # first-connect transient / leftover (#9)
+                self.idn_fail -= 1
+                return ['=ERR,1,"Unknown command"']
             return ["=" + self._idn]
         if up == "DESCRIBE?":
             return ["=" + json.dumps(self.schema)]
@@ -166,6 +170,8 @@ def fake(monkeypatch):
     fs.devices = []                                      # LSCDevices to tear down
     monkeypatch.setattr(mod.serial, "Serial", lambda *a, **k: fs)
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    import ferrodac.core.serial_connect as sc           # the handshake helper's own settle sleep
+    monkeypatch.setattr(sc.time, "sleep", lambda s: None)
     yield fs
     for d in fs.devices:
         try:
@@ -542,6 +548,72 @@ def test_query_err_surface_raises_with_code(fake):
         with pytest.raises(LSCError) as ei:
             lsc.state("nonexistent")                       # =ERR,2,"No such state"
         assert ei.value.code == 2
+
+
+def test_first_connect_retries_past_a_transient_idn_err(fake):
+    """A first *IDN? that returns ERR (a first-write-after-open transient / a device-side
+    partial-line leftover) no longer fails the connect — the shared handshake retries past
+    it, so no remove/re-add is needed (issue #9)."""
+    fake.idn_fail = 1
+    assert probe_port("/dev/ttyUSB0") is not None        # discovery recovers past the ERR
+    fake.idn_fail = 1
+    dev = _device(fake)                                  # …and so does _connect
+    assert dev._lsc is not None and dev._firmware == "demo-0.1"
+
+
+def test_warmup_writes_lone_terminator_before_first_idn(fake):
+    """The handshake sends a lone terminator (flushing the instrument parser) before the
+    first *IDN? (issue #9)."""
+    probe_port("/dev/ttyUSB0")
+    assert "" in fake.commands                           # a blank line went out…
+    assert fake.commands.index("") < fake.commands.index("*IDN?")   # …before the first *IDN?
+
+
+def test_first_connect_all_retries_fail_behaves_as_today(fake):
+    """When every *IDN? fails, discovery returns None and _connect raises + leaves the port
+    clean — exactly as before the retry helper (issue #9, never-worse)."""
+    from ferrodac.core.serial_arbiter import PORTS_IN_USE
+    fake.idn_fail = 99
+    assert probe_port("/dev/ttyUSB0") is None
+    fake.idn_fail = 99
+    dev = LSCDevice(ProbeResult(port="/dev/ttyUSB0", serial="0001", firmware="d",
+                                product="P", schema=json.loads(json.dumps(SCHEMA))))
+    with pytest.raises(RuntimeError, match="not an LSC"):
+        dev._connect()
+    assert "/dev/ttyUSB0" not in PORTS_IN_USE            # arbiter untouched on failure
+
+
+def test_lsc_is_reconnectable():
+    assert LSCDevice.reconnectable is True                    # opts into the supervisor (#10)
+
+
+def test_reader_flags_link_down_and_stops_on_a_hard_error(fake):
+    """A HARD serial error (device unplugged / re-enumerated) makes the reader set link_down
+    and STOP — instead of spinning a dead FD forever (issue #10)."""
+    import serial
+    lsc = LSC("/dev/ttyUSB0", timeout=0.05)
+    lsc.open()
+    lsc.start_reader()
+    try:
+        fake.read_until = lambda *a, **k: (_ for _ in ()).throw(serial.SerialException("gone"))
+        assert _spin(lambda: lsc.link_down, timeout=2.0)      # the reader flagged the drop…
+        assert _spin(lambda: not lsc._reader.is_alive())      # …and its thread exited (no spin)
+    finally:
+        lsc.stop_reader()
+
+
+def test_link_healthy_reports_dead_on_hard_error_or_repeated_meas_fail(fake):
+    """_link_healthy() → False on a hard link-down OR after LINK_DEAD_AFTER MEAS? transport
+    failures — the transport-failure signal the supervisor keys on, never a value (issue #10)."""
+    dev = _device(fake)
+    assert dev._link_healthy() is True                        # freshly connected
+    dev._lsc._link_down.set()
+    assert dev._link_healthy() is False                       # hard link-down
+    dev._lsc._link_down.clear()
+    dev._xport_fails = mod.LINK_DEAD_AFTER
+    assert dev._link_healthy() is False                       # quiet drop (repeated MEAS? fails)
+    dev._xport_fails = 0
+    assert dev._link_healthy() is True                        # recovered
 
 
 def test_reader_hard_resyncs_after_timeout(fake):

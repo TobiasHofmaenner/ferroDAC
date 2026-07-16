@@ -8,11 +8,23 @@ run without a display.
 
 import os
 import sys
+import tempfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # Pin the SAME Qt binding the app uses (ferrodac._qtbinding prefers PySide6), so
 # tests exercise the real binding — and so QtWebEngine (PySide6-only here) is found.
 os.environ.setdefault("QT_API", "pyside6")
+
+# Isolate the ferrodac config dir (Python-device defs, connector/pairing tokens —
+# everything under default_config_dir()) into a throwaway tempdir for the whole run,
+# so tests neither inherit the developer's real ~/.config/ferrodac NOR leak into it.
+# A leftover python_devices.json is not benign: MainWindow._restore_python_devices()
+# re-mints it on construction, and that device's async connect-worker fires
+# active_changed → _rebuild_device_ports, which garbage-collects an unrouted synthetic
+# source mid-test — the race that made test_chart_dimensional_routing_gate_and_migration
+# fail whenever the config dir held a persisted def (deterministic in isolation on a dev
+# machine, order-sensitive in-suite once any earlier test had persisted one).
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ferrodac-test-xdg-")
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 for _p in (_ROOT,

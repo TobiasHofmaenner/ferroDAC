@@ -32,6 +32,7 @@ from typing import Optional
 
 from ..core.base import BaseDevice
 from ..core.serial_arbiter import PORTS_IN_USE, SERIAL_LOCK
+from ..core.serial_connect import open_and_identify, posix_exclusive_kwargs
 from ..core.device import (
     Interface,
     Modality,
@@ -97,7 +98,8 @@ class LSA31:
             raise LSA31Error("pyserial not available")
         self._ser = serial.Serial(
             self.port, self.baud, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE, timeout=self.timeout, write_timeout=self.timeout)
+            stopbits=serial.STOPBITS_ONE, timeout=self.timeout, write_timeout=self.timeout,
+            **posix_exclusive_kwargs())        # exclusive on POSIX (issue #6) — was missing here
         time.sleep(0.15)                       # let the CDC device settle after open
         try:
             self._ser.reset_input_buffer()
@@ -251,12 +253,9 @@ def probe_port(port: str) -> Optional[ProbeResult]:
     """Identify an LSA3.1 on a port; opens, identifies, and *closes*."""
     if not HAVE_SERIAL:
         return None
+    lsa = LSA31(port, timeout=1.0)
     try:
-        lsa = LSA31(port, timeout=1.0).open()
-    except Exception:
-        return None
-    try:
-        parsed = _parse_idn(lsa.idn())
+        parsed = open_and_identify(lsa, _parse_idn, attempts=2)   # open+warm-up+retried *IDN? (#9)
         if parsed is None:
             return None
         sn, fw = parsed
@@ -264,7 +263,7 @@ def probe_port(port: str) -> Optional[ProbeResult]:
     except Exception:
         return None
     finally:
-        lsa.close()
+        lsa.close()                            # safe no-op if open() itself failed
 
 
 # --------------------------------------------------------------------------- #
@@ -358,9 +357,9 @@ class LSA31Device(BaseDevice):
                 self._lsa.close()
             finally:
                 self._lsa = None
-        lsa = LSA31(self._port).open()
+        lsa = LSA31(self._port)
         try:
-            parsed = _parse_idn(lsa.idn())
+            parsed = open_and_identify(lsa, _parse_idn)   # open+warm-up+retried *IDN? (#9)
             if parsed is None:
                 raise RuntimeError("not an LSA3.1 on this port")
             self._firmware = parsed[1]

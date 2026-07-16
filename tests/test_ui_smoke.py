@@ -26,6 +26,19 @@ def _wait_tasks(w, qapp, timeout=10.0):
     qapp.processEvents()
 
 
+def _process_until(qapp, cond, timeout=3.0):
+    """Pump the event loop until cond() is true (or timeout). The reliable way to await a
+    deferred ``QTimer.singleShot(0, …)`` — a SINGLE processEvents() can miss a 0-ms timer whose
+    firing depends on prior events in the queue."""
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline and not cond():
+        qapp.processEvents()
+        time.sleep(0.005)
+    qapp.processEvents()
+    return cond()
+
+
 def _mainwindow(qapp):
     import tempfile
     from ferrodac.core.engine import Engine
@@ -1126,9 +1139,12 @@ def test_chart_dimensional_routing_gate_and_migration(qapp):
         assert pid not in [k for k, _ in db.compatible_sinks("dev/t")]   # menu greys out temp
         n_charts = sum(1 for k in db._panels if k.startswith("chart"))
         db.set_route("dev/t", pid, True)                         # route temp anyway → refused
-        qapp.processEvents()                                     # let the deferred migration run
-        assert "dev/t" not in db.panel(pid)._curves             # pressure chart refused it
-        assert pid not in db._routes.get("dev/t", set())        # route dropped, not kept
+        assert "dev/t" not in db.panel(pid)._curves             # (sync) pressure chart refused it
+        assert pid not in db._routes.get("dev/t", set())        # (sync) route dropped, not kept
+        # the migration to a sibling chart is DEFERRED (singleShot, to avoid route re-entrancy),
+        # so pump the loop until it lands rather than hoping one processEvents() catches it
+        assert _process_until(
+            qapp, lambda: sum(1 for k in db._panels if k.startswith("chart")) == n_charts + 1)
         charts = [k for k in db._panels if k.startswith("chart")]
         assert len(charts) == n_charts + 1                      # a sibling chart was spawned
         sib = next(db.panel(k) for k in charts
