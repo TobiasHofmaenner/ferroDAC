@@ -106,10 +106,12 @@ class ControlSurface:
 
     # -- invocation ----------------------------------------------------------
     def dispatch(self, name: str, payload: Optional[dict] = None, *,
-                 scope: str = "admin", confirm: bool = False) -> Any:
+                 scope: str = "admin", confirm: bool = False, caller: str = "") -> Any:
         """Run a verb on behalf of a caller with `scope`. Raises ScopeError if the
         scope is too low (or a destructive verb wasn't confirmed) and ControlError on
-        an unknown verb / bad params / handler failure."""
+        an unknown verb / bad params / handler failure. `caller` (the connector name, when
+        known) is injected as the reserved, un-spoofable payload key ``_caller`` so a verb
+        can attribute an action to WHO invoked it (e.g. device.respond's provenance tag)."""
         with self._lock:
             v = self._verbs.get(name)
         if v is None:
@@ -119,6 +121,9 @@ class ControlSurface:
         if v.destructive and not confirm:
             raise ScopeError(f"{name} is destructive — pass confirm=true")
         payload = dict(payload or {})
+        payload.pop("_caller", None)            # reserved — never accept it from the wire
+        if caller:
+            payload["_caller"] = caller         # trusted, set by the transport (localapi/hub)
         for pname, spec in v.params.items():
             if spec.get("required") and pname not in payload:
                 raise ControlError(f"{name}: missing required param {pname!r}")

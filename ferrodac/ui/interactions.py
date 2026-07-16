@@ -49,6 +49,11 @@ log = logging.getLogger("interaction")
 # severity → the card/banner accent colour (routine is quiet; critical shouts).
 _SEVERITY_COLOR = {"info": "#4dabf7", "warn": "#ffa94d", "critical": "#f03e3e"}
 
+# Flood guard: a driver bug that calls ask() every poll cycle mints a fresh-id prompt
+# each time (so id-dedup can't help) and would fill the store unbounded. Past this many
+# OPEN prompts for one device we drop new ones (and log) rather than melt the inbox.
+_MAX_OPEN_PER_DEVICE = 64
+
 
 class _Open:
     """One open prompt + its driver callback + the answer bookkeeping (who/when)."""
@@ -59,6 +64,7 @@ class _Open:
         self.answer = None
         self.answered_by = None       # "operator" | "connector:<name>" | "timeout:*"
         self.answered_at = None       # epoch seconds
+        self.ok = True                # did on_response run cleanly? (False → audit records the failure)
 
 
 class PendingInteractions(QObject):
@@ -83,8 +89,15 @@ class PendingInteractions(QObject):
     # -- mutations -----------------------------------------------------------
     def add(self, prompt, on_response=None) -> str:
         """File a device-raised prompt. Idempotent by id (a re-delivered prompt is
-        ignored). Arms the timeout timer if the prompt declares one."""
+        ignored). Arms the timeout timer if the prompt declares one. A device that
+        floods the store past _MAX_OPEN_PER_DEVICE open prompts is throttled (the new
+        prompt is dropped + logged) so a driver bug can't melt the inbox."""
         if prompt.id in self._open:
+            return prompt.id
+        if sum(1 for e in self._open.values()
+               if e.prompt.device_id == prompt.device_id) >= _MAX_OPEN_PER_DEVICE:
+            log.warning("device %s already has %d open prompts — dropping %s (flood guard)",
+                        prompt.device_id, _MAX_OPEN_PER_DEVICE, prompt.id)
             return prompt.id
         self._open[prompt.id] = _Open(prompt, on_response)
         if prompt.timeout and prompt.timeout > 0:
@@ -108,6 +121,7 @@ class PendingInteractions(QObject):
         timer = self._timers.pop(pid, None)
         if timer is not None:
             timer.stop()
+            timer.deleteLater()              # don't accumulate dead timers on the long-lived store
         entry.answer = answer
         entry.answered_by = by
         entry.answered_at = time.time()
@@ -116,6 +130,7 @@ class PendingInteractions(QObject):
             try:
                 cb(answer)                   # the driver acts (must be GUI-safe — see module doc)
             except Exception:                # a bad driver callback must not break the store
+                entry.ok = False             # …but the audit tag must not claim it succeeded
                 log.exception("prompt %s on_response failed", pid)
         self.resolved.emit(entry)
         self.changed.emit()
@@ -137,9 +152,31 @@ class PendingInteractions(QObject):
         else:
             self.resolve(pid, policy, by="timeout")   # a literal default answer
 
+    def withdraw(self, *device_ids) -> int:
+        """Drop every OPEN prompt raised by one of these device ids WITHOUT invoking
+        on_response — the request is being RETIRED, not answered (the device was removed,
+        or resolved it locally / on another transport). This is the counterpart to
+        first-responder-wins for the case where the answer never comes through this app:
+        it clears the inbox/toast + kills the timer, but emits no ``resolved`` (no
+        provenance tag, no callback into a possibly-dead driver). Returns how many went.
+        Match on device_id (the prompt carries data_id = uuid-or-instance_id), so pass
+        both the uuid and the instance_id, like ``has_pending``."""
+        ids = {d for d in device_ids if d}
+        victims = [pid for pid, e in self._open.items() if e.prompt.device_id in ids]
+        for pid in victims:
+            self._open.pop(pid, None)
+            t = self._timers.pop(pid, None)
+            if t is not None:
+                t.stop()
+                t.deleteLater()
+        if victims:
+            self.changed.emit()
+        return len(victims)
+
     def clear(self) -> None:
         for t in self._timers.values():
             t.stop()
+            t.deleteLater()
         self._timers.clear()
         if self._open:
             self._open.clear()
@@ -193,8 +230,13 @@ def build_answer_controls(prompt, respond) -> list:
         edit = QLineEdit()
         edit.setPlaceholderText("Type an answer…")
         submit = QPushButton("Submit")
-        submit.clicked.connect(lambda: respond(edit.text()))
-        edit.returnPressed.connect(lambda: respond(edit.text()))
+
+        def _submit(*_a, e=edit, r=respond):
+            txt = e.text()
+            if txt.strip():                 # ignore an empty/blank submit — don't answer with ""
+                r(txt)
+        submit.clicked.connect(_submit)
+        edit.returnPressed.connect(_submit)
         return [edit, submit]
     # ACKNOWLEDGE (and any unknown kind) — a single OK
     return [_ack_button(respond)]
@@ -242,13 +284,23 @@ class RequestsPanel(QWidget):
         self._layout.addStretch(1)
         scroll.setWidget(host)
         root.addWidget(scroll, 1)
+        self._age_labels = []      # (QLabel, prompt) — refreshed in place on the age tick
         store.changed.connect(self._rebuild)
-        # a live age readout without a per-card timer: one slow tick redraws the list
+        # a live age readout WITHOUT rebuilding the cards: the slow tick only re-texts the
+        # age labels. (Rebuilding here would destroy an in-progress text answer + its focus
+        # every 5 s — a full _rebuild happens only when the prompt SET changes, on changed.)
         self._tick = QTimer(self)
         self._tick.setInterval(5000)
-        self._tick.timeout.connect(self._rebuild)
+        self._tick.timeout.connect(self._refresh_ages)
         self._tick.start()
         self._rebuild()
+
+    def _refresh_ages(self):
+        for lbl, p in self._age_labels:
+            try:
+                lbl.setText(_age_text(p))
+            except RuntimeError:               # a card was torn down since the last rebuild
+                pass
 
     def _clear(self):
         while self._layout.count():
@@ -259,6 +311,7 @@ class RequestsPanel(QWidget):
 
     def _rebuild(self):
         self._clear()
+        self._age_labels = []                  # stale after _clear's deleteLater — rebuild below
         prompts = self.store.pending()
         # critical-first, then oldest-first — the view's ordering, not the model's
         prompts.sort(key=lambda p: (not p.is_critical, p.created))
@@ -296,6 +349,7 @@ class RequestsPanel(QWidget):
         who.setStyleSheet("font-weight:700;")
         age = QLabel(_age_text(prompt))
         age.setStyleSheet("color:#7f8a99; font-size:10px;")
+        self._age_labels.append((age, prompt))     # re-texted in place by the age tick
         head.addWidget(dot)
         head.addWidget(who)
         head.addStretch(1)

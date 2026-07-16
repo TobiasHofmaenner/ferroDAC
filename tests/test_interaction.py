@@ -22,7 +22,8 @@ from ferrodac.core.interaction import (
 
 # -- the Qt-free entity ------------------------------------------------------
 def test_prompt_defaults_and_json_roundtrip():
-    p = Prompt("dev-1", "Retract the arm?", kind=CONFIRM, severity="critical")
+    p = Prompt("dev-1", "Retract the arm?", kind=CONFIRM, severity="critical",
+               timeout=30, on_timeout=ABORT)
     assert p.id and p.created > 0                       # auto-minted id + created
     assert p.is_critical
     d = prompt_to_dict(p)
@@ -31,6 +32,8 @@ def test_prompt_defaults_and_json_roundtrip():
     back = prompt_from_dict(d)
     assert back.id == p.id and back.device_id == "dev-1"
     assert back.kind == CONFIRM and back.severity == "critical"
+    # the timeout policy fields must survive the wire too (the device declares them)
+    assert back.timeout == 30 and back.on_timeout == ABORT and back.created == p.created
 
     choice = Prompt("d", "Which detector?", kind=CHOICE, options=["FC", "SEM"])
     assert prompt_from_dict(prompt_to_dict(choice)).options == ["FC", "SEM"]
@@ -73,6 +76,57 @@ def test_store_is_first_responder_wins(qapp):
     assert calls == [True]                              # the callback ran exactly once
 
 
+def test_store_withdraw_drops_without_invoking_callback(qapp):
+    """withdraw() retires a device's open prompts WITHOUT answering them — no callback into
+    a dead driver, no provenance tag (unlike resolve). Used when a device is removed."""
+    from ferrodac.ui.interactions import PendingInteractions
+
+    store = PendingInteractions()
+    called, resolved = [], []
+    store.resolved.connect(resolved.append)
+    a = Prompt("dev-1", "?", kind=CONFIRM)
+    b = Prompt("dev-2", "?", kind=CONFIRM)
+    store.add(a, called.append)
+    store.add(b, called.append)
+
+    n = store.withdraw("dev-1")                          # only dev-1's prompt goes
+    assert n == 1
+    assert store.get(a.id) is None and store.get(b.id) is not None
+    assert called == []                                 # NOT answered — no callback fired
+    assert resolved == []                               # …and no provenance-tag signal
+    assert store.withdraw("dev-1") == 0                 # idempotent — nothing left to withdraw
+
+
+def test_store_resolve_records_callback_failure(qapp):
+    """A driver on_response that throws must not break the store, and the resolved record
+    must report the failure (ok=False) so the audit tag stays honest."""
+    from ferrodac.ui.interactions import PendingInteractions
+
+    store = PendingInteractions()
+    resolved = []
+    store.resolved.connect(resolved.append)
+
+    def _boom(_answer):
+        raise RuntimeError("ack write failed")
+    p = Prompt("dev-1", "Retract the arm?", kind=CONFIRM)
+    store.add(p, _boom)
+    assert store.resolve(p.id, True) is True            # resolve still succeeds…
+    assert store.count() == 0                            # …the prompt still closes…
+    assert resolved[-1].ok is False                      # …but the record marks the failed callback
+    assert resolved[-1].answer is True
+
+
+def test_store_flood_guard_caps_open_prompts_per_device(qapp):
+    from ferrodac.ui.interactions import PendingInteractions, _MAX_OPEN_PER_DEVICE
+
+    store = PendingInteractions()
+    for _ in range(_MAX_OPEN_PER_DEVICE + 5):
+        store.add(Prompt("spammer", "?", kind=CONFIRM), lambda a: None)
+    assert store.count() == _MAX_OPEN_PER_DEVICE        # excess prompts are dropped, not filed
+    store.add(Prompt("other", "?", kind=CONFIRM), lambda a: None)
+    assert store.count() == _MAX_OPEN_PER_DEVICE + 1    # a DIFFERENT device is unaffected
+
+
 def test_store_timeout_policy(qapp):
     from ferrodac.ui.interactions import PendingInteractions
 
@@ -106,6 +160,16 @@ def test_store_timeout_policy(qapp):
     store._timed_out(p_crit.id)
     assert store.get(p_crit.id) is not None             # still open — critical never auto-answers
 
+    # CRITICAL + ABORT: the ONE auto-resolve a critical prompt DOES honour (it aborts,
+    # it just never silently proceeds with a default answer)
+    crit_aborts = []
+    store.resolved.connect(crit_aborts.append)
+    p_ca = Prompt("d", "?", kind=CONFIRM, severity="critical", timeout=10, on_timeout=ABORT)
+    store.add(p_ca, lambda a: None)
+    store._timed_out(p_ca.id)
+    assert store.get(p_ca.id) is None                   # aborted…
+    assert crit_aborts[-1].answered_by == "timeout:abort"   # …explicitly, not silently
+
 
 # -- the Requests inbox (offscreen) ------------------------------------------
 def test_requests_inbox_renders_and_inline_answer_resolves(qapp):
@@ -136,7 +200,14 @@ def test_answer_controls_auto_generate_from_kind(qapp):
     from ferrodac.ui.interactions import build_answer_controls
 
     got = []
+    # confirm → [Yes]/[No] answering True / False
+    ctrls = build_answer_controls(Prompt("d", "?", kind=CONFIRM), got.append)
+    no = next(w for w in ctrls if isinstance(w, QPushButton) and w.text() == "No")
+    no.click()
+    assert got == [False]                          # the False branch, not just Yes
+
     # choice → one button per option, each answering with that option
+    got.clear()
     ctrls = build_answer_controls(Prompt("d", "?", kind=CHOICE, options=["A", "B"]),
                                   got.append)
     labels = [w.text() for w in ctrls if isinstance(w, QPushButton)]
@@ -149,6 +220,8 @@ def test_answer_controls_auto_generate_from_kind(qapp):
     ctrls = build_answer_controls(Prompt("d", "?", kind=TEXT), got.append)
     edit = next(w for w in ctrls if isinstance(w, QLineEdit))
     submit = next(w for w in ctrls if isinstance(w, QPushButton))
+    submit.click()
+    assert got == []                               # an EMPTY submit does not answer with ""
     edit.setText("42")
     submit.click()
     assert got == ["42"]
@@ -176,7 +249,15 @@ def test_device_prompt_verbs_dispatch_against_the_app(control_surface):
     assert [pr["id"] for pr in listing] == [p.id]
     assert listing[0]["kind"] == "confirm" and listing[0]["severity"] == "critical"
 
-    res = s.dispatch("device.respond", {"id": p.id, "answer": True}, scope="control")
+    # a wrong-TYPED answer to a confirm must be rejected, not passed to the driver (it would
+    # read truthy and could drive hardware) — the request stays open
+    with pytest.raises(ControlError):
+        s.dispatch("device.respond", {"id": p.id, "answer": "no"}, scope="control")
+    assert answered == [] and s.dispatch("device.prompts", scope="read") != []
+
+    # caller is recorded on the provenance tag (answered by connector:<name>)
+    res = s.dispatch("device.respond", {"id": p.id, "answer": True},
+                     scope="control", caller="assistant")
     assert res == {"ok": True, "id": p.id, "answer": True}
     assert answered == [True]                            # the device callback fired
     assert s.dispatch("device.prompts", scope="read") == []   # closed
@@ -185,13 +266,42 @@ def test_device_prompt_verbs_dispatch_against_the_app(control_surface):
     with pytest.raises(ControlError):
         s.dispatch("device.respond", {"id": p.id, "answer": True}, scope="control")
 
-    # a provenance tag recorded the outcome (origin=device, immutable)
+    # a provenance tag recorded the outcome (origin=device, immutable, WHO answered)
     tags = [m for m in w.dashboard.markers.all() if m.kind == "interaction"]
     assert tags and tags[-1].origin_kind == "device"
     assert tags[-1].payload.get("answer") is True
+    assert tags[-1].payload.get("answered_by") == "connector:assistant"
+
+    # an out-of-options choice answer is likewise rejected
+    c = Prompt("dev-1", "Which detector?", kind=CHOICE, options=["FC", "SEM"])
+    w.interactions.add(c, lambda a: None)
+    with pytest.raises(ControlError):
+        s.dispatch("device.respond", {"id": c.id, "answer": "TOF"}, scope="control")
+    assert s.dispatch("device.respond", {"id": c.id, "answer": "FC"},
+                      scope="control")["answer"] == "FC"
+
+
+@pytest.mark.ui
+def test_device_removal_withdraws_open_prompts(control_surface):
+    """Removing a device retires its open requests through the app wiring
+    (manager.device_removed → interactions.withdraw): the prompt leaves the inbox and its
+    callback is NOT fired into the now-dead driver."""
+    w, _s = control_surface
+    called = []
+    p = Prompt("gauge-uuid", "Retract the arm?", kind=CONFIRM, severity="critical")
+    w.interactions.add(p, called.append)
+    assert w.interactions.count() == 1
+
+    w.manager.device_removed.emit(("gauge-uuid", "gauge-1"))   # what manager.remove() emits
+    assert w.interactions.get(p.id) is None             # withdrawn from the inbox…
+    assert called == []                                 # …without answering the dead driver
 
 
 # -- a REAL localapi HTTP round-trip -----------------------------------------
+# This test targets the TRANSPORT (auth + wire + the /command|/query envelope) with a
+# minimal surface. The SHIPPING device.respond verb's own logic (per-kind coercion,
+# first-responder-wins, and the connector-name provenance tag) is exercised on a real
+# MainWindow in test_device_prompt_verbs_dispatch_against_the_app above.
 def test_device_respond_over_localapi_roundtrip(qapp):
     httpx = pytest.importorskip("httpx")
     pytest.importorskip("starlette")

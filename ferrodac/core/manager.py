@@ -73,6 +73,9 @@ class DeviceManager(QObject):
     #                                 (Prompt, on_response). The request/response analogue of
     #                                 device_tag (core.interaction); same poll-thread → GUI
     #                                 QueuedConnection marshalling.
+    device_removed = Signal(object)  # a device was REMOVED (user remove) — carries its
+    #                                 (uuid, instance_id). The app withdraws that device's
+    #                                 open prompts so none linger with a dead-driver callback.
 
     def __init__(
         self,
@@ -220,6 +223,9 @@ class DeviceManager(QObject):
         if device is None:
             return
         self.active_changed.emit()
+        # Retire any operator REQUESTS this device left open, so they can't linger in the
+        # inbox with a callback into a driver we're about to disconnect (core.interaction).
+        self.device_removed.emit((getattr(device, "uuid", None), instance_id))
         # A user-minted device (Python device) persists its definition so it survives a
         # restart; an explicit user remove must drop that def too, else it'd be re-minted
         # on the next launch. on_forget() is the device's own cleanup hook — absent (a

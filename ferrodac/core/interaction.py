@@ -46,6 +46,10 @@ SEVERITIES = ("info", "warn", "critical")
 # workflow, stay pending forever, or apply a default answer (any other value — a
 # bool for confirm, an option for choice, a string for text). Critical prompts honour
 # only ABORT/STAY (a default answer is refused for them — never silently proceed).
+# NOTE: the sentinels are strings, so a kind=text default answer literally equal to
+# "abort"/"stay" is read as the POLICY, not delivered as the answer (a negligible edge —
+# no real free-text default is the word "abort"). Use ABORT/STAY for policy; any other
+# value is the literal default answer.
 ABORT = "abort"
 STAY = "stay"
 

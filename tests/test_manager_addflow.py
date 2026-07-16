@@ -154,6 +154,22 @@ def test_device_prompt_channel_wired_on_add(qapp):
     assert got == [(prompt, cb)]                     # …it reached device_prompt with its callback
 
 
+def test_remove_emits_device_removed_for_prompt_withdrawal(qapp):
+    """remove() announces the device's ids on device_removed so the app can withdraw its
+    open requests (core.interaction) — carries (uuid, instance_id)."""
+    engine = Engine()
+    mgr = DeviceManager([], engine=engine, registry=None)
+    dev = _MintedDevice("pysrc-rm")
+    mgr.add_user_device(dev, user=True)
+    assert _spin(qapp, lambda: dev.connected)
+
+    seen = []
+    mgr.device_removed.connect(seen.append)
+    mgr.remove(dev.instance_id)
+    assert seen == [(getattr(dev, "uuid", None), "pysrc-rm")]
+    engine.shutdown()
+
+
 def test_remove_without_hook_is_safe(qapp):
     engine = Engine()
     mgr = DeviceManager([], engine=engine, registry=None)

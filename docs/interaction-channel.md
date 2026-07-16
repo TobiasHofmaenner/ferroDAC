@@ -85,7 +85,31 @@ through the same store (so it is still first-responder-wins):
   that says how to answer.
 - **`device.respond {id, answer}`** (control scope) — resolve one. `answer` matches the
   kind (bool for confirm, an option for choice, a string for text, `true` for
-  acknowledge).
+  acknowledge). The verb **validates the answer against the kind** before it reaches the
+  driver (a non-bool confirm or an out-of-`options` choice is rejected with an error, not
+  passed through) — the GUI can only produce well-typed answers, but a connector posts
+  free JSON, and a wrong-typed answer must never drive hardware. The resolving connector's
+  name is recorded on the provenance tag (`answered by connector:<name>`).
+
+## Safety model — an answer is intent, not a bypass
+
+The device stays the safety authority. An answer delivered through this channel is the
+operator's **intent**, exactly like a value written to a **sink**; it does **not** mean an
+interlock was satisfied. A driver that receives `on_response(True)` for "arm retracted?"
+must still **re-check its own conditions** before acting — the host (or a hub operator, or
+an agent via `device.respond`) is never a substitute for the device's local gating. Two
+concrete guarantees back this up:
+
+- **Timeout is the device's policy, not a second authority.** The host only applies the
+  `on_timeout` the *raising device declared on the Prompt*, and a `critical` prompt never
+  auto-resolves on a default (it aborts or stays pending). The host adds no timeout the
+  device didn't ask for.
+- **A withdrawn or failed request never reads as a satisfied one.** If the device is
+  removed while a request is open, the app **withdraws** it (`PendingInteractions.withdraw`)
+  — it leaves the inbox with *no* answer and *no* callback into the now-dead driver, rather
+  than lingering answerable. And if the driver's `on_response` throws (e.g. the ack write
+  failed), the provenance tag records the failure (`⚠ device ack FAILED`, `ok:false`)
+  instead of claiming the device proceeded.
 
 ## Deliberately deferred
 

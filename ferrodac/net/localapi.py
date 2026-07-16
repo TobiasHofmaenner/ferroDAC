@@ -306,7 +306,7 @@ class LocalApiServer:
         try:
             result = await run_in_threadpool(
                 self._surface.dispatch, verb, payload,
-                scope=conn.scope, confirm=confirm)
+                scope=conn.scope, confirm=confirm, caller=conn.name)
         except ScopeError as exc:
             self._audit(conn, verb, False, str(exc))
             return JSONResponse({"error": str(exc), "context": self._surface.context()},

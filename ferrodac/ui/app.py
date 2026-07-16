@@ -333,6 +333,7 @@ class MainWindow(QMainWindow):
         # thread → QueuedConnection. On resolve we auto-emit a provenance tag.
         self.interactions = PendingInteractions(self)
         self.manager.device_prompt.connect(self._on_device_prompt, Qt.QueuedConnection)
+        self.manager.device_removed.connect(self._on_device_removed)
         self.interactions.added.connect(self._on_prompt_added)
         self.interactions.resolved.connect(self._on_prompt_resolved)
         self._requests_toast = RequestToast(self.interactions, self._device_name_for, self)
@@ -1153,6 +1154,13 @@ class MainWindow(QMainWindow):
         driver's on_response is invoked here when the operator answers."""
         self.interactions.add(prompt, on_response)
 
+    def _on_device_removed(self, ids) -> None:
+        """A device was removed → withdraw its still-open requests (no answer, no callback
+        into the now-dead driver). ids = (uuid, instance_id); a prompt carries whichever is
+        its data_id, so match on both."""
+        uuid, instance_id = ids
+        self.interactions.withdraw(uuid, instance_id)
+
     def _on_prompt_added(self, prompt) -> None:
         """A new request arrived → pop the non-blocking arrival toast and (for a critical
         one) surface the Requests inbox. Never a hard modal — the operator can keep working."""
@@ -1179,14 +1187,20 @@ class MainWindow(QMainWindow):
             shown = "(no answer)"
         else:
             shown = str(answer)
+        ok = getattr(entry, "ok", True)
+        # The tag must not claim the device acted on the answer if its callback threw
+        # (e.g. the ack write failed on a flaky link) — the audit record stays honest.
+        failed = "" if ok else "  ⚠ device ack FAILED"
         self.dashboard.markers.add(
             entry.answered_at or time.time(),
-            label=f"↩ {shown}",
-            comment=f"{prompt.title or prompt.question} — answered by {entry.answered_by}",
+            label=f"↩ {shown}" + ("" if ok else " ⚠"),
+            comment=(f"{prompt.title or prompt.question} — answered by "
+                     f"{entry.answered_by}{failed}"),
             kind="interaction", origin_kind=ORIGIN_DEVICE, origin_id=prompt.device_id,
             scope=f"device:{prompt.device_id}", severity=prompt.severity,
             payload={"prompt_id": prompt.id, "kind": prompt.kind, "answer": answer,
-                     "answered_by": entry.answered_by, "question": prompt.question},
+                     "answered_by": entry.answered_by, "question": prompt.question,
+                     "ok": ok},
             immutable=True)
 
     def _refresh_requests_badge(self) -> None:
