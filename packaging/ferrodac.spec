@@ -35,13 +35,14 @@ if GEN not in sys.path:
 hiddenimports = collect_submodules("ferrodac")
 # collect_submodules("ferrodac") has proven UNRELIABLE on the Windows CI runner:
 # it silently returned a list WITHOUT ferrodac.devices.*, so the drivers (incl.
-# the sim devices) were never bundled and the app saw zero devices. List the
-# builtin drivers explicitly so they're guaranteed in the frozen app regardless.
-hiddenimports += [f"ferrodac.devices.{m}"
-                  for m in ("camera", "fake", "keithley6221", "lsa31", "qms200",
-                            "shelly_cloud", "tpg256a", "uncertainty_specs")]
-# ^ keep this list in sync with ferrodac/devices/ — the Linux smoke build
-#   (2026-07-09) showed shelly_cloud silently missing from the frozen app.
+# the sim devices) were never bundled and the app saw zero devices. Bundle each
+# device module explicitly — driven from the SAME constant the runtime fallback
+# uses, so a new driver can never be bundled-but-not-imported (or missing from
+# both, as the LSC was → invisible on the frozen binary).
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+from ferrodac.core.registry import _BUILTIN_DEVICE_MODULES  # noqa: E402
+hiddenimports += [f"ferrodac.devices.{m}" for m in _BUILTIN_DEVICE_MODULES]
 # pyqtgraph loads a lot lazily; include its submodules but skip the optional 3D
 # OpenGL package (needs PyOpenGL, which we don't use) — and the examples/jupyter/
 # canvas trees, whose IMPORT during collection initializes Qt and kills the
