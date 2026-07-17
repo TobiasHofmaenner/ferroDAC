@@ -143,9 +143,13 @@ class MainWindow(QMainWindow):
         self.replay = None
         # historic-catalog resolve cache — must exist BEFORE the Dashboard is
         # constructed (its _rebuild_device_ports walks _historic_sources on a
-        # store that already holds sources). Cleared on provenance edits.
+        # store that already holds sources). A provenance edit marks it STALE
+        # (old entries keep serving so ports never vanish) and the off-thread
+        # warm replaces them — clearing it outright forced a cold re-resolve.
         self._srcinfo_cache: dict = {}
-        manager.provenance_changed.connect(self._srcinfo_cache.clear)
+        self._srcinfo_stale = False
+        self._srcinfo_warming = False
+        manager.provenance_changed.connect(self._mark_srcinfo_stale)
         try:
             from ..store import (RamTier, ReadService, ReplayController,
                                  Resolver, StoreWriter, TimeContext, ZarrStore)
@@ -3277,18 +3281,60 @@ class MainWindow(QMainWindow):
         out = {}                                    # key -> (channel, device, unit, dtype)
         if self.store_writer is not None:
             st = self.store_writer.store
+            missing = []
             for key in st.sources():
                 info = self._srcinfo_cache.get(key)
-                if info is None:                    # new key → one small zarr read;
-                    info = resolve_source(key, store=st)   # cache cleared on
-                    self._srcinfo_cache[key] = info        # provenance_changed
+                if info is None:
+                    missing.append(key)             # resolved OFF-thread (below); the
+                    continue                        # port appears when the warm lands
                 out[key] = (info.channel_name, info.device_name, info.unit, info.dtype)
+            if self._srcinfo_stale and not self._srcinfo_warming:
+                missing = list({*missing, *self._srcinfo_cache})   # refresh everything
+            if missing:
+                self._warm_srcinfo(st, missing)
         if getattr(self, "hub", None) is not None:
             for key, name, unit, dtype in self.hub.hub_sources():
                 if key not in out:
                     channel = name if (name and name != key) else key.rsplit("/", 1)[-1]
                     out[key] = (channel, "", unit, dtmap.get(dtype, "float"))
         return [(k, ch, dev, u, dt) for k, (ch, dev, u, dt) in out.items()]
+
+    def _mark_srcinfo_stale(self) -> None:
+        """A provenance edit invalidates the historic-catalog resolve cache — but
+        entries keep SERVING until the off-thread warm replaces them (a hard clear
+        made every historic port vanish, then cold-resolve on the GUI thread)."""
+        self._srcinfo_stale = True
+        self.dashboard.refresh_ports()             # coalesced → triggers the re-warm
+
+    def _warm_srcinfo(self, st, keys) -> None:
+        """Resolve store source metadata OFF the GUI thread. The cold startup sweep
+        did one-or-more zarr reads PER EVER-RECORDED CHANNEL synchronously in
+        Dashboard construction — watchdog-measured 5 s locally, part of the 17 s
+        Windows startup. Rides ReadService (§21.4); ports refresh once when it lands."""
+        if self._srcinfo_warming:
+            return
+        reads = getattr(self, "reads", None)
+        from ..core.sourceid import resolve_source
+        if reads is None:                           # headless/tests: resolve inline
+            for key in keys:
+                self._srcinfo_cache[key] = resolve_source(key, store=st)
+            self._srcinfo_stale = False
+            return
+        self._srcinfo_warming = True
+
+        def work(keys=list(keys)):
+            return {k: resolve_source(k, store=st) for k in keys}
+
+        def done(res):
+            self._srcinfo_cache.update(res)
+            self._srcinfo_stale = False
+            self._srcinfo_warming = False
+            self.dashboard.refresh_ports()          # the historic ports appear now
+
+        def failed(_exc):
+            self._srcinfo_warming = False            # transient store hiccup — the
+        #                                              next ports rebuild retries
+        reads.call(work, key="srcinfo-warm", on_result=done, on_error=failed)
 
     def _tc_live_tick(self) -> None:
         """Advance the head to now while following (live), and slide the live

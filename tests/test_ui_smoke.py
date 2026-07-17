@@ -1472,6 +1472,9 @@ def test_historic_source_device_qualified_label(qapp):
         st.put_device("sim:gauge:A", {"name": "Sim Gauge A"})
         st.emit_device_meta("sim:gauge:A", 0.0, "name", "Sim Gauge A")
         w.dashboard._rebuild_device_ports()                 # pick up the historic source
+        # the source-info resolve is ASYNC now (off-GUI warm) → pump until it lands
+        assert _process_until(
+            qapp, lambda: w.dashboard._sources.get("sim:gauge:A/ch1") is not None)
         port = w.dashboard._sources.get("sim:gauge:A/ch1")
         assert port is not None and port.kind == "historic"
         assert port.label == "ch1 · Sim Gauge A", port.label
@@ -1497,6 +1500,10 @@ def test_timeline_sources_qualified_and_no_derived(qapp):
         dp.proc_id = "gas1"                                  # a processor output
         w.dashboard._sources["gas1/model"] = dp
 
+        # the source-info resolve is ASYNC now (off-GUI warm) → pump until qualified
+        assert _process_until(
+            qapp,
+            lambda: w._timeline_sources().get("sim:gauge:A/ch1") == "ch1 · Sim Gauge A")
         names = w._timeline_sources()
         assert names.get("sim:gauge:A/ch1") == "ch1 · Sim Gauge A"   # historic qualified
         assert "gas1/model" not in names                            # derived excluded
@@ -1521,6 +1528,9 @@ def test_dev_journal_includes_historic_only_device(qapp):
                                     "asset_tag": "LAB-009"})
         st.emit_device_meta("sim:rga:9", 0.0, "name", "Old RGA")
         w.dashboard._rebuild_device_ports()                  # historic port appears
+        # the source-info resolve is ASYNC now (off-GUI warm) → pump until it lands
+        assert _process_until(
+            qapp, lambda: w.dashboard._sources.get("sim:rga:9/spectrum") is not None)
         w.dashboard.set_source_lens({"sim:rga:9/spectrum"})  # curate it
         md = w._device_journal_markdown()
         assert "Old RGA" in md and "RGA-9" in md and "Q200" in md
@@ -2191,9 +2201,12 @@ def test_mainwindow_constructs_over_an_existing_store(qapp):
     manager = DeviceManager(load_builtin_drivers(), engine=engine, registry=None)
     w = MainWindow(manager, engine)
     try:
-        # the historic catalog resolved through the cache, with device names
-        hist = {k: (ch, dev) for k, ch, dev, _u, _dt in w._historic_sources()}
-        assert "dev0/ch" in hist and hist["dev0/ch"][1] == "Device 0"
+        # the historic catalog resolves OFF the GUI thread now (the cold sweep
+        # stalled startup for seconds on a lived-in store) → pump until it lands
+        def hist():
+            return {k: (ch, dev) for k, ch, dev, _u, _dt in w._historic_sources()}
+        assert _process_until(qapp, lambda: "dev0/ch" in hist())
+        assert hist()["dev0/ch"][1] == "Device 0"
     finally:
         _wait_tasks(w, qapp)
         w.close()

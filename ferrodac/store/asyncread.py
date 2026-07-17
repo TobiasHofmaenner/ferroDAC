@@ -72,6 +72,14 @@ class ReadService:
         return self._submit("read_raw", (series, t0, t1),
                             key or ("read_raw", series), on_result, on_error)
 
+    def call(self, fn, *, key, on_result=None, on_error=None) -> Ticket:
+        """Run an arbitrary store/resolver READ on the pool — §21.4: UI-initiated
+        reads ride this service (supersession by key, result marshalled to the
+        GUI), never an ad-hoc thread and never inline on the GUI thread. For
+        reads the typed wrappers above don't cover (e.g. the startup source-info
+        sweep). `fn` must be self-contained and thread-safe."""
+        return self._submit("call", (fn,), key, on_result, on_error)
+
     def _call(self, kind, args):
         r = self.resolver
         if kind == "query":
@@ -80,6 +88,8 @@ class ReadService:
             return r.query_trace(*args)
         if kind == "read_raw":
             return r.read_raw(*args)
+        if kind == "call":
+            return args[0]()
         raise ValueError(kind)
 
     def _submit(self, kind, args, key, on_result, on_error) -> Ticket:

@@ -136,13 +136,33 @@ class ChartFeed:
         t0, t1 = tc.window
         try:
             if replay.playback._is_trace(source_key):
-                # LOCAL only: this backfill is synchronous on the GUI thread, so it
-                # must not wait on the hub socket (a hub-only trace draws whole on the
-                # next render instead of blocking the click — §21.2).
-                readings = replay.playback.read_window([source_key], t0, t1,
-                                                       local_only=True)
-                if readings:
-                    panel.feed(readings)
+                # ASYNC (ReadService): the full trace read blocked the GUI for the
+                # whole zarr read during a project load (watchdog: 1.8 s locally,
+                # worse on the lab box). Off-thread it may also wait on the hub —
+                # so a hub-only trace now backfills too (the old local_only existed
+                # ONLY because this was synchronous). Scans are bounded (~400) and
+                # the waterfall bins by absolute time, so late delivery interleaving
+                # with live scans is order-safe.
+                reads = self._reads()
+                if reads is None:              # headless/tests: bounded sync read
+                    readings = replay.playback.read_window([source_key], t0, t1,
+                                                           local_only=True)
+                    if readings:
+                        panel.feed(readings)
+                    return
+                dev, _, src = source_key.rpartition("/")
+
+                def _deliver(blocks, panel=panel, dev=dev, src=src):
+                    readings = [Reading(dev, src, float(t[j]), Trace(x=x, y=Y[j]))
+                                for (t, Y, x) in blocks for j in range(len(t))]
+                    try:
+                        if readings:
+                            panel.feed(readings)
+                    except RuntimeError:       # the panel was removed before the
+                        pass                   # read landed — nothing to draw on
+                reads.query_trace(source_key, t0, t1, max_scans=400,
+                                  key=("backfill-trace", source_key),
+                                  on_result=_deliver)
                 return
             if hasattr(panel, "set_window_curve"):
                 # ONE envelope representation end-to-end (§22 I-10): draw the same
