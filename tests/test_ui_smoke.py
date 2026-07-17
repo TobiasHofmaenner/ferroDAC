@@ -2198,3 +2198,42 @@ def test_mainwindow_constructs_over_an_existing_store(qapp):
         _wait_tasks(w, qapp)
         w.close()
         qapp.processEvents()
+
+
+@pytest.mark.ui
+def test_sources_sinks_hide_offline_toggle(qapp):
+    """The Sources + Sinks panels have a 'Hide offline' toggle (ON by default) that hides
+    offline / historic ports; unticking it shows them again."""
+    from ferrodac.ui.workspace import SinkPort, SourcePort
+    from ferrodac.ui.docks import SourcesPanel, SinksPanel
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        db._sources["dev/live"] = SourcePort(
+            "dev/live", "Live", "float", "K", "Dev", "device", online=True)
+        db._sources["dev/gone"] = SourcePort(
+            "dev/gone", "Gone", "float", "K", "Dev", "device", online=False)
+        db._sources["rec/hist"] = SourcePort(
+            "rec/hist", "Hist", "float", "K", "Rec", "historic", online=False)
+        db._sinks["dev:1#a"] = SinkPort(
+            "dev:1#a", "A", "bool", "", "Dev", "device",
+            device_id="dev:1", sink_id="a", online=True)
+        db._sinks["dev:1#b"] = SinkPort(
+            "dev:1#b", "B", "bool", "", "Dev", "device",
+            device_id="dev:1", sink_id="b", online=False)
+
+        sp = SourcesPanel(w.manager, db)
+        assert set(sp._cards) == {"dev/live"}              # default: offline + historic hidden
+        sp._hide_offline.setChecked(False)                 # show all
+        assert {"dev/live", "dev/gone", "rec/hist"} <= set(sp._cards)
+        sp._hide_offline.setChecked(True)
+        assert set(sp._cards) == {"dev/live"}              # toggles back
+
+        sk = SinksPanel(w.manager, db)
+        assert "dev:1#a" in sk._cards and "dev:1#b" not in sk._cards   # offline sink hidden
+        sk._hide_offline.setChecked(False)
+        assert "dev:1#b" in sk._cards
+        sp.deleteLater()
+        sk.deleteLater()
+    finally:
+        w.close()

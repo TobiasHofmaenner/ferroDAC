@@ -1096,6 +1096,11 @@ class SourcesPanel(QWidget):
         self._all.setToolTip("Show every channel, not just the project's selection")
         self._all.toggled.connect(lambda on: self._on_lens and self._on_lens(on))
         head.addWidget(self._all)
+        self._hide_offline = QCheckBox("Hide offline")     # on = declutter offline/historic
+        self._hide_offline.setChecked(True)
+        self._hide_offline.setToolTip("Hide offline + historic channels (default on)")
+        self._hide_offline.toggled.connect(self._rebuild)
+        head.addWidget(self._hide_offline)
         root.addLayout(head)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1123,15 +1128,22 @@ class SourcesPanel(QWidget):
     def _rebuild_inner(self):
         clear_layout(self._layout)
         self._cards = {}
-        ports = self.dashboard.visible_source_ports()     # the project's channel lens
+        visible = self.dashboard.visible_source_ports()   # the project's channel lens
         total = len(self.dashboard.source_ports())
+        hiding = self._hide_offline.isChecked()
+        ports = ([p for p in visible if getattr(p, "online", True)] if hiding else visible)
         self._label.setText(f"Sources  ({len(ports)}/{total})" if len(ports) != total
                             else f"Sources  ({len(ports)})")
         if not ports:
             lensed = self.dashboard.source_lens is not None
-            msg = ("No channels curated for this project.\nHit “✔ Curate”, or tick "
-                   "“All”." if lensed
-                   else "No sources yet.\nAdd a device (Devices) or an input (Add menu).")
+            if hiding and visible:                         # everything shown is offline/historic
+                msg = (f"{len(visible)} channel(s) hidden (offline / historic).\n"
+                       "Untick “Hide offline” to show them.")
+            elif lensed:
+                msg = ("No channels curated for this project.\nHit “✔ Curate”, or tick "
+                       "“All”.")
+            else:
+                msg = "No sources yet.\nAdd a device (Devices) or an input (Add menu)."
             ph = QLabel(msg)
             ph.setStyleSheet("color:#7f8a99;")
             ph.setWordWrap(True)
@@ -1245,9 +1257,17 @@ class SinksPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
+        head = QHBoxLayout()
         self._label = QLabel("Sinks")
         self._label.setStyleSheet("font-size:12px; font-weight:700; color:#c7d0db;")
-        root.addWidget(self._label)
+        head.addWidget(self._label)
+        head.addStretch(1)
+        self._hide_offline = QCheckBox("Hide offline")     # on = declutter offline sinks
+        self._hide_offline.setChecked(True)
+        self._hide_offline.setToolTip("Hide offline sinks (default on)")
+        self._hide_offline.toggled.connect(self._rebuild)
+        head.addWidget(self._hide_offline)
+        root.addLayout(head)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -1276,6 +1296,8 @@ class SinksPanel(QWidget):
         clear_layout(self._layout)
         self._cards = {}
         ports = self.dashboard.sink_ports()
+        if self._hide_offline.isChecked():
+            ports = [p for p in ports if getattr(p, "online", True)]
         for port in ports:
             if port.kind == "device":
                 value_text = self._device_value(port)
