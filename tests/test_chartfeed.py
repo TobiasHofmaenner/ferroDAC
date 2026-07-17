@@ -355,17 +355,21 @@ def test_zoom_requeries_owned_curves_and_discards_stale_results():
     assert reads.pending == []                  # LIVE → zoom is a no-op
 
     tc.park(BASE + 150)
-    cf.reconcile(force=True)                    # parked → dev/a owned + drawn
+    cf.reconcile(force=True)                    # parked → dev/a owned; the window
+    assert len(reads.pending) == 1              # draw is ASYNC now (ReadService)
+    series, q0, q1, mp, deliver = reads.pending[0]
+    assert series == "dev/a"
+    deliver(Resolver([st]).query(series, q0, q1, mp))
     full = panel.drawn["dev/a"]
     cf.on_chart_zoom(panel, BASE + 100, BASE + 110)
-    assert len(reads.pending) == 1              # one owned curve → one re-query
-    series, q0, q1, mp, deliver = reads.pending[0]
+    assert len(reads.pending) == 2              # one owned curve → one re-query
+    series, q0, q1, mp, deliver = reads.pending[1]
     assert series == "dev/a" and (q0, q1) == (BASE + 100, BASE + 110)
     deliver(Resolver([st]).query(series, q0, q1, mp))
     assert panel.drawn["dev/a"] != full         # finer sub-window painted
 
     cf.on_chart_zoom(panel, BASE + 120, BASE + 130)      # stale-delivery case:
-    _, _, _, _, stale = reads.pending[1]
+    _, _, _, _, stale = reads.pending[2]
     tc.follow_now()
     cf.reconcile(force=True)                    # go-live releases ownership...
     before = dict(panel.drawn)

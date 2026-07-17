@@ -1224,8 +1224,11 @@ class Dashboard(QObject):
         """A chart's X (time) range changed → align every other time-chart to it, so a
         pan/zoom on one moves them together (Option B correlation aid). Guarded so the
         cascade of setXRange calls doesn't loop. Only panels with set_x_range (time charts)
-        participate — a spectrum's X is m/z, not time."""
-        if self._x_linking:
+        participate — a spectrum's X is m/z, not time. User-toggleable (View ▸ Link
+        time axes): unlinked, each chart pans/zooms alone — resizing every chart at
+        once was 'kind of brutal' UX-wise, and each broadcast also invalidates every
+        sibling's downsample cache (a real per-frame cost with many charts)."""
+        if self._x_linking or not getattr(self, "x_link_enabled", True):
             return
         self._x_linking = True
         try:

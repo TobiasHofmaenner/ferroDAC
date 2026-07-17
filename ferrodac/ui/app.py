@@ -545,6 +545,22 @@ class MainWindow(QMainWindow):
             view.addAction(self.player_dock.toggleViewAction())
         view.addAction(self.log_dock.toggleViewAction())
         view.addSeparator()
+        # Common time axis: pan/zoom on one chart moves them all (Option B). OFF =
+        # each chart's X is independent — resizing every chart at once is brutal
+        # on a busy layout, and each broadcast invalidates every sibling's
+        # downsample cache. Persisted across sessions.
+        self.xlink_action = view.addAction("Link time axes")
+        self.xlink_action.setCheckable(True)
+        _xlink = QSettings("ferroDAC", "ferroDAC").value("view/xlink", "true") == "true"
+        self.xlink_action.setChecked(_xlink)
+        self.dashboard.x_link_enabled = _xlink
+
+        def _set_xlink(on):
+            self.dashboard.x_link_enabled = on
+            QSettings("ferroDAC", "ferroDAC").setValue("view/xlink",
+                                                       "true" if on else "false")
+        self.xlink_action.toggled.connect(_set_xlink)
+        view.addSeparator()
         self.edit_action = view.addAction("Edit layout")
         self.edit_action.setCheckable(True)
         self.edit_action.setChecked(False)          # start in locked layout

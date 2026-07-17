@@ -268,8 +268,10 @@ def test_extend_back_while_live_shows_history_and_keeps_appending(qapp):
                        np.array([5.0, 6.0, 2.0]))                              # historic, un-owned
     assert "g/p" not in p._query_owned and p._buf["g/p"].x[0] == 10.0
     p.feed([types.SimpleNamespace(key="g/p", value=9.0, status=0, t=50.0)])    # redundant re-stream
+    p._flush_dirty_curves()                       # redraws are throttled (~10 Hz)
     assert 9.0 not in list(p._curves["g/p"].getData()[1])                      # dropped (≤ last)
     p.feed([types.SimpleNamespace(key="g/p", value=3.0, status=0, t=102.0)])   # live continues
+    p._flush_dirty_curves()
     dx = list(p._curves["g/p"].getData()[0])
     assert dx[0] == 10.0 and dx[-1] == 102.0        # history kept AND live tail appended
 
@@ -284,9 +286,11 @@ def test_feed_drops_backward_out_of_order_points(qapp):
     p.feed([types.SimpleNamespace(key="g/p", value=1.0, status=0, t=1000.0),
             types.SimpleNamespace(key="g/p", value=2.0, status=0, t=1001.0)])
     p.feed([types.SimpleNamespace(key="g/p", value=9.0, status=0, t=1000.5)])   # stray OLDER point
+    p._flush_dirty_curves()                       # redraws are throttled (~10 Hz)
     dx, dy = p._curves["g/p"].getData()
     assert list(dx) == [1000.0, 1001.0] and 9.0 not in list(dy)  # backward point dropped
     p.feed([types.SimpleNamespace(key="g/p", value=3.0, status=0, t=1002.0)])   # forward → kept
+    p._flush_dirty_curves()
     assert list(p._curves["g/p"].getData()[0]) == [1000.0, 1001.0, 1002.0]
 
 

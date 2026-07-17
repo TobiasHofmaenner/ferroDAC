@@ -242,6 +242,15 @@ class _CaptureController(QObject):
     def _on_frame(self, frame) -> None:
         if not frame.isValid():
             return
+        # Rate-gate BEFORE the conversion: this handler runs on the GUI thread for
+        # every native frame (Qt Multimedia affinity), and toImage+convertToFormat
+        # is an ~MB-scale copy per frame — ~30/s of pure GUI-thread work. Display,
+        # CV and the hub preview ride these Readings and none needs more than
+        # ~10 fps; RECORDING is QMediaRecorder-side and untouched by this gate.
+        now = time.time()
+        if now - getattr(self, "_last_reading", 0.0) < 0.099:
+            return
+        self._last_reading = now
         img = frame.toImage()
         if img.isNull():
             return
@@ -251,7 +260,7 @@ class _CaptureController(QObject):
             img = img.copy()
         emit = self._device._emit
         if emit is not None:
-            emit(Reading(self._device.data_id, "frame", time.time(), img, 0))
+            emit(Reading(self._device.data_id, "frame", now, img, 0))
 
 
 # --------------------------------------------------------------------------- #

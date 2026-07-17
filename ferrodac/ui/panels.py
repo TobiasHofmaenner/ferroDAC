@@ -56,6 +56,33 @@ from .widget import WIDGET_TYPES, Widget
 pg.setConfigOptions(antialias=False, background="#11151c", foreground="#c7d0db")
 
 
+def _budget_markers(markers, plot, axis=0, cap=150) -> dict:
+    """The marker set a panel may MATERIALIZE: windowed to the visible time range
+    (axis 0 = charts' X, 1 = waterfalls' Y) and capped at the `cap` most RECENT —
+    every line/region (and its label TextItem) is a scene item repainted on every
+    frame (bench: ~0.55-1.2 ms each; an uncapped lived-in catalog cost ~0.2-0.8 s
+    PER REPAINT). Off-window/over-budget tags reappear on zoom-in."""
+    current = {m.id: m for m in markers}
+    try:
+        vb = plot.getPlotItem().vb if hasattr(plot, "getPlotItem") else plot.getViewBox()
+        lo, hi = vb.viewRange()[axis]
+    except Exception:                                # noqa: BLE001 — no view yet
+        lo = hi = None
+    if hi is not None and hi > lo:
+        pad = 0.05 * (hi - lo)
+        wlo, whi = lo - pad, hi + pad
+        windowed = {mid: m for mid, m in current.items()
+                    if m.t <= whi and (m.t_end if m.t_end is not None else m.t) >= wlo}
+        # A view not yet framed on absolute time (fresh panel, Qt's default 0..1
+        # range) windows EVERYTHING away — fall back to cap-only rather than hide
+        # every marker until the first zoom/window arrives.
+        if windowed or not current:
+            current = windowed
+    if len(current) > cap:
+        current = dict(sorted(current.items(), key=lambda kv: kv[1].t)[-cap:])
+    return current
+
+
 class Panel(Widget):
     """Base class for a BUILT-IN display panel = the public `Widget` contract plus
     any ferroDAC-internal conveniences. Built-ins subclass this; third-party widget
@@ -329,6 +356,17 @@ class ChartPanel(Panel):
         self._marker_win_timer.timeout.connect(self._sync_markers)
         self._pi.vb.sigXRangeChanged.connect(
             lambda *_a: self._marker_win_timer.start())
+        # Live curve redraws are THROTTLED (leading + trailing edge, ~10 Hz): every
+        # 50 ms drain used to setData the FULL buffer per touched curve — log remap +
+        # isfinite + peak downsample over up to 120k points per curve per tick
+        # (~108 ms/tick across 4 field charts, bench-measured). Appends stay at drain
+        # rate (cheap); only the setData/redraw coalesces.
+        self._dirty_curves: set = set()
+        self._last_curve_flush = 0.0
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(100)
+        self._flush_timer.timeout.connect(self._flush_dirty_curves)
         # Zoom re-resolves detail (DESIGN §7.4, "Fix B"): a manual pan/zoom on a PARKED
         # chart re-queries the visible sub-window at pixel resolution, so zooming in returns
         # real store detail instead of magnifying the full-window envelope. Uses
@@ -414,27 +452,9 @@ class ChartPanel(Panel):
     def _sync_markers(self):
         if self.markers is None:
             return
-        current = {m.id: m for m in self.markers.visible()}   # active project lens
-        # Materialize ONLY markers inside (or near) the visible window: every line/
-        # region is a scene item painted on EVERY frame, and a lived-in catalog has
-        # hundreds of tags — drawing them all made each chart repaint cost ~0.8 s
-        # (watchdog-measured). Pan/zoom re-syncs via _marker_win_timer, so off-
-        # screen tags appear the moment they scroll into view.
-        try:
-            (vx0, vx1), _ = self._pi.vb.viewRange()
-        except Exception:                        # noqa: BLE001 — no view yet
-            vx0 = vx1 = None
-        if vx1 is not None and vx1 > vx0:
-            pad = 0.05 * (vx1 - vx0)
-            lo, hi = vx0 - pad, vx1 + pad
-            current = {mid: m for mid, m in current.items()
-                       if m.t <= hi and (m.t_end if m.t_end is not None else m.t) >= lo}
-        # A whole-session GROW view contains the entire catalog, so the window filter
-        # alone degenerates — cap the materialized items, keeping the most RECENT
-        # (the ones a live operator is acting on; older ones reappear on zoom-in).
-        if len(current) > 150:
-            keep = sorted(current.items(), key=lambda kv: kv[1].t)[-150:]
-            current = dict(keep)
+        # window + cap the materialized items (shared _budget_markers policy — see
+        # its docstring; pan/zoom re-syncs via _marker_win_timer)
+        current = _budget_markers(self.markers.visible(), self.plot, axis=0)
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid)[0])
@@ -853,7 +873,20 @@ class ChartPanel(Panel):
                 tlo = np.asarray(tlo, dtype="f8")[keep]
                 thi = np.asarray(thi, dtype="f8")[keep]
             buf.append(tx, ty, (tlo, thi))
-            self._set_curve_data(key)
+            self._dirty_curves.add(key)
+        if self._dirty_curves:
+            now = time.monotonic()
+            if now - self._last_curve_flush >= 0.1:  # leading edge: a quiet-period
+                self._flush_dirty_curves()           # feed draws immediately
+            elif not self._flush_timer.isActive():   # sustained feed → trailing edge
+                self._flush_timer.start()
+
+    def _flush_dirty_curves(self):
+        self._last_curve_flush = time.monotonic()
+        for key in self._dirty_curves:
+            if key in self._buf:                     # not removed while pending
+                self._set_curve_data(key)
+        self._dirty_curves.clear()
 
     def curve_keys(self):
         """The source keys this chart draws (routed curves) — the app queries each
@@ -1338,13 +1371,36 @@ class WaterfallPanel(Panel):
         win = (float(t0), float(t1))
         if win != self._win:
             self._win = win
-            self._render()                # grow/scrub → Y follows the timeline window
+            self._schedule_render()       # grow/scrub → Y follows the timeline window
 
     def zoom_time(self, t0, t1):
         self.plot.setYRange(t0, t1, padding=0.05)     # time is the Y axis here (m/z is X)
 
     def trim_to(self, x_min):
         self._scans = [(t, y) for (t, y) in self._scans if t >= x_min]
+
+    def _schedule_render(self):
+        """Coalesced render (leading + trailing edge, ≥500 ms apart): _render is
+        O(ALL accumulated scans) — a full re-bin + image rebuild (~65 ms at 8000
+        scans, bench) — and it used to run per arriving scan AND per 500 ms window
+        tick AND per playback frame. One render per interval shows the same rows."""
+        t = getattr(self, "_render_timer", None)
+        if t is None:
+            import time as _time
+            t = self._render_timer = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(500)
+            t.timeout.connect(self._do_render)
+            self._last_render = 0.0
+            self._time_mod = _time
+        if self._time_mod.monotonic() - self._last_render >= 0.5:
+            self._do_render()
+        elif not t.isActive():
+            t.start()
+
+    def _do_render(self):
+        self._last_render = self._time_mod.monotonic()
+        self._render()
 
     def feed(self, batch):
         # EVERY complete scan in the batch (a replay batch carries many) — not
@@ -1357,13 +1413,16 @@ class WaterfallPanel(Panel):
             self._scans.append(
                 (float(r.t), np.log10(np.clip(tr.y, 1e-12, None)).astype(np.float32)))
             self._x0, self._x1 = float(tr.x[0]), float(tr.x[-1])
-            self.plot.setLabel("bottom", _axis_text(tr.x_label, tr.x_unit))
+            lbl = _axis_text(tr.x_label, tr.x_unit)
+            if getattr(self, "_xlabel", None) != lbl:    # setLabel relayouts the axis
+                self._xlabel = lbl
+                self.plot.setLabel("bottom", lbl)
             added = True
         if not added:
             return
         if len(self._scans) > 8000:                  # bound memory on long sessions
             self._scans = self._scans[-8000:]
-        self._render()
+        self._schedule_render()
 
     def _render(self):
         if not self._scans:
@@ -1399,7 +1458,7 @@ class WaterfallPanel(Panel):
         axis — so a recording span or a tag shows where it sits in the scans."""
         if self.markers is None:
             return
-        current = {m.id: m for m in self.markers.visible()}   # active project lens
+        current = _budget_markers(self.markers.visible(), self.plot, axis=1)
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid))
@@ -1616,7 +1675,7 @@ class SpectrumWaterfallPanel(Panel):
         win = (float(t0), float(t1))
         if win != self._win:
             self._win = win
-            self._render_wf()
+            self._schedule_render_wf()
 
     def zoom_time(self, t0, t1):
         # time is the waterfall's Y axis; X (m/z) is shared/linked with the spectrum
@@ -1625,6 +1684,27 @@ class SpectrumWaterfallPanel(Panel):
 
     def trim_to(self, x_min):
         self._scans = [(t, y) for (t, y) in self._scans if t >= x_min]
+
+    def _schedule_render_wf(self):
+        """Coalesced waterfall render — same leading+trailing ≥500 ms throttle as
+        WaterfallPanel._schedule_render (O(all scans) re-bin per call)."""
+        t = getattr(self, "_render_timer", None)
+        if t is None:
+            import time as _time
+            t = self._render_timer = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(500)
+            t.timeout.connect(self._do_render_wf)
+            self._last_render = 0.0
+            self._time_mod = _time
+        if self._time_mod.monotonic() - self._last_render >= 0.5:
+            self._do_render_wf()
+        elif not t.isActive():
+            t.start()
+
+    def _do_render_wf(self):
+        self._last_render = self._time_mod.monotonic()
+        self._render_wf()
 
     def feed(self, batch):
         show = None
@@ -1639,8 +1719,12 @@ class SpectrumWaterfallPanel(Panel):
         # spectrum — current run (bright), log-safe
         y = np.where(show.y > 0, show.y, np.nan)
         self._curves[self._src_key].setData(show.x, y, connect="finite")
-        self.p_spec.setLabel("left", _axis_text(show.y_label, show.y_unit))
-        self.p_wf.setLabel("bottom", _axis_text(show.x_label, show.x_unit))
+        lbls = (_axis_text(show.y_label, show.y_unit),
+                _axis_text(show.x_label, show.x_unit))
+        if getattr(self, "_axis_labels", None) != lbls:  # setLabel relayouts the axes
+            self._axis_labels = lbls
+            self.p_spec.setLabel("left", lbls[0])
+            self.p_wf.setLabel("bottom", lbls[1])
         lo = show.x_lo if show.x_lo is not None else float(show.x[0])
         hi = show.x_hi if show.x_hi is not None else float(show.x[-1])
         if hi > lo and self._xr != (lo, hi):
@@ -1659,7 +1743,7 @@ class SpectrumWaterfallPanel(Panel):
                 (t, np.log10(np.clip(cscan.y, 1e-12, None)).astype(np.float32)))
         if len(self._scans) > 8000:
             self._scans = self._scans[-8000:]
-        self._render_wf()
+        self._schedule_render_wf()
 
     def _render_wf(self):
         if not self._scans:
@@ -1692,7 +1776,7 @@ class SpectrumWaterfallPanel(Panel):
         (Y) axis of the waterfall."""
         if self.markers is None:
             return
-        current = {m.id: m for m in self.markers.visible()}   # active project lens
+        current = _budget_markers(self.markers.visible(), self.p_wf, axis=1)
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.p_wf.removeItem(self._marker_lines.pop(mid))

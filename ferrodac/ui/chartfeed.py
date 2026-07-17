@@ -244,11 +244,14 @@ class ChartFeed:
         re-resolves. The re-stream still runs for PROCESSORS; derived / trace /
         not-yet-recorded curves stay on the feed path.
 
-        SYNCHRONOUS by §22: runs from on_reset (before the re-stream), so the chart
-        updates immediately on a select. Reads LOCAL tiers only so this GUI-thread
-        redraw can never block on the hub's networked query (the window-change
-        freeze). Hub-only history is served by prefetching it into the local store
-        first (the agreed §12.1 direction) — the display layer stays local+sync."""
+        ASYNC via ReadService (§21.4): ownership flips synchronously (the feed gate
+        must be correct immediately) but the queries ride the read pool and each
+        envelope lands when ready — the old synchronous loop claimed it 'stays
+        local+sync so it can never block on the hub', yet the field watchdog caught
+        it blocking the GUI 3.5 s MEDIAN × 67 events (big dirty epochs + store-lock
+        contention during prefetch backfill; the local store is not free either).
+        Delivery is guarded by ownership and superseded per (panel, key) — the same
+        key the zoom re-query uses, so the newest request wins."""
         resolver, replay = self._resolver(), self._replay()
         if resolver is None or replay is None:
             return
@@ -265,13 +268,28 @@ class ChartFeed:
                 panel.set_query_owned(keys if owned else ())
                 mp = max(400, int(panel.plot.width()) * 2)
                 for key in keys:
-                    try:
-                        x, y = resolver.query(key, t0, t1, mp, local_only=True)
-                        panel.set_window_curve(key, x, y)
-                    except Exception:                # noqa: BLE001 — one bad curve ≠ blank chart
-                        log.debug("window query failed for %s", key, exc_info=True)
+                    self._query_window_curve(panel, key, t0, t1, mp, owned)
             except Exception:                        # noqa: BLE001 — never break a park
                 log.debug("parked window draw failed", exc_info=True)
+
+    def _query_window_curve(self, panel, key, t0, t1, mp, owned) -> None:
+        reads = self._reads()
+        if reads is None:                            # headless/tests: synchronous
+            try:
+                x, y = self._resolver().query(key, t0, t1, mp, local_only=True)
+                panel.set_window_curve(key, x, y)
+            except Exception:                        # noqa: BLE001 — one bad curve ≠ blank chart
+                log.debug("window query failed for %s", key, exc_info=True)
+            return
+
+        def draw(res, panel=panel, key=key, owned=owned):
+            if owned and key not in getattr(panel, "_query_owned", ()):
+                return                               # re-parked / gone live since submit
+            try:
+                panel.set_window_curve(key, res[0], res[1])
+            except RuntimeError:                     # panel removed before delivery
+                pass
+        reads.query(key, t0, t1, mp, key=("chart-win", id(panel), key), on_result=draw)
 
     # -- zoom re-query (Fix B) ---------------------------------------------------
     def on_chart_zoom(self, panel, t0, t1) -> None:

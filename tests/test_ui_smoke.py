@@ -108,6 +108,8 @@ def test_waterfall_time_axis_window(qapp):
     p.clear_history()
     p.set_window(t0, t0 + 3600)                     # Y range = the timeline window
     p.feed([_scan(t0 + i * 120, x) for i in range(30)])   # sparse → real gaps
+    p._do_render()                                  # renders are throttled (~2 Hz) —
+    #                                                 flush the pending one directly
     # the image is PLACED over the window in time (deterministic, no layout needed)
     rect: QRectF = p.img.mapRectToView(p.img.boundingRect())
     lo, hi = sorted((rect.top(), rect.bottom()))
