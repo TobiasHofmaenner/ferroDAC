@@ -49,7 +49,11 @@ from ..analysis.library import DEFAULT_GASES, LIBRARY
 from ._common import color_for, fmt
 from .widget import WIDGET_TYPES, Widget
 
-pg.setConfigOptions(antialias=True, background="#11151c", foreground="#c7d0db")
+# antialias=False (pyqtgraph's own default): curve AA is SOFTWARE rasterization on
+# the GUI thread — measured 15-40× per paint (184 ms vs 9 ms @100k pts; the field's
+# 0.8-2 s repaint stalls with 4-8 grow-mode curves). The peak-downsample envelope's
+# zigzag masks the visual difference; text/axis rendering stays font-antialiased.
+pg.setConfigOptions(antialias=False, background="#11151c", foreground="#c7d0db")
 
 
 class Panel(Widget):
@@ -252,6 +256,9 @@ class ChartPanel(Panel):
             axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})  # absolute time
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
+        # left too: auto-SI re-labels per autorange tick and can feed the axis-resize →
+        # relayout → view-width → re-downsample loop; moot on a log axis anyway.
+        self.plot.getAxis("left").enableAutoSIPrefix(False)
         self.plot.setLogMode(x=False, y=True)
         self._legend = self.plot.addLegend(offset=(-10, 10))
         item = self.plot.getPlotItem()
@@ -422,6 +429,12 @@ class ChartPanel(Panel):
             lo, hi = vx0 - pad, vx1 + pad
             current = {mid: m for mid, m in current.items()
                        if m.t <= hi and (m.t_end if m.t_end is not None else m.t) >= lo}
+        # A whole-session GROW view contains the entire catalog, so the window filter
+        # alone degenerates — cap the materialized items, keeping the most RECENT
+        # (the ones a live operator is acting on; older ones reappear on zoom-in).
+        if len(current) > 150:
+            keep = sorted(current.items(), key=lambda kv: kv[1].t)[-150:]
+            current = dict(keep)
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid)[0])
@@ -759,7 +772,15 @@ class ChartPanel(Panel):
         if self._dim is None and self._is_real_dim(unit):
             self._adopt_dimension(unit)               # first real dimension claims the axis
         name = getattr(source, "label", source.name)
-        curve = self.plot.plot([], [], pen=pg.mkPen(color_for(key), width=2), name=name)
+        # width=1: Qt's raster engine draws >1-width polylines as per-segment filled
+        # polygons (~2.6× a full redraw: 237→91 ms at 8×30k pts measured); width-1
+        # cosmetic pens take the fast span path. With AA off this is the difference
+        # between a watchdog stall and a ~90 ms worst-case full repaint.
+        curve = self.plot.plot([], [], pen=pg.mkPen(color_for(key), width=1), name=name)
+        # dynamicRangeLimit's cache gate forces a FULL clip+peak downsample re-run on
+        # every y-autorange move (i.e. every live tick) — pointless for log-mapped lab
+        # data (the Qt zoom bug it guards needs millions-fold magnification).
+        curve.setDynamicRangeLimit(None)
         self._curves[key] = curve
         self._buf[key] = CurveBuffer()
         self._unit_of[key] = unit
