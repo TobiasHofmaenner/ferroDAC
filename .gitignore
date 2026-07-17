@@ -22,3 +22,4 @@ dist/
 # secrets (hub Gitea token etc.)
 server/.env
 .env
+trace.log
