@@ -831,15 +831,16 @@ def test_ask_raises_prompt_through_ask_path(fake):
 
 
 def test_confirm_answer_writes_respond_index(fake):
-    """Answering a confirm writes 'RESPOND <fw_id> <index>' — True → the affirmative
-    option 0, False → option 1 (the answer→option-index mapping)."""
+    """Answering a confirm writes 'RESPOND <fw_id> <index>'. The firmware advertises a
+    confirm as opt0=OptionFalse (negative), opt1=OptionTrue (affirmative), so the
+    affirmative answer maps to index 1: True → 1, False → 0."""
     dev = _device(fake)
     prompts = _capture_prompts(dev)
-    fake.inject("?ASK,7,confirm,warn,0,2,Yes,No,Retract the arm?")
+    fake.inject("?ASK,7,confirm,warn,0,2,No,Yes,Retract the arm?")   # firmware order: opt0=No, opt1=Yes
     assert _spin(lambda: len(prompts) == 1)
     _p, on_response = prompts[0]
-    on_response(True)                                        # operator answers Yes
-    assert fake.responded == ["RESPOND 7 0"]                 # True → option index 0
+    on_response(True)                                        # operator answers Yes (the affirmative)
+    assert fake.responded == ["RESPOND 7 1"]                 # affirmative → option index 1
 
 
 def test_choice_answer_maps_to_option_index(fake):
