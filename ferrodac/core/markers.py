@@ -17,7 +17,7 @@ import time
 import uuid as _uuid
 
 from .. import _qtbinding  # noqa: F401  selects QT_API before qtpy import
-from qtpy.QtCore import QObject, Signal
+from qtpy.QtCore import QObject, QTimer, Signal
 
 # Re-export the Qt-free entity + constants so `from ..core.markers import …`
 # (Marker, RECORDING, ORIGIN_*, …) keeps resolving exactly as before.
@@ -58,6 +58,20 @@ class MarkerModel(QObject):
     changed = Signal()
     tag_changed = Signal(str)
     tag_removed = Signal(str)
+
+    def _notify(self) -> None:
+        """Coalesced ``changed``: one real emission per event-loop turn. The hub
+        sync upserts tags ONE AT A TIME, and every emission fanned out to a full
+        Events-dock rebuild + a marker re-sync on every chart — with a few hundred
+        tags in the catalog that was O(N²) widget/scene churn per sync burst
+        (watchdog-measured GUI stalls of 20-75 s on reconnect)."""
+        t = getattr(self, "_notify_timer", None)
+        if t is None:
+            t = self._notify_timer = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(0)
+            t.timeout.connect(self.changed.emit)
+        t.start()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,7 +124,7 @@ class MarkerModel(QObject):
             return
         m.deleted = True
         m.version += 1
-        self.changed.emit()
+        self._notify()
         self.tag_removed.emit(mid)
 
     def move(self, mid: str, t: float) -> None:
@@ -135,7 +149,7 @@ class MarkerModel(QObject):
         m = self._markers.get(mid)
         if m is not None:
             m.version += 1
-        self.changed.emit()
+        self._notify()
         self.tag_changed.emit(mid)
 
     # -- remote merge (hub-sync glue; LWW, no re-publish) --------------------
@@ -150,7 +164,7 @@ class MarkerModel(QObject):
                 and not cur.deleted:
             return False                         # idempotent same-version upsert
         self._markers[m.id] = m
-        self.changed.emit()
+        self._notify()
         return True
 
     def upsert_local(self, m: Marker) -> bool:
@@ -185,7 +199,7 @@ class MarkerModel(QObject):
         """Show only tags in these projects (+ unfiled). None = show everything.
         Changes what the views render; the catalog (all()/to_list) is untouched."""
         self._lens = set(project_ids) if project_ids is not None else None
-        self.changed.emit()
+        self._notify()
 
     @property
     def lens(self):
@@ -224,12 +238,12 @@ class MarkerModel(QObject):
             m = marker_from_dict(d)
             if m is not None:
                 self._markers[m.id] = m
-        self.changed.emit()
+        self._notify()
 
     def clear(self) -> None:
         if self._markers:
             self._markers.clear()
-            self.changed.emit()
+            self._notify()
 
 
 # §7.3 vocabulary alias — the canonical model name stays MarkerModel so existing

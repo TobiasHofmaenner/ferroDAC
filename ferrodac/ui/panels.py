@@ -313,6 +313,15 @@ class ChartPanel(Panel):
         # (Option B). The Dashboard wires on_x_range and guards re-entrancy.
         self.on_x_range = None                # callback(t0, t1) — set by the Dashboard
         self._pi.vb.sigXRangeChanged.connect(self._emit_x_range)
+        # Marker items are WINDOWED to the visible time range (see _sync_markers):
+        # a pan/zoom must re-sync which ones exist, throttled — a drag emits range
+        # changes per frame, and a full marker diff per frame defeats the point.
+        self._marker_win_timer = QTimer(self)
+        self._marker_win_timer.setSingleShot(True)
+        self._marker_win_timer.setInterval(150)
+        self._marker_win_timer.timeout.connect(self._sync_markers)
+        self._pi.vb.sigXRangeChanged.connect(
+            lambda *_a: self._marker_win_timer.start())
         # Zoom re-resolves detail (DESIGN §7.4, "Fix B"): a manual pan/zoom on a PARKED
         # chart re-queries the visible sub-window at pixel resolution, so zooming in returns
         # real store detail instead of magnifying the full-window envelope. Uses
@@ -399,6 +408,20 @@ class ChartPanel(Panel):
         if self.markers is None:
             return
         current = {m.id: m for m in self.markers.visible()}   # active project lens
+        # Materialize ONLY markers inside (or near) the visible window: every line/
+        # region is a scene item painted on EVERY frame, and a lived-in catalog has
+        # hundreds of tags — drawing them all made each chart repaint cost ~0.8 s
+        # (watchdog-measured). Pan/zoom re-syncs via _marker_win_timer, so off-
+        # screen tags appear the moment they scroll into view.
+        try:
+            (vx0, vx1), _ = self._pi.vb.viewRange()
+        except Exception:                        # noqa: BLE001 — no view yet
+            vx0 = vx1 = None
+        if vx1 is not None and vx1 > vx0:
+            pad = 0.05 * (vx1 - vx0)
+            lo, hi = vx0 - pad, vx1 + pad
+            current = {mid: m for mid, m in current.items()
+                       if m.t <= hi and (m.t_end if m.t_end is not None else m.t) >= lo}
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid)[0])
