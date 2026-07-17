@@ -492,9 +492,10 @@ class ChartPanel(Panel):
                 line.setValue(x)
                 line.blockSignals(False)
             try:
-                line.label.setFormat(m.label)
-            except Exception:
-                pass
+                if line.label.format != m.label:   # setFormat relayouts the label
+                    line.label.setFormat(m.label)  # TextItem even when unchanged —
+            except Exception:                      # per item, per re-sync (watchdog:
+                pass                               # 2.5 s across ~150 items × charts)
 
     def _sync_region(self, mid, m, entry):
         x0, x1 = self._x(m.t), self._x(m.t_end)
@@ -1198,7 +1199,8 @@ class SpectrumPanel(Panel):
                     line.setValue(mz)
                     line.blockSignals(False)
                 try:
-                    line.label.setFormat(label)
+                    if line.label.format != label:  # skip the no-op relayout
+                        line.label.setFormat(label)
                 except Exception:
                     pass
 
@@ -1858,7 +1860,8 @@ class SpectrumWaterfallPanel(Panel):
                     line.setValue(mz)
                     line.blockSignals(False)
                 try:
-                    line.label.setFormat(label)
+                    if line.label.format != label:  # skip the no-op relayout
+                        line.label.setFormat(label)
                 except Exception:
                     pass
 
