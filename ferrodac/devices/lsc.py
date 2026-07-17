@@ -980,12 +980,13 @@ class LSCDevice(BaseDevice):
 
     @staticmethod
     def _answer_to_index(answer, options, kind) -> int:
-        """The operator's answer → the 0-based firmware option INDEX RESPOND carries. A
-        confirm's first firmware option is the affirmative (True→0, False→1); a choice maps
-        by option string; acknowledge/text collapse to the single/first option. TOTAL — a
-        surprising answer maps to 0 rather than raising inside the on_response callback."""
+        """The operator's answer → the 0-based firmware option INDEX RESPOND carries. For a
+        confirm the firmware advertises opt0=OptionFalse (negative), opt1=OptionTrue (affirmative)
+        and decodes index!=0 as true, so the affirmative is index 1: True→1, False→0. A choice maps
+        by option string; acknowledge/text collapse to the single/first option. TOTAL — a surprising
+        answer maps to 0 rather than raising inside the on_response callback."""
         if kind == CONFIRM:
-            return 0 if answer else 1
+            return 1 if answer else 0
         if kind == CHOICE:
             if isinstance(answer, str) and answer in options:
                 return options.index(answer)
