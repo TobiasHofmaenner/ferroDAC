@@ -69,10 +69,20 @@ class ZarrStore:
         self.root = zarr.open_group(store=str(root), mode=mode)
         self._lock = threading.RLock()   # see _locked — cross-thread store access
         self._key_cache: dict = {}       # group name -> source key (immutable mapping)
-        self._cov_cache: dict = {}       # uuid -> coverage; invalidated on write (below).
-        #   coverage() re-splits the whole DIRTY tail array every call; that path is hit
-        #   per play tick (GUI partition) and hard by the prefetch worker, so without this
-        #   cache both hammer the store lock + zarr sync → GUI freezes (§21.2).
+        self._cov_cache: dict = {}       # uuid -> {"out": [...], "per": {ep: ivs},
+        #   "stale": set(ep)} — per-EPOCH coverage memo. An append marks only ITS epoch
+        #   stale (it used to nuke the whole memo, so every 2 s flush forced a full
+        #   re-read of every epoch on the next play tick / prefetch pass — store-lock
+        #   hammering, GUI freezes §21.2); coverage() re-splits just the stale epochs.
+        self._epoch_n: dict | None = None   # {(key, epoch): n} — maintained on append;
+        #   epoch_lengths() used to sweep EVERY source × epoch group ever created under
+        #   the lock (thousands of metadata reads on a lived-in store), and the sync
+        #   thread calls it every 5 s — the 1:1-correlated cause of the store-writer
+        #   backlog. Lazily built once, then O(1).
+        self._handles: dict = {}         # (gname, epoch) -> (eg, t_array, data_array)
+        #   append reopened the source group, epoch group and both arrays every flush
+        #   (~6 metadata reads, each a sync→async round-trip); the writer is the only
+        #   mutator, so cached handles stay coherent (readers open their own).
         # Stamp the version on a NEW (empty) store. An existing store with no stamp is
         # pre-versioning → reads back as 0 (legacy); we don't mislabel it as v1.
         if mode != "r" and "schema_version" not in self.root.attrs \
@@ -228,16 +238,30 @@ class ZarrStore:
     @_locked
     def epoch_lengths(self) -> dict:
         """{(source_key, epoch): n} — per-epoch sample counts. The hub reports
-        these as the sync truth; the agent uploads any epoch tail the hub lacks."""
-        out = {}
-        for n in self.root.group_keys():
-            if n == self._DEVICES:                       # not a source group
-                continue
-            g = self.root[n]
-            key = g.attrs.get("key", n)
-            for ep in g.attrs.get("epochs", []):
-                out[(key, ep)] = int(g[ep].attrs.get("n", 0))
-        return out
+        these as the sync truth; the agent uploads any epoch tail the hub lacks.
+
+        Served from an in-memory map maintained by append/append_trace. The old
+        implementation swept every source × epoch group ever created (one zarr
+        metadata read each) under the store lock — on a lived-in store that is
+        thousands of reads, and the sync thread calls this every 5 s: the writer
+        pump queued behind it, which was the metronomic store-writer backlog.
+        The sweep now runs ONCE per process (first call), then it's a dict copy."""
+        if self._epoch_n is None:
+            out = {}
+            for n in self.root.group_keys():
+                if n == self._DEVICES:                   # not a source group
+                    continue
+                g = self.root[n]
+                key = g.attrs.get("key", n)
+                for ep in g.attrs.get("epochs", []):
+                    out[(key, ep)] = int(g[ep].attrs.get("n", 0))
+            self._epoch_n = out
+        return dict(self._epoch_n)
+
+    def _note_epoch_n(self, uuid, epoch: str, n: int) -> None:
+        """Keep the epoch_lengths map current on write (call with the lock held)."""
+        if self._epoch_n is not None:
+            self._epoch_n[(str(uuid), epoch)] = int(n)
 
     @_locked
     def read_epoch(self, uuid, epoch, start, end) -> dict:
@@ -293,6 +317,13 @@ class ZarrStore:
                 if (t0 is None or et >= t0) and (t1 is None or et <= t1)]
 
     # -- write samples (chunk-wise append into the current/declared epoch) ---
+    def _mark_epoch_stale(self, uuid, epoch: str) -> None:
+        """An epoch grew/changed → invalidate ONLY its slice of the coverage memo
+        (call with the lock held). Everything else in the memo stays warm."""
+        c = self._cov_cache.get(uuid)
+        if c is not None:
+            c["stale"].add(epoch)
+
     @_locked
     def append(self, uuid, t, v, epoch: str = None) -> None:
         g = self._source(uuid)
@@ -300,72 +331,105 @@ class ZarrStore:
         v = np.asarray(v, dtype="f8").ravel()
         if len(t) == 0:
             return
-        self._cov_cache.pop(uuid, None)              # coverage grew → drop the memo
         epochs = list(g.attrs.get("epochs", []))
         key = epoch or (epochs[-1] if epochs else "e0")
         if key not in epochs:
             epochs.append(key)
             g.attrs["epochs"] = epochs
-        eg = g.require_group(key)
-        ta = eg["t"] if "t" in eg else eg.create_array(
-            "t", shape=(0,), chunks=(_CHUNK,), dtype="f8")
-        va = eg["v"] if "v" in eg else eg.create_array(
-            "v", shape=(0,), chunks=(_CHUNK,), dtype="f8")
+        self._mark_epoch_stale(uuid, key)            # coverage: this epoch only
+        hk = (self._gname(uuid), key)
+        h = self._handles.get(hk)
+        if h is None:
+            eg = g.require_group(key)
+            ta = eg["t"] if "t" in eg else eg.create_array(
+                "t", shape=(0,), chunks=(_CHUNK,), dtype="f8")
+            va = eg["v"] if "v" in eg else eg.create_array(
+                "v", shape=(0,), chunks=(_CHUNK,), dtype="f8")
+        else:
+            eg, ta, va = h
         n0 = ta.shape[0]
         ta.resize((n0 + len(t),)); ta[n0:] = t
         va.resize((n0 + len(v),)); va[n0:] = v
-        if n0 == 0:                          # first append: t0 from the new data —
-            eg.attrs["schema_version"] = self.SCHEMA_VERSION
-            eg.attrs["t0"] = float(t[0])     # avoids decompressing chunk 0 every
-        eg.attrs["t1"] = float(t[-1])        # flush just to re-read ta[0] (mech #2)
-        eg.attrs["n"] = int(n0 + len(t))
-        eg.attrs["dirty"] = True
+        n = int(n0 + len(t))
+        # ONE metadata write for all epoch attrs (each attrs assignment rewrites the
+        # whole epoch zarr.json — three separate rewrites per flush measured; t0 is
+        # stamped from the new data so chunk 0 is never re-read, mech #2).
+        upd = {"t1": float(t[-1]), "n": n, "dirty": True}
+        if n0 == 0:
+            upd["schema_version"] = self.SCHEMA_VERSION
+            upd["t0"] = float(t[0])
+        eg = eg.update_attributes(upd)               # returns the refreshed handle
+        self._handles[hk] = (eg, ta, va)
+        self._note_epoch_n(uuid, key, n)
 
-    @_locked
     def finalize_rollups(self, uuid, epoch: str = None) -> None:
         """(Re)build the min/max pyramid for an epoch (call on flush/close).
 
-        This is an O(epoch) rebuild from raw. Since DESIGN §21 it runs on the
-        store-writer's WORKER thread, never the GUI — so the audit's recurring
-        multi-second GUI stalls are gone; the residual is background CPU (tens of
-        seconds total over a week-long run), not a freeze. A truly incremental
-        pyramid is a future optimisation, deliberately deferred (the freeze it
-        would remove no longer exists)."""
-        g = self._source(uuid)
-        self._cov_cache.pop(uuid, None)              # dirty→clean may re-split → drop memo
-        gap_k = float(g.attrs.get("gap_k", _GAP_K))
-        keys = [epoch] if epoch else list(g.attrs.get("epochs", []))
+        An O(epoch) rebuild from raw, run on the rollup worker (never the GUI, never
+        the store-writer pump). The store lock is held only around the SNAPSHOT and
+        the WRITE-BACK — the downsample itself runs unlocked, so the writer pump and
+        readers no longer queue for the whole rebuild (the old whole-method lock held
+        for hundreds of ms→seconds as the session epoch grew was a main source of
+        both the store-writer backlog and multi-second GUI stalls). Data appended
+        between snapshot and write-back simply leaves the epoch dirty (honest flag),
+        exactly as an append right after a finalize would."""
+        with self._lock:
+            g = self._source(uuid)
+            gap_k = float(g.attrs.get("gap_k", _GAP_K))
+            keys = [epoch] if epoch else list(g.attrs.get("epochs", []))
         for key in keys:
-            eg = g[key]
-            if eg.attrs.get("modality") == "trace" or "v" not in eg:
-                continue                         # trace epoch (stores 'y', not 'v') → scalar
-            #                                      rollups/gap-split don't apply; never KeyError
-            t = np.asarray(eg["t"][:]); v = np.asarray(eg["v"][:])
+            with self._lock:                     # snapshot this epoch's raw
+                eg = g[key]
+                if eg.attrs.get("modality") == "trace" or "v" not in eg:
+                    continue                     # trace epoch (stores 'y', not 'v') → scalar
+                #                                  rollups/gap-split don't apply; never KeyError
+                t = np.asarray(eg["t"][:]); v = np.asarray(eg["v"][:])
             if len(t) == 0:
                 continue
             lvl, ct, cmn, cmx = 0, t, v.copy(), v.copy()
+            tiers = []                           # computed UNLOCKED — the O(epoch) part
             while len(cmn) > _TOP:
                 lvl += 1
                 ct, cmn, cmx = _downsample(ct, cmn, cmx, _F)
-                self._put(eg, f"r{lvl}_t", ct)
-                self._put(eg, f"r{lvl}_min", cmn)
-                self._put(eg, f"r{lvl}_max", cmx)
-            eg.attrs["levels"] = lvl
-            # contiguous-recording intervals, computed here (worker thread, already an
-            # O(epoch) pass) and cached on the epoch so coverage() stays a cheap attr read
-            eg.attrs["intervals"] = [[s, e] for s, e in _split_intervals(t, gap_k)]
-            eg.attrs["rolled_n"] = int(len(t))   # pyramid watermark: raw samples rolled —
-            #                                      _query_epoch tops up the dirty tail past
-            #                                      it from raw (coverage() is dirty-aware;
-            #                                      query() must be too)
-            eg.attrs["dirty"] = False
+                tiers += [(f"r{lvl}_t", ct), (f"r{lvl}_min", cmn), (f"r{lvl}_max", cmx)]
+            # contiguous-recording intervals, computed here (already an O(epoch) pass)
+            # and cached on the epoch so coverage() stays a cheap attr read
+            ivs = [[s, e] for s, e in _split_intervals(t, gap_k)]
+            with self._lock:                     # write-back
+                for name, arr in tiers:
+                    self._put(eg, name, arr)
+                # Attribute writes MUST go through the writer's cached handle when one
+                # exists: update_attributes merges into the handle's IN-MEMORY attrs
+                # and rewrites the whole doc, so writing through a stale handle
+                # silently drops keys another handle wrote (appends during the
+                # unlocked compute updated t1/n via the cached one).
+                hk = (self._gname(uuid), key)
+                h = self._handles.get(hk)
+                eg_w = h[0] if h is not None else g[key]     # fresh open = current attrs
+                n_now = int(h[1].shape[0] if h is not None else eg_w["t"].shape[0])
+                eg_w = eg_w.update_attributes({
+                    "levels": lvl,
+                    "intervals": ivs,
+                    "rolled_n": int(len(t)),     # pyramid watermark: raw samples rolled —
+                    #                              _query_epoch tops up the dirty tail past
+                    #                              it from raw (coverage() is dirty-aware;
+                    #                              query() must be too)
+                    "dirty": n_now != len(t),    # appends during the unlocked compute
+                })                               # keep the epoch honestly dirty
+                if h is not None:
+                    self._handles[hk] = (eg_w, h[1], h[2])
+                self._mark_epoch_stale(uuid, key)    # intervals/dirty changed
 
     def _put(self, g, name, arr):
         if name in g:
             g[name].resize(arr.shape); g[name][:] = arr
         else:
-            g.create_array(name, shape=arr.shape,
-                           chunks=(max(1, len(arr)),), dtype=arr.dtype)
+            # Fixed chunk size — NOT len(arr): chunk size is frozen at creation, so
+            # sizing it to the first write froze early-session pyramids into hundreds
+            # of tiny chunks that every later rollup rewrote one file at a time
+            # (measured 2.5× the whole-rollup cost on a poisoned epoch). A small
+            # array in a 16k chunk is just one partial chunk file.
+            g.create_array(name, shape=arr.shape, chunks=(_CHUNK,), dtype=arr.dtype)
             g[name][:] = arr
 
     # -- read (the resolver tier protocol) -----------------------------------
@@ -386,51 +450,57 @@ class ZarrStore:
         rolling an epoch (the split is cached in ``intervals`` at finalize). A legacy
         epoch (finalized before gap-splitting existed) is migrated once, on demand.
 
-        MEMOISED per source (invalidated by append/append_trace/finalize): the dirty-
-        tail re-split below reads the whole ``t`` array, and this is called per play
-        tick on the GUI thread and repeatedly by the prefetch worker — recomputing it
-        every time hammered the store lock + zarr sync and froze play (§21.2)."""
-        cached = self._cov_cache.get(uuid)
-        if cached is not None:
-            return cached
-        cov = self._coverage_uncached(uuid)
-        self._cov_cache[uuid] = cov
-        return cov
-
-    def _coverage_uncached(self, uuid) -> list:
-        """The real computation (lock held via coverage()). Kept separate so the hot
-        cache-hit path never touches zarr."""
+        MEMOISED per source AND per epoch: an append marks only its own epoch stale,
+        so a refresh re-splits just the live epoch instead of re-reading every epoch
+        of the source (the old whole-source invalidation forced exactly that on every
+        2 s flush; this is called per play tick on the GUI thread and repeatedly by
+        the prefetch worker — recomputing it every time hammered the store lock +
+        zarr sync and froze play, §21.2)."""
+        c = self._cov_cache.get(uuid)
+        if c is not None and not c["stale"]:
+            return c["out"]
         try:
             g = self._source(uuid)
         except KeyError:                             # source not in this store yet
             return []
         gap_k = float(g.attrs.get("gap_k", _GAP_K))
-        out = []
+        per = c["per"] if c is not None else {}
+        stale = c["stale"] if c is not None else None
+        out: list = []
         for key in g.attrs.get("epochs", []):
-            eg = g[key]
-            a = eg.attrs
-            if not a.get("n", 0):
-                continue
-            # `intervals` is cached at finalize_rollups, but further append()s (dirty=True)
-            # since the last rollup are NOT in it — trusting a stale `intervals` would under-
-            # report the epoch and make resolver.read_raw DROP those on-disk samples from
-            # exports / the processor re-stream. So gate on `dirty` FIRST and re-split the live
-            # tail from its raw timestamps (bounded by the ~50k rollup interval). Splitting even
-            # while dirty (not just returning t0..t1) matters because a farther tier's union
-            # (_merge) would otherwise swallow a real gap in the recording tail — the live view
-            # would ramp across it until the next rollup (C2).
-            if a.get("dirty", True):
-                ivs = _split_intervals(np.asarray(eg["t"][:]), gap_k)
-            else:
-                ivs = a.get("intervals")
-                if ivs is None:                      # legacy finalized → migrate once
-                    ivs = _split_intervals(np.asarray(eg["t"][:]), gap_k)
-                    try:
-                        eg.attrs["intervals"] = [[s, e] for s, e in ivs]
-                    except Exception:                # read-only store → recompute next time
-                        pass
-            out.extend((float(s), float(e)) for s, e in ivs)
+            ivs = per.get(key)
+            if ivs is None or (stale is not None and key in stale):
+                ivs = self._epoch_intervals(g, key, gap_k)
+                per[key] = ivs
+            out.extend(ivs)
+        self._cov_cache[uuid] = {"out": out, "per": per, "stale": set()}
         return out
+
+    def _epoch_intervals(self, g, key, gap_k) -> list:
+        """One epoch's contiguous-recording intervals (lock held via coverage())."""
+        eg = g[key]
+        a = eg.attrs
+        if not a.get("n", 0):
+            return []
+        # `intervals` is cached at finalize_rollups, but further append()s (dirty=True)
+        # since the last rollup are NOT in it — trusting a stale `intervals` would under-
+        # report the epoch and make resolver.read_raw DROP those on-disk samples from
+        # exports / the processor re-stream. So gate on `dirty` FIRST and re-split the live
+        # tail from its raw timestamps (bounded by the ~50k rollup interval). Splitting even
+        # while dirty (not just returning t0..t1) matters because a farther tier's union
+        # (_merge) would otherwise swallow a real gap in the recording tail — the live view
+        # would ramp across it until the next rollup (C2).
+        if a.get("dirty", True):
+            ivs = _split_intervals(np.asarray(eg["t"][:]), gap_k)
+        else:
+            ivs = a.get("intervals")
+            if ivs is None:                          # legacy finalized → migrate once
+                ivs = _split_intervals(np.asarray(eg["t"][:]), gap_k)
+                try:
+                    eg.attrs["intervals"] = [[s, e] for s, e in ivs]
+                except Exception:                    # read-only store → recompute next time
+                    pass
+        return [(float(s), float(e)) for s, e in ivs]
 
     @_locked
     def read_raw(self, uuid, t0, t1, local_only: bool = False):
@@ -477,27 +547,42 @@ class ZarrStore:
         y = np.asarray(y, dtype="f8").ravel()
         if len(y) == 0:
             return
-        self._cov_cache.pop(uuid, None)              # coverage grew → drop the memo
         m = len(y)
         epochs = list(g.attrs.get("epochs", []))
         if epoch not in epochs:
             epochs.append(epoch)
             g.attrs["epochs"] = epochs
-        eg = g.require_group(epoch)
-        if "y" not in eg:                            # first scan: arrays + axis
-            eg.create_array("t", shape=(0,), chunks=(4096,), dtype="f8")
-            eg.create_array("y", shape=(0, m), chunks=(256, m), dtype="f8")
-            self._put(eg, "x", x)
-            eg.attrs["schema_version"] = self.SCHEMA_VERSION
-            eg.attrs["modality"] = "trace"
-            eg.attrs["m"] = int(m)
-        ta, ya = eg["t"], eg["y"]
+        self._mark_epoch_stale(uuid, epoch)          # coverage: this epoch only
+        hk = (self._gname(uuid), epoch)
+        h = self._handles.get(hk)
+        first = False
+        if h is None:
+            eg = g.require_group(epoch)
+            if "y" not in eg:                        # first scan: arrays + axis
+                first = True
+                eg.create_array("t", shape=(0,), chunks=(4096,), dtype="f8")
+                eg.create_array("y", shape=(0, m), chunks=(256, m), dtype="f8")
+                self._put(eg, "x", x)
+            ta, ya = eg["t"], eg["y"]
+        else:
+            eg, ta, ya = h
         if ya.shape[1] != m:                         # shape mismatch — should not happen
             return
         n0 = ta.shape[0]
         ta.resize((n0 + 1,)); ta[n0] = float(t)
         ya.resize((n0 + 1, m)); ya[n0] = y
-        eg.attrs["t0"] = float(ta[0]); eg.attrs["t1"] = float(t); eg.attrs["n"] = n0 + 1
+        # ONE metadata write per scan (was three, plus a chunk-0 decompress every
+        # scan just to re-read ta[0] for t0 — the scalar path's mech-#2 fix, now
+        # applied here too: t0 is stamped once, at the first scan).
+        upd = {"t1": float(t), "n": n0 + 1}
+        if first:
+            upd.update({"schema_version": self.SCHEMA_VERSION, "modality": "trace",
+                        "m": int(m), "t0": float(t)})
+        elif n0 == 0:                                # arrays existed but were empty
+            upd["t0"] = float(t)
+        eg = eg.update_attributes(upd)
+        self._handles[hk] = (eg, ta, ya)
+        self._note_epoch_n(uuid, epoch, n0 + 1)
 
     @_locked
     def read_raw_trace(self, uuid, t0, t1, local_only: bool = False) -> list:

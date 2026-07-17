@@ -51,6 +51,13 @@ class StoreWriter:
         # the per-reading hot path beyond a cheap append).
         self._buflock = threading.RLock()
         self._unsub = None
+        # Rollup rebuilds are O(epoch) and grow all session — they must never run on
+        # the pump thread (feed() can't drain during one → the store-writer backlog).
+        # A dedicated worker drains this queue; the pump only enqueues.
+        self._rollup_due: list = []
+        self._rollup_cv = threading.Condition()
+        self._rollup_stop = False
+        self._rollup_thread = None
         # one epoch per app session, so a restart leaves a real coverage gap (the
         # resolver breaks the line there) instead of bridging stop→resume.
         self._epoch = "s%d" % int(time.time())
@@ -100,6 +107,12 @@ class StoreWriter:
             else:                       # self-sufficient regardless of shutdown order
                 self._unsub()
             self._unsub = None
+        with self._rollup_cv:           # drain + retire the rollup worker
+            self._rollup_stop = True
+            self._rollup_cv.notify()
+        if self._rollup_thread is not None:
+            self._rollup_thread.join(timeout=10.0)
+            self._rollup_thread = None
         self.flush_all()                # caller thread; race-free (pump is joined,
         for key in list(self._known):   # ZarrStore serializes behind its RLock)
             self._rollup(key)           # final rollups for fast historic query
@@ -169,6 +182,29 @@ class StoreWriter:
         self._last_flush[key] = time.monotonic()
         self._since_rollup[key] = self._since_rollup.get(key, 0) + n
         if self._since_rollup[key] >= self._rollup_every:
+            self._since_rollup[key] = 0
+            self._queue_rollup(key)              # O(epoch) work → the rollup worker,
+            #                                      NEVER inline on the pump thread
+
+    def _queue_rollup(self, key) -> None:
+        if self._rollup_thread is None:
+            self._rollup_thread = threading.Thread(
+                target=self._rollup_loop, name="fd-rollup", daemon=True)
+            self._rollup_thread.start()
+        with self._rollup_cv:
+            if key not in self._rollup_due:
+                self._rollup_due.append(key)
+            self._rollup_cv.notify()
+
+    def _rollup_loop(self) -> None:
+        while True:
+            with self._rollup_cv:
+                while not self._rollup_due and not self._rollup_stop:
+                    self._rollup_cv.wait()
+                if self._rollup_due:
+                    key = self._rollup_due.pop(0)
+                else:                            # stopping and fully drained
+                    return
             self._rollup(key)
 
     def _rollup(self, key) -> None:
