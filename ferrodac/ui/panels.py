@@ -449,34 +449,47 @@ class ChartPanel(Panel):
         # origin-rebasing to drift between platforms / live↔replay).
         return t
 
+    _LABEL_BUDGET = 40   # markers that carry a TEXT label: each label is a TextItem
+    #                      whose anchor/geometry recomputes on EVERY view-transform
+    #                      change (watchdog: per-frame cost × 150 items during
+    #                      autorange churn). Lines are cheap; labels are budgeted to
+    #                      the most recent few — zooming in re-labels what's visible.
+
     def _sync_markers(self):
         if self.markers is None:
             return
         # window + cap the materialized items (shared _budget_markers policy — see
         # its docstring; pan/zoom re-syncs via _marker_win_timer)
         current = _budget_markers(self.markers.visible(), self.plot, axis=0)
+        labeled = set(sorted(current, key=lambda mid: current[mid].t)
+                      [-self._LABEL_BUDGET:])
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid)[0])
         for mid, m in current.items():
             want = "region" if (m.kind == RECORDING and m.t_end is not None) else "line"
             entry = self._marker_lines.get(mid)
-            if entry is not None and entry[1] != want:    # type changed (live→region)
+            wl = mid in labeled
+            if entry is not None and (
+                    entry[1] != want                      # type changed (live→region)
+                    or (want == "line"                    # label budget moved (an
+                        and (getattr(entry[0], "label", None)     # unlabeled line has
+                             is not None) != wl)):        # NO .label attribute)
                 self.plot.removeItem(entry[0])
                 self._marker_lines.pop(mid, None)
                 entry = None
             if want == "region":
                 self._sync_region(mid, m, entry)
             else:
-                self._sync_line(mid, m, entry)
+                self._sync_line(mid, m, entry, wl)
 
-    def _sync_line(self, mid, m, entry):
+    def _sync_line(self, mid, m, entry, want_label=True):
         x = self._x(m.t)
         if entry is None:
             line = pg.InfiniteLine(
                 pos=x, angle=90, movable=is_movable(m),
                 pen=pg.mkPen(m.color, width=1.2, style=Qt.DashLine),
-                label=m.label,
+                label=m.label if want_label else None,
                 labelOpts={"position": 0.92, "color": m.color,
                            "fill": (10, 14, 19, 180)})
             line.sigPositionChangeFinished.connect(

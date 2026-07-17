@@ -83,6 +83,8 @@ class ZarrStore:
         #   append reopened the source group, epoch group and both arrays every flush
         #   (~6 metadata reads, each a sync→async round-trip); the writer is the only
         #   mutator, so cached handles stay coherent (readers open their own).
+        self._dtype_cache: dict = {}     # source key -> dtype (immutable; lock-free
+        #                                  serve — see source_dtype)
         self._cidx: dict = {}            # (gname, epoch) -> [first t of each chunk] —
         #   the writer-side mirror of the epoch's "cidx" attr (see append): lets a
         #   windowed read bisect to the 1-2 chunks it needs instead of decompressing
@@ -118,6 +120,7 @@ class ZarrStore:
             g.attrs["name"], g.attrs["unit"], g.attrs["dtype"] = name, unit, dtype
             g.attrs["epochs"] = []
             g.attrs["config"] = []
+            self._dtype_cache[str(uuid)] = dtype     # immutable → lock-free serves
         return g
 
     def sources(self) -> list:
@@ -148,14 +151,25 @@ class ZarrStore:
             out.append(k)
         return out
 
-    @_locked
     def source_dtype(self, uuid) -> str:
         """The stored datatype tag of a source ("scalar" | "trace" | …) — lets
-        the replay path pick read_raw vs read_raw_trace. "scalar" if unknown."""
-        try:
-            return self._source(uuid).attrs.get("dtype", "scalar")
-        except KeyError:
-            return "scalar"
+        the replay path pick read_raw vs read_raw_trace. "scalar" if unknown.
+
+        MEMOISED and served WITHOUT the store lock once known (a source's dtype is
+        immutable): the display path calls this on the GUI thread per redraw, and
+        taking the RLock queued the GUI behind the read pool's long epoch reads —
+        watchdog: 7.7 s waiting for a one-word answer. Unknown sources are not
+        cached (they may be added later)."""
+        dt = self._dtype_cache.get(str(uuid))
+        if dt is not None:
+            return dt
+        with self._lock:
+            try:
+                dt = self._source(uuid).attrs.get("dtype", "scalar")
+            except KeyError:
+                return "scalar"                      # not stored yet → don't cache
+        self._dtype_cache[str(uuid)] = dt
+        return dt
 
     @_locked
     def source_meta(self, uuid):
