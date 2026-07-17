@@ -27,7 +27,7 @@ class HubAgent(ReconnectingClient):
 
     def __init__(self, addr: str, agent_id: str = "ferrodac", on_state=None,
                  on_frame_demand=None, on_command=None, on_configure=None,
-                 on_add_device=None, on_remove_device=None):
+                 on_add_device=None, on_remove_device=None, on_prompt_response=None):
         super().__init__(addr, on_state)       # thread / loop / stop / reconnect FSM
         self._agent_id = agent_id
         self._outq: "asyncio.Queue | None" = None
@@ -49,6 +49,10 @@ class HubAgent(ReconnectingClient):
         # remote device removal: (instance_id) -> (ok, detail). Retires a local active
         # device on request from another client (reverse of add). Off the agent loop.
         self._on_remove_device = on_remove_device
+        # interaction §7.3: a viewer answered one of THIS agent's prompts →
+        # (prompt_id, answer, by). The wirer resolves it in the local store (→ the
+        # driver's on_response → RESPOND to the device). first-responder-wins in the store.
+        self._on_prompt_response = on_prompt_response
         self.demanded_frames: set = set()      # {(uuid, source_id)} currently watched
 
     def _on_loop_created(self, loop) -> None:
@@ -157,6 +161,8 @@ class HubAgent(ReconnectingClient):
                     await self._handle_add_device(hub_msg.add_device)
                 elif which == "remove_device":
                     await self._handle_remove_device(hub_msg.remove_device)
+                elif which == "prompt_response":
+                    self._handle_prompt_response(hub_msg.prompt_response)
                 # welcome: nothing to do
         finally:
             self.demanded_frames.clear()       # a reconnect re-sends active demand
@@ -177,6 +183,35 @@ class HubAgent(ReconnectingClient):
                 ok, detail = False, str(exc)
         self._send(pb.AgentMessage(ack=pb.Ack(
             request_id=cmd.request_id, ok=bool(ok), detail=str(detail or ""))))
+
+    def _handle_prompt_response(self, pr) -> None:
+        """A viewer answered one of THIS agent's prompts (§7.3) → hand the answer to the
+        wirer, which resolves it in the local store (→ the driver's on_response → RESPOND to
+        the device). first-responder-wins is arbitrated there; an answer for a gone prompt
+        no-ops. Runs on the agent loop — the callback marshals to the GUI thread."""
+        if self._on_prompt_response is None:
+            return
+        which = pr.WhichOneof("value")
+        if which == "boolean":
+            answer = pr.boolean
+        elif which == "text":
+            answer = pr.text
+        else:
+            answer = True                          # trigger → acknowledge
+        try:
+            self._on_prompt_response(pr.id, answer, pr.by)
+        except Exception:                          # noqa: BLE001 — a bad callback ≠ break session
+            log.debug("prompt-response callback failed", exc_info=True)
+
+    # -- interaction prompts (§7.3): mirror opens/closes to the hub -----------
+    def publish_prompt(self, wire) -> None:
+        """Mirror an OPEN device prompt (a pb.WirePrompt) up to the hub so viewers see it."""
+        self._send(pb.AgentMessage(prompt=pb.PromptEvent(opened=wire)))
+
+    def close_prompt(self, prompt_id: str, answer_text: str = "", by: str = "") -> None:
+        """Mirror a prompt RESOLUTION up to the hub → every viewer withdraws it."""
+        self._send(pb.AgentMessage(prompt=pb.PromptEvent(closed=pb.PromptClosed(
+            id=str(prompt_id), answer_text=str(answer_text), by=str(by)))))
 
     @staticmethod
     def _command_value(cmd):
