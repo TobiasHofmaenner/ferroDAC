@@ -114,6 +114,12 @@ class Hub:
         self._tags_path = tags_path
         self._save_pending = False
         self._load_tags()
+        # Interaction prompts (§7.3): device requests relayed so a VIEWER can answer.
+        # NOT durable (unlike tags) — a prompt is a live, ephemeral request; on a
+        # restart the owning agent re-announces its open ones. id -> (WirePrompt, owner
+        # Ingest out-queue) so a viewer's RespondPrompt routes back to the owner.
+        self._prompts: dict = {}                     # id -> (WirePrompt, agent_outq)
+        self._prompt_watchers: set[asyncio.Queue] = set()
         # Projects (DESIGN §8.1): a SHARED EXPERIMENT INDEX — same reliable, LWW,
         # tombstoned model as tags (NOT a file store). But the hub stores each one
         # as a REAL project FOLDER (the same layout as a local project, written by
@@ -420,6 +426,69 @@ class Hub:
 
     def remove_tag_watcher(self, q: "asyncio.Queue") -> None:
         self._tag_watchers.discard(q)
+
+    # -- interaction prompts (§7.3): relay a device request to viewers ---------
+    def add_prompt_watcher(self, q: "asyncio.Queue") -> None:
+        self._prompt_watchers.add(q)
+
+    def remove_prompt_watcher(self, q: "asyncio.Queue") -> None:
+        self._prompt_watchers.discard(q)
+
+    def open_prompts(self) -> list:
+        """Every OPEN prompt (the WirePrompt), for a WatchPrompts snapshot."""
+        return [w for (w, _outq) in self._prompts.values()]
+
+    def _emit_prompt(self, event) -> None:
+        for q in list(self._prompt_watchers):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:              # a slow viewer drops — its reconnect snapshot heals
+                pass
+
+    def prompt_opened(self, wire, agent_outq) -> None:
+        """An owning agent raised a prompt → register it (with its owner route) + fan out to
+        every viewer's WatchPrompts. Idempotent by id — a re-announce (reconnect) is a no-op
+        beyond refreshing the owner route."""
+        self._prompts[wire.id] = (wire, agent_outq)
+        self._emit_prompt(pb.PromptEvent(opened=wire))
+
+    def prompt_closed(self, closed) -> bool:
+        """The owning agent says a prompt resolved (answered anywhere / device / timeout) → drop
+        it and fan out the close so every surface withdraws it. False if it was already gone."""
+        if self._prompts.pop(closed.id, None) is None:
+            return False
+        self._emit_prompt(pb.PromptEvent(closed=closed))
+        return True
+
+    def close_prompts_for(self, outq) -> None:
+        """An agent session ended → close its still-open prompts (viewers withdraw them; the
+        agent re-announces any that are really still open on reconnect)."""
+        victims = [pid for pid, (_w, o) in self._prompts.items() if o is outq]
+        for pid in victims:
+            self.prompt_closed(pb.PromptClosed(id=pid, by="agent disconnected"))
+
+    def respond_prompt(self, req) -> "pb.Ack":
+        """A viewer's answer → route it down the OWNING agent's Ingest channel
+        (HubMessage.prompt_response). Fire-and-forget: the agent resolves it locally
+        (first-responder-wins in its store) + publishes the {closed} that withdraws every
+        surface. ok=false if the prompt is already gone (answered by someone first)."""
+        entry = self._prompts.get(req.id)
+        if entry is None:
+            return pb.Ack(ok=False, detail="no such open prompt (already answered?)")
+        _wire, outq = entry
+        pr = pb.PromptResponse(id=req.id, by=req.by)
+        which = req.WhichOneof("value")
+        if which == "boolean":
+            pr.boolean = req.boolean
+        elif which == "text":
+            pr.text = req.text
+        elif which == "trigger":
+            pr.trigger = req.trigger
+        try:
+            outq.put_nowait(pb.HubMessage(prompt_response=pr))
+        except asyncio.QueueFull:
+            return pb.Ack(ok=False, detail="owning agent busy")
+        return pb.Ack(ok=True)
 
     def publish_tag(self, tag: pb.Tag) -> bool:
         """Merge a tag, last-write-wins on version. Returns True if it changed
