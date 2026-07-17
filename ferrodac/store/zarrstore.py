@@ -83,6 +83,10 @@ class ZarrStore:
         #   append reopened the source group, epoch group and both arrays every flush
         #   (~6 metadata reads, each a sync→async round-trip); the writer is the only
         #   mutator, so cached handles stay coherent (readers open their own).
+        self._cidx: dict = {}            # (gname, epoch) -> [first t of each chunk] —
+        #   the writer-side mirror of the epoch's "cidx" attr (see append): lets a
+        #   windowed read bisect to the 1-2 chunks it needs instead of decompressing
+        #   the WHOLE t array (O(epoch) per read; the play tick reads per 50 ms).
         # Stamp the version on a NEW (empty) store. An existing store with no stamp is
         # pre-versioning → reads back as 0 (legacy); we don't mislabel it as v1.
         if mode != "r" and "schema_version" not in self.root.attrs \
@@ -358,9 +362,24 @@ class ZarrStore:
         if n0 == 0:
             upd["schema_version"] = self.SCHEMA_VERSION
             upd["t0"] = float(t[0])
+        cidx = self._chunk_index(hk, eg)
+        grew = False
+        for b in range(-(-n0 // _CHUNK) * _CHUNK, n, _CHUNK):
+            cidx.append(float(t[b - n0]))            # first timestamp of a new chunk
+            grew = True
+        if grew:
+            upd["cidx"] = list(cidx)                 # rides the SAME single doc write
         eg = eg.update_attributes(upd)               # returns the refreshed handle
         self._handles[hk] = (eg, ta, va)
         self._note_epoch_n(uuid, key, n)
+
+    def _chunk_index(self, hk, eg) -> list:
+        """The writer-side per-chunk first-timestamp index for an epoch (loaded from
+        the 'cidx' attr once, then kept in memory; call with the lock held)."""
+        cidx = self._cidx.get(hk)
+        if cidx is None:
+            cidx = self._cidx[hk] = list(eg.attrs.get("cidx", []))
+        return cidx
 
     def finalize_rollups(self, uuid, epoch: str = None) -> None:
         """(Re)build the min/max pyramid for an epoch (call on flush/close).
@@ -521,11 +540,15 @@ class ZarrStore:
                 continue
             if a["t1"] < t0 or a["t0"] > t1:
                 continue
-            t = np.asarray(eg["t"][:])
-            i0 = int(np.searchsorted(t, t0, side="left"))
-            i1 = int(np.searchsorted(t, t1, side="right"))
+            # bisect the per-chunk time index to the 1-2 chunks the window touches —
+            # reading the WHOLE t array was O(epoch) per read, and the play tick
+            # reads a small window every 50 ms. Legacy epochs (no cidx) full-read.
+            lo, hi = self._window_slice(a, _CHUNK, t0, t1)
+            t = np.asarray(eg["t"][lo:hi])
+            i0 = lo + int(np.searchsorted(t, t0, side="left"))
+            i1 = lo + int(np.searchsorted(t, t1, side="right"))
             if i1 > i0:
-                ts.append(t[i0:i1])
+                ts.append(t[i0 - lo:i1 - lo])
                 vs.append(np.asarray(eg["v"][i0:i1]))
         if not ts:
             return np.array([]), np.array([])
@@ -535,6 +558,20 @@ class ZarrStore:
             order = np.argsort(t, kind="stable")
             t, v = t[order], v[order]
         return t, v
+
+    @staticmethod
+    def _window_slice(a, chunk, t0, t1):
+        """[lo, hi) sample-index bounds of the chunks whose time range can overlap
+        [t0, t1], from the epoch's per-chunk first-timestamp index ('cidx' attr).
+        Falls back to the full array for legacy epochs written before the index."""
+        n = int(a.get("n", 0))
+        cidx = a.get("cidx")
+        if not cidx:
+            return 0, n
+        import bisect
+        k0 = max(0, bisect.bisect_right(cidx, t0) - 1)   # last chunk starting ≤ t0
+        k1 = bisect.bisect_right(cidx, t1)               # chunks starting ≤ t1
+        return k0 * chunk, min(n, k1 * chunk)
 
     # -- traces (2-D: a spectrum/scan per timestamp) -------------------------
     @_locked
@@ -580,6 +617,10 @@ class ZarrStore:
                         "m": int(m), "t0": float(t)})
         elif n0 == 0:                                # arrays existed but were empty
             upd["t0"] = float(t)
+        if n0 % 4096 == 0:                           # first scan of a new t-chunk →
+            cidx = self._chunk_index(hk, eg)         # extend the per-chunk time index
+            cidx.append(float(t))
+            upd["cidx"] = list(cidx)
         eg = eg.update_attributes(upd)
         self._handles[hk] = (eg, ta, ya)
         self._note_epoch_n(uuid, epoch, n0 + 1)
@@ -601,11 +642,12 @@ class ZarrStore:
                 continue
             if a["t1"] < t0 or a["t0"] > t1:
                 continue
-            t = np.asarray(eg["t"][:])
-            i0 = int(np.searchsorted(t, t0, side="left"))
-            i1 = int(np.searchsorted(t, t1, side="right"))
+            lo, hi = self._window_slice(a, 4096, t0, t1)   # see read_raw: bisect the
+            t = np.asarray(eg["t"][lo:hi])                 # per-chunk time index
+            i0 = lo + int(np.searchsorted(t, t0, side="left"))
+            i1 = lo + int(np.searchsorted(t, t1, side="right"))
             if i1 > i0:
-                out.append((t[i0:i1], np.asarray(eg["y"][i0:i1]),
+                out.append((t[i0 - lo:i1 - lo], np.asarray(eg["y"][i0:i1]),
                             np.asarray(eg["x"][:])))
         return out
 
@@ -676,11 +718,12 @@ class ZarrStore:
             shaved up to half a coarse bucket off each edge (the visible span
             shifted with every level switch)."""
             if L <= 0:
-                t = np.asarray(eg["t"][:])
-                j0 = int(np.searchsorted(t, a, side="left"))
-                j1 = int(np.searchsorted(t, b, side="right"))
+                lo, hi = self._window_slice(eg.attrs, _CHUNK, a, b)   # cidx bisect —
+                t = np.asarray(eg["t"][lo:hi])       # never the whole O(epoch) array
+                j0 = lo + int(np.searchsorted(t, a, side="left"))
+                j1 = lo + int(np.searchsorted(t, b, side="right"))
                 v = np.asarray(eg["v"][j0:j1])
-                return t[j0:j1], v, v
+                return t[j0 - lo:j1 - lo], v, v
             rt = np.asarray(eg[f"r{L}_t"][:])
             j0, j1 = np.searchsorted(rt, [a, b])
             j0 = max(0, int(j0) - 1)

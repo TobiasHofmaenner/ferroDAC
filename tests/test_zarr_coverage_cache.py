@@ -109,3 +109,41 @@ def test_append_after_finalize_preserves_rollup_attrs():
     assert g.attrs.get("rolled_n") == 60_000
     assert g.attrs.get("dirty") is True                  # the tail is honestly dirty
     assert g.attrs.get("n") == 60_100
+
+
+def test_windowed_read_uses_chunk_index_and_matches_full_read():
+    """read_raw/read_raw_trace/query bisect the per-chunk time index ('cidx') to the
+    chunks a window touches instead of decompressing the whole t array (O(epoch) per
+    read; the play tick reads a small window every 50 ms). The windowed result must
+    be IDENTICAL to a full-array searchsorted, across chunk boundaries."""
+    st = _store()
+    # 3.5 chunks of scalars (chunk = 16384) at 1 Hz
+    n = 16384 * 3 + 8000
+    t = BASE + np.arange(n, dtype="f8")
+    for i in range(0, n, 5000):                      # batch appends crossing boundaries
+        st.append("dev/a", t[i:i + 5000], np.sin(t[i:i + 5000]), epoch="e")
+    g = st.root["dev%2Fa"]["e"]
+    cidx = g.attrs.get("cidx")
+    assert cidx is not None and len(cidx) == 4       # one entry per chunk
+    assert cidx[0] == t[0] and cidx[1] == t[16384]
+
+    # windows: inside one chunk, spanning a boundary, spanning everything
+    for (a, b) in [(BASE + 100, BASE + 200),
+                   (BASE + 16380, BASE + 16390),
+                   (BASE - 10, BASE + n + 10)]:
+        rt, rv = st.read_raw("dev/a", a, b)
+        j0 = int(np.searchsorted(t, a, side="left"))
+        j1 = int(np.searchsorted(t, b, side="right"))
+        assert np.array_equal(rt, t[j0:j1]), (a, b)
+        assert np.array_equal(rv, np.sin(t[j0:j1])), (a, b)
+
+    # trace path: 2.5 chunks of scans (t chunk = 4096)
+    st.add_source("dev/tr", dtype="trace")
+    x = np.arange(8.0)
+    for i in range(4096 * 2 + 100):
+        st.append_trace("dev/tr", BASE + i, x, np.full(8, float(i)), epoch="tr")
+    blocks = st.read_raw_trace("dev/tr", BASE + 4090, BASE + 4100)
+    assert len(blocks) == 1
+    bt, by, bx = blocks[0]
+    assert list(bt) == [BASE + i for i in range(4090, 4101)]
+    assert by[0][0] == 4090.0 and by[-1][0] == 4100.0

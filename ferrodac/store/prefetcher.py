@@ -265,32 +265,36 @@ class PlaybackPrefetcher:
             return "scalar"
 
     # -- Phase 3: pin a window into the DURABLE store ------------------------
-    def pin(self, t0, t1, sources=None, epoch=None, on_done=None) -> bool:
+    def pin_sync(self, t0, t1, sources=None, epoch=None, progress=None,
+                 should_stop=None) -> int:
         """Promote the hub's data over [t0,t1] into the local Zarr store so it
-        survives a restart (the cache is RAM-only). Off-thread; `on_done(n)` is
-        delivered on the consumer thread with the source count written."""
+        survives a restart (the cache is RAM-only). SYNCHRONOUS on the caller's
+        thread — the app runs it as a TaskRunner task (§21.4: a finite,
+        user-triggered durable job gets progress/cancel/exit-gating; the old
+        fire-and-forget fd-pin daemon thread was killed MID-ZARR-WRITE at exit).
+        Returns the number of sources that gained data. ``progress(frac, detail)``
+        and ``should_stop()`` are optional cooperative hooks; a stop between
+        sources keeps every completed source durable."""
         if self.store is None or self.hub is None:
-            return False
+            return 0
         srcs = list(sources or self.sources_fn() or [])
         self._pin_seq += 1
         ep = epoch or f"pin-{int(t0)}-{self._pin_seq}"   # UNIQUE per pin: appends within
         #                                                  one epoch stay monotonic, and a
         #                                                  re-pin never tail-appends into an
         #                                                  older epoch's array (§7.4).
-
-        def work():
-            with self._pin_lock:                        # serialize: one durable writer
-                n = 0
-                for src in srcs:
-                    try:
-                        n += 1 if self._pin_source(src, float(t0), float(t1), ep) else 0
-                    except Exception:                   # noqa: BLE001
-                        log.debug("pin %s failed", src, exc_info=True)
-            if on_done is not None:
-                self._deliver(lambda: on_done(n))
-
-        threading.Thread(target=work, name="fd-pin", daemon=True).start()
-        return True
+        with self._pin_lock:                        # serialize: one durable writer
+            n = 0
+            for i, src in enumerate(srcs):
+                if should_stop is not None and should_stop():
+                    break                           # completed sources stay durable
+                if progress is not None:
+                    progress(i / max(1, len(srcs)), src)
+                try:
+                    n += 1 if self._pin_source(src, float(t0), float(t1), ep) else 0
+                except Exception:                   # noqa: BLE001
+                    log.debug("pin %s failed", src, exc_info=True)
+        return n
 
     def _pin_source(self, src, t0, t1, epoch) -> bool:
         store, dtype = self.store, self._dtype(src)

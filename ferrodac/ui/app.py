@@ -852,13 +852,28 @@ class MainWindow(QMainWindow):
 
     def _pin_window(self, t0, t1) -> None:
         """§12.1 Phase 3: promote the hub's data over [t0,t1] into the durable local
-        store, so it survives a restart (the prefetch cache is RAM-only)."""
+        store, so it survives a restart (the prefetch cache is RAM-only). Runs as a
+        TaskRunner task (§21.4): progress, cancel, and the exit-while-busy gate —
+        the old fire-and-forget thread was killed mid-zarr-write on exit."""
         if self._prefetcher is None:
             self.statusBar().showMessage("Pin needs a hub connection", 4000)
             return
-        self.statusBar().showMessage("📌 Pinning this window into the local store…", 0)
-        self._prefetcher.pin(t0, t1, on_done=lambda n: self.statusBar().showMessage(
-            f"📌 Pinned {n} source(s) to the local store", 6000))
+        pf = self._prefetcher
+
+        def work(ctx):
+            return pf.pin_sync(t0, t1, progress=ctx.progress,
+                               should_stop=lambda: ctx.cancelled)
+
+        self._tasks.run(
+            work, title="Pinning window to local store", cancellable=True,
+            why=f"Promoting the hub's data over this window into the durable store "
+                f"({time.strftime('%H:%M', time.localtime(t0))}–"
+                f"{time.strftime('%H:%M', time.localtime(t1))})",
+            exclusive="pin-window", on_busy="reject",
+            on_done=lambda n: self.statusBar().showMessage(
+                f"📌 Pinned {n} source(s) to the local store", 6000),
+            on_error=lambda m: self.statusBar().showMessage(
+                f"Pin failed: {m}", 8000))
 
     def _on_prefetch_filled(self) -> None:
         """A prefetched range landed (GUI thread) → re-read the now-fuller LOCAL tiers.
