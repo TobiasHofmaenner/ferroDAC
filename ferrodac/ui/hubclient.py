@@ -616,8 +616,23 @@ class HubController(QObject):
 
     def _advertise_devices(self) -> None:
         """Publish our devices to the hub: ACTIVE always, plus AVAILABLE ones when
-        sharing is on (opt-out, default on). One call carries the whole picture."""
+        sharing is on (opt-out, default on). One call carries the whole picture.
+        Coalesced to one push per event-loop turn — a session restore emits
+        active_changed ~3× per device, which used to mean ~15 redundant full-catalog
+        pushes to the hub during one project load."""
         if self._agent is None:
+            return
+        t = getattr(self, "_advertise_timer", None)
+        if t is None:
+            from qtpy.QtCore import QTimer
+            t = self._advertise_timer = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(0)
+            t.timeout.connect(self._advertise_now)
+        t.start()
+
+    def _advertise_now(self) -> None:
+        if self._agent is None:                # disconnected while the push was pending
             return
         avail = self.manager.available_descriptors() if self._share_devices else []
         self._agent.set_devices(self.manager.active_descriptors(), available=avail)

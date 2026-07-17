@@ -2056,15 +2056,20 @@ class MainWindow(QMainWindow):
         dlg.show()
         return dlg
 
-    def _maybe_prompt_device_meta(self) -> None:
+    def _maybe_prompt_device_meta(self, instance_id: str = "") -> None:
         """Gentle, skippable nudge to describe a NEWLY added device — once per device
-        (remembered across sessions), never if it's already described. Gated by
-        ``_meta_prompt_on`` so it only fires in the live app (set in main())."""
+        (remembered across sessions), never if it's already described. Wired to
+        ``device_added`` (an EXPLICIT user add) — never to active_changed: that fired
+        on every session restore / reconnect / config apply, and each pass could pop a
+        DeviceMetaDialog per not-yet-described device (the project-load popup spam).
+        Gated by ``_meta_prompt_on`` so it only fires in the live app (set in main())."""
         if not getattr(self, "_meta_prompt_on", False):
             return
         from ..core.devicemeta import device_key
         self._ensure_prompted_loaded()
         for d in self.manager.active_descriptors():
+            if instance_id and d.instance_id != instance_id:
+                continue                                  # only the just-added device
             key = device_key(d)
             if not key or key in self._prompted_meta:
                 continue
@@ -3515,6 +3520,9 @@ def main(argv=None) -> int:
     #                                        prevents the zarr_io cross-thread-GC segfault
     _watchdog = install_gui_watchdog()     # log any GUI stall >0.5 s with its stack —
     #                                        keep freezes observable (DESIGN §21.2)
+    if os.environ.get("FERRODAC_UI_TRACE"):
+        from ..diagnostics import install_ui_trace
+        install_ui_trace()                 # log every top-level window Show/Hide
     app.setApplicationName("ferroDAC")
     icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                              "assets", "app.png")
@@ -3547,6 +3555,9 @@ def main(argv=None) -> int:
     win = MainWindow(manager, engine, extensions=ext_mgr)
     win.show()
     win._meta_prompt_on = True              # gently nudge for notes on newly-added devices
-    manager.active_changed.connect(win._maybe_prompt_device_meta)
+    # device_added = an EXPLICIT user add only. active_changed (the old wiring) also
+    # fires on every restore/reconnect/config-apply — each pass popped a meta dialog
+    # per undescribed device, i.e. the project-load popup spam.
+    manager.device_added.connect(win._maybe_prompt_device_meta)
     win.maybe_autoconnect()                # reconnect to the last hub if we were linked
     return app.exec()

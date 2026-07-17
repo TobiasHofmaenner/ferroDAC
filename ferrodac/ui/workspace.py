@@ -262,6 +262,25 @@ class Dashboard(QObject):
         self._panels: dict = {}                 # panel_id -> Panel
         self.clock = SessionClock()             # one shared time origin
         self.markers = MarkerModel(self)        # tags + record bookmarks
+        # ports_changed is COALESCED: every mutation calls _emit_ports(), and the
+        # signal fires once per event-loop turn (0 ms singleShot) — a project load
+        # used to emit ~25× (per panel, per route, per device resolve), and each
+        # emission tore down + rebuilt the Sources/Sinks docks (~50 full widget-tree
+        # rebuilds per load; the dominant load cost, worst on Windows). Bulk ops
+        # (import_layout/clear_layout) additionally freeze emission entirely and
+        # flush once at the end.
+        self._ports_timer = QTimer(self)
+        self._ports_timer.setSingleShot(True)
+        self._ports_timer.setInterval(0)
+        self._ports_timer.timeout.connect(self.ports_changed.emit)
+        self._ports_freeze = 0                  # >0 = bulk op in flight
+        self._ports_dirty = False               # a frozen emission is pending
+        # active_changed bursts (a restore emits ~3× per device) coalesce the same
+        # way before the full port rebuild.
+        self._devports_timer = QTimer(self)
+        self._devports_timer.setSingleShot(True)
+        self._devports_timer.setInterval(0)
+        self._devports_timer.timeout.connect(self._rebuild_device_ports)
         self._source_lens = None                # active project's channel selection
         #                                         (a filter for the Sources view; None=all)
         self._sources: dict[str, SourcePort] = {}
@@ -303,8 +322,37 @@ class Dashboard(QObject):
         if self.data_bus is not self.engine:
             self.data_bus.subscribe(self._on_data_batch)
         engine.subscribe(self._on_control_batch)       # control: always live
-        manager.active_changed.connect(self._rebuild_device_ports)
+        manager.active_changed.connect(self._schedule_device_ports_rebuild)
         self._rebuild_device_ports()
+
+    # -- coalesced change notification ---------------------------------------
+    def _emit_ports(self) -> None:
+        """Request a ports_changed. Coalesced to one real emission per event-loop
+        turn; suppressed (→ flushed once) inside a freeze_ports() bulk op."""
+        if self._ports_freeze:
+            self._ports_dirty = True
+        else:
+            self._ports_timer.start()
+
+    def freeze_ports(self):
+        """Context manager: suppress ports_changed for a bulk mutation (a layout
+        import / clear), emitting once on exit if anything changed."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _freeze():
+            self._ports_freeze += 1
+            try:
+                yield
+            finally:
+                self._ports_freeze -= 1
+                if not self._ports_freeze and self._ports_dirty:
+                    self._ports_dirty = False
+                    self._ports_timer.start()
+        return _freeze()
+
+    def _schedule_device_ports_rebuild(self) -> None:
+        self._devports_timer.start()
 
     # -- introspection (replay / distribution read these) --------------------
     def source_keys(self) -> list:
@@ -430,7 +478,7 @@ class Dashboard(QObject):
 
         dock = self.area.add_panel(panel, panel.title)
         dock.closed.connect(lambda _p, pid=pid: self.remove_panel(pid))
-        self.ports_changed.emit()
+        self._emit_ports()
         return pid
 
     def _bump_counter(self, pid: str) -> None:
@@ -459,7 +507,7 @@ class Dashboard(QObject):
             port = self._sinks.get(pid)
         if port is not None:
             port.name = panel.title
-        self.ports_changed.emit()
+        self._emit_ports()
 
     def _render_panel_preview(self, panel, spec):
         """A panel's CURRENT plot → QPixmap at the spec size, for the export dialog's
@@ -524,7 +572,7 @@ class Dashboard(QObject):
                 charts = [k for k, sp in self._sinks.items() if sp.kind == "display"]
                 self.default_sink_id = charts[0] if charts else None
         self.area.remove_panel(panel)
-        self.ports_changed.emit()
+        self._emit_ports()
 
     # -- CV detectors (virtual sources reading an image sink's ROI) ----------
     def add_detector(self, sink_key: str, name: str, roi: tuple,
@@ -548,7 +596,7 @@ class Dashboard(QObject):
         self._sources[key] = SourcePort(key, name, det.dtype, det.unit, origin, "virtual")
         self._routes.setdefault(key, set())
         self._ensure_cv()
-        self.ports_changed.emit()
+        self._emit_ports()
         return did
 
     def update_detector(self, did: str, **fields) -> None:
@@ -563,7 +611,7 @@ class Dashboard(QObject):
             sp.name = det.name
             sp.dtype = det.dtype
             sp.unit = det.unit
-        self.ports_changed.emit()
+        self._emit_ports()
 
     def remove_detector(self, did: str, _emit: bool = True) -> None:
         with self._det_lock:
@@ -572,7 +620,7 @@ class Dashboard(QObject):
         self._sources.pop(key, None)
         self._routes.pop(key, None)
         if _emit:
-            self.ports_changed.emit()
+            self._emit_ports()
 
     def zoom_to(self, t0: float, t1: float) -> None:
         """Frame every panel on the time window [t0,t1] (Zoom-to-recording /
@@ -640,7 +688,7 @@ class Dashboard(QObject):
             sp.proc_id = pid
             self._sources[port.key] = sp
             self._routes.setdefault(port.key, set())
-        self.ports_changed.emit()
+        self._emit_ports()
         if input_key:                       # bound at creation → record it as a route too
             self.set_route(input_key, in_key, True)
         return pid
@@ -656,7 +704,7 @@ class Dashboard(QObject):
         for port in proc.outputs():
             self._sources.pop(port.key, None)
             self._routes.pop(port.key, None)
-        self.ports_changed.emit()
+        self._emit_ports()
 
     def processor(self, pid: str):
         return self._processors.get(pid)
@@ -679,7 +727,7 @@ class Dashboard(QObject):
         sp = self._sources.get(f"cur/{cid}")
         if sp is not None:
             sp.name = proc.name
-        self.ports_changed.emit()
+        self._emit_ports()
 
     def remove_cursor(self, cid: str) -> None:
         self.remove_processor(cid)
@@ -748,15 +796,20 @@ class Dashboard(QObject):
         return spec
 
     def clear_layout(self) -> None:
-        for pid in list(self._panels):
-            self.remove_panel(pid)
-        for pid in list(self._processors):
-            self.remove_processor(pid)
-        self._routes.clear()
-        self.default_sink_id = None
-        self._rebuild_device_ports()
+        with self.freeze_ports():              # one notification for the whole clear
+            for pid in list(self._panels):
+                self.remove_panel(pid)
+            for pid in list(self._processors):
+                self.remove_processor(pid)
+            self._routes.clear()
+            self.default_sink_id = None
+            self._rebuild_device_ports()
 
     def import_layout(self, data: dict) -> None:
+        with self.freeze_ports():              # one notification for the whole import
+            self._import_layout_inner(data)
+
+    def _import_layout_inner(self, data: dict) -> None:
         self.clear_layout()
         # markers are GLOBAL now (one catalog in tags.json) — a layout no longer
         # carries them, so importing a layout / switching projects leaves the tag
@@ -794,7 +847,7 @@ class Dashboard(QObject):
         for src, sinks in data.get("routes", {}).items():
             for sink in sinks:
                 self.set_route(src, sink, True)
-        self.ports_changed.emit()
+        self._emit_ports()
 
     # -- device ports --------------------------------------------------------
     def refresh_ports(self, *_):
@@ -903,7 +956,7 @@ class Dashboard(QObject):
         # surprised people, and put channels on plots they never asked for).
         for key in new_src:
             self._routes.setdefault(key, set())
-        self.ports_changed.emit()
+        self._emit_ports()
 
     def _emit_offline_gap(self, source_key: str) -> None:
         """Publish one NaN so charts show a visible break when a source drops."""
@@ -954,7 +1007,7 @@ class Dashboard(QObject):
                 device_id=uuid, sink_id=sk.id, remote=True, online=online,
                 smin=(p.minimum if p and p.minimum is not None else 0.0),
                 smax=(p.maximum if p and p.maximum is not None else 1.0))
-        self.ports_changed.emit()
+        self._emit_ports()
         if is_new:                                # first appearance → let the app auto-curate
             self.remote_added.emit(uuid)
 
@@ -969,7 +1022,7 @@ class Dashboard(QObject):
         for sp in self._sinks.values():           # grey the control ports too
             if sp.remote and sp.device_id == uuid:
                 sp.online = False
-        self.ports_changed.emit()
+        self._emit_ports()
 
     def remove_remote_device(self, uuid: str):
         """Drop a remote device entirely (its ports + routes)."""
@@ -986,7 +1039,7 @@ class Dashboard(QObject):
         self._remote_names.pop(uuid, None)
         self._remote_sinks.pop(uuid, None)
         self._remote_options.pop(uuid, None)
-        self.ports_changed.emit()
+        self._emit_ports()
 
     def remote_options(self, uuid: str) -> list:
         """The app `Option`s of a hub device (for the remote config form), or []."""
@@ -1016,7 +1069,7 @@ class Dashboard(QObject):
     # -- channel lens (filter the Sources VIEW to the project's selection) ---
     def set_source_lens(self, keys) -> None:
         self._source_lens = set(keys) if keys is not None else None
-        self.ports_changed.emit()               # the Sources panel re-renders
+        self._emit_ports()               # the Sources panel re-renders
 
     @property
     def source_lens(self):
@@ -1131,7 +1184,7 @@ class Dashboard(QObject):
                 proc = self._processors.get(sink.sink_id)
                 if proc is not None:
                     proc.bind_input(None)               # unroute → unbind the processor
-        self.ports_changed.emit()
+        self._emit_ports()
 
     def _apply_route(self, source_key: str, sink_key: str):
         """Live side-effects of a route. Returns False iff a display panel REFUSED the source
@@ -1159,7 +1212,7 @@ class Dashboard(QObject):
         sp = self._sinks.get(pid)
         if sp is not None and sp.unit != unit:
             sp.unit = unit
-            self.ports_changed.emit()
+            self._emit_ports()
 
     def _broadcast_x_range(self, source_panel, t0: float, t1: float) -> None:
         """A chart's X (time) range changed → align every other time-chart to it, so a

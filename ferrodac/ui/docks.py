@@ -1052,9 +1052,11 @@ class CollapsibleGroup(QWidget):
         self._bl = QVBoxLayout(self._body)
         self._bl.setContentsMargins(6, 0, 0, 4)
         self._bl.setSpacing(6)
-        self._body.setVisible(not collapsed)
         v.addLayout(head)
         v.addWidget(self._body)
+        # visibility only AFTER the body is parented: setVisible(True) on a still-
+        # parentless widget opens it as a top-level window (a popup per group).
+        self._body.setVisible(not collapsed)
 
     def add(self, widget):
         self._bl.addWidget(widget)

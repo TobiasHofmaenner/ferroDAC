@@ -958,7 +958,8 @@ class NumericPanel(Panel):
     def remove_source(self, key):
         ro = self._readouts.pop(key, None)
         if ro is not None:
-            ro.setParent(None)
+            ro.hide()                    # before the reparent — else the visible readout
+            ro.setParent(None)           # re-shows as a transient top-level window
             ro.deleteLater()
         self._placeholder.setVisible(not self._readouts)
 

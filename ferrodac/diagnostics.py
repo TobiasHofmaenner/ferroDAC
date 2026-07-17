@@ -194,3 +194,42 @@ def _install_qt_message_handler() -> None:
                    "segfault's root cause)\n")
 
     qInstallMessageHandler(handler)
+
+
+_ui_trace = None        # kept alive: the installed event filter
+
+
+def install_ui_trace():
+    """Log every TOP-LEVEL window Qt shows (class, objectName, title, geometry)
+    with a ms timestamp — the tool for 'a window popped up and I don't know whose
+    it is' (e.g. per-object popup spam during a project load). Enable with
+    ``FERRODAC_UI_TRACE=1``; events go to the 'ferrodac.uitrace' logger (→ the
+    app log). Cheap: one isWindow() check per Show/Hide event."""
+    global _ui_trace
+    import logging
+    import time as _time
+
+    from qtpy.QtCore import QEvent, QObject
+    from qtpy.QtWidgets import QApplication, QWidget
+
+    log = logging.getLogger("ferrodac.uitrace")
+    t0 = _time.monotonic()
+
+    class _Tracer(QObject):
+        def eventFilter(self, obj, ev):  # noqa: N802
+            if ev.type() in (QEvent.Show, QEvent.Hide) and isinstance(obj, QWidget) \
+                    and obj.isWindow():
+                g = obj.geometry()
+                log.info("%+9.3fs %s %s(%r) title=%r %dx%d@%d,%d floating=%s",
+                         _time.monotonic() - t0,
+                         "SHOW" if ev.type() == QEvent.Show else "HIDE",
+                         type(obj).__name__, obj.objectName(), obj.windowTitle(),
+                         g.width(), g.height(), g.x(), g.y(),
+                         getattr(obj, "isFloating", lambda: "-")())
+            return False
+
+    app = QApplication.instance()
+    if app is not None:
+        _ui_trace = _Tracer()
+        app.installEventFilter(_ui_trace)
+        log.info("UI trace installed")

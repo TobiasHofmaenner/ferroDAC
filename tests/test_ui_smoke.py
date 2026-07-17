@@ -2237,3 +2237,85 @@ def test_sources_sinks_hide_offline_toggle(qapp):
         sk.deleteLater()
     finally:
         w.close()
+
+
+@pytest.mark.ui
+def test_session_load_shows_no_transient_toplevel_windows(qapp):
+    """A project load must never flash a top-level window per object. Regression:
+    the Sources/Sinks/Events card rebuilds tore every visible card down with
+    setParent(None)+deleteLater — Qt then re-shows a still-visible reparented-to-None
+    widget as a REAL top-level window until the deferred delete lands, so every
+    ports_changed rebuild popped one native window per card (the Windows popup spam).
+    clear_layout now hides first; this asserts the whole load stays window-quiet."""
+    import os
+    import tempfile
+
+    from qtpy.QtCore import QEvent, QObject
+    from qtpy.QtWidgets import QWidget
+
+    w = _mainwindow(qapp)
+    try:
+        w.show()
+        qapp.processEvents()
+
+        # a small real layout: two charts + a slider, routed, saved, then reloaded
+        pid1 = w.dashboard.add_panel("chart")
+        w.dashboard.add_panel("chart")
+        pid3 = w.dashboard.add_panel("slider")
+        w.dashboard.set_route(f"ui/{pid3}", pid1, True)
+        path = os.path.join(tempfile.mkdtemp(), "sess.json")
+        w._write_session(path)
+        _process_until(qapp, lambda: True)
+
+        shown = []
+
+        class Tracer(QObject):
+            def eventFilter(self, obj, ev):  # noqa: N802
+                if (ev.type() == QEvent.Show and isinstance(obj, QWidget)
+                        and obj.isWindow() and obj is not w):
+                    shown.append(type(obj).__name__)
+                return False
+
+        tracer = Tracer()
+        qapp.installEventFilter(tracer)
+        try:
+            w.open_session(path)                  # rebuilds everything once…
+            _process_until(qapp, lambda: False, timeout=0.5)
+            w.open_session(path)                  # …and again over the existing layout
+            _process_until(qapp, lambda: False, timeout=0.5)
+        finally:
+            qapp.removeEventFilter(tracer)
+        assert shown == [], f"transient top-level windows during load: {shown}"
+    finally:
+        w.close()
+        qapp.processEvents()
+
+
+@pytest.mark.ui
+def test_ports_changed_is_coalesced(qapp):
+    """ports_changed fires ONCE per event-loop turn no matter how many mutations
+    land in it (a load used to emit ~25×, each tearing down + rebuilding the
+    Sources/Sinks docks), and a bulk import_layout flushes exactly one."""
+    w = _mainwindow(qapp)
+    try:
+        qapp.processEvents()
+        hits = []
+        w.dashboard.ports_changed.connect(lambda: hits.append(1))
+
+        pid = w.dashboard.add_panel("chart")
+        w.dashboard.add_panel("slider")
+        w.dashboard.remove_panel(pid)
+        assert hits == []                        # nothing yet — same turn
+        _process_until(qapp, lambda: hits)
+        assert len(hits) == 1                    # one coalesced emission
+
+        hits.clear()
+        w.dashboard.import_layout(
+            {"panels": [{"id": "chart-9", "kind": "chart", "title": "C"}],
+             "routes": {}})
+        assert hits == []                        # frozen during the bulk import
+        _process_until(qapp, lambda: hits)
+        assert len(hits) == 1                    # one flush for the whole import
+    finally:
+        w.close()
+        qapp.processEvents()

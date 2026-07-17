@@ -660,7 +660,10 @@ class TimelineWindow(QtWidgets.QMainWindow):
         self._src_list.blockSignals(False)
         for k in list(self._charts):          # a no-longer-shown source loses its chart
             if k not in keyset:
-                self._charts.pop(k).setParent(None)
+                w = self._charts.pop(k)
+                w.hide()                      # before the reparent — a visible widget
+                w.setParent(None)             # reparented to None re-shows as a
+                w.deleteLater()               # transient top-level window (popup)
         self._cover = {k: self.resolver.coverage(k) for k in keys}
         self.ribbon.set_sources(self._sources, self._cover, self._names)
 
@@ -802,7 +805,10 @@ class TimelineWindow(QtWidgets.QMainWindow):
             self._charts_box.addWidget(p)
             self._refresh_one(key)
         elif not on and key in self._charts:
-            self._charts.pop(key).setParent(None)
+            w = self._charts.pop(key)
+            w.hide()                          # see _set_sources: hide before reparent
+            w.setParent(None)
+            w.deleteLater()
 
     def _on_preview(self, a, b):
         """While dragging the ribbon: update only this window's PREVIEW charts

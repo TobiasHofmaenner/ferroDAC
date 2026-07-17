@@ -47,5 +47,11 @@ def clear_layout(layout) -> None:
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
+            # hide() BEFORE the reparent: reparenting a still-visible widget to None
+            # leaves it a visible-pending TOP-LEVEL until its deleteLater lands, and Qt
+            # delivers that as a real native window — on Windows every torn-down card
+            # flashed as a popup in the middle of the screen (one per card, every
+            # ports_changed rebuild). Hidden first, the reparent is invisible.
+            w.hide()
             w.setParent(None)
             w.deleteLater()
