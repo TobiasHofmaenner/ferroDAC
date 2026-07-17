@@ -38,6 +38,10 @@ class HubController(QObject):
     link_state = Signal(str, str)         # REAL gRPC link: connecting|connected|error|
     #                                       offline + detail (drives the button colour)
     remote_available_changed = Signal()   # other clients' available/active devices changed (Devices menu)
+    # interaction §7.3 hub relay — emitted from worker threads, the app connects QueuedConnection:
+    remote_prompt_opened = Signal(object)  # a remote OPEN prompt (pb.WirePrompt) → inject into the inbox
+    remote_prompt_closed = Signal(str)     # a remote prompt resolved (id) → withdraw from the inbox
+    agent_prompt_answered = Signal(str, object, str)  # a viewer answered OUR prompt: (id, answer, by)
     _do_add = Signal(str)                 # marshal manager.add(instance_id) to the GUI thread
     _do_remove = Signal(str)              # marshal manager.remove(instance_id) to the GUI thread
 
@@ -57,6 +61,7 @@ class HubController(QObject):
         self._agent = None
         self._viewer = None
         self._tagsync = None
+        self._promptwatch = None         # viewer-side WatchPrompts client (interaction §7.3)
         self._projsync = None            # hub project sync (opt-in, role-independent)
         self._docsync = None             # live collab-editing relay (role-independent)
         self._doc_bridges: dict = {}     # doc_id -> [DocBridge] currently collaborating
@@ -128,6 +133,11 @@ class HubController(QObject):
     def roles(self) -> tuple:
         return (self._agent is not None, self._viewer is not None)
 
+    @property
+    def actor(self) -> str:
+        """This client's answer-attribution label (collab display name, else agent id)."""
+        return self._collab_actor or self._aid or "viewer"
+
     def hub_sources(self) -> list:
         """Cached [(key, name, unit, dtype)] the hub holds (fetched once on
         connect) — so the historic catalog/Timeline can list hub-only sources
@@ -156,7 +166,8 @@ class HubController(QObject):
                                    on_command=self._on_agent_command,
                                    on_configure=self._on_agent_configure,
                                    on_add_device=self._on_agent_add_device,
-                                   on_remove_device=self._on_agent_remove_device)
+                                   on_remove_device=self._on_agent_remove_device,
+                                   on_prompt_response=self._on_agent_prompt_response)
             self._agent.start()
             self._advertise_devices()          # active + (opt-out) available devices
             # per-reading protobuf conversion runs on its own bus pump, not the
@@ -195,6 +206,15 @@ class HubController(QObject):
             self.dashboard.send_command = self._send_remote_command   # control §5.3
             self.dashboard.set_config = self._send_remote_config      # configure §5.3
             self._viewer.start()
+            # interaction §7.3: watch the hub's OPEN device prompts + relay answers so a
+            # viewer can answer a device request raised on another client (its owning agent).
+            from ..net.prompts import HubPromptWatch
+            self._promptwatch = HubPromptWatch(
+                addr,
+                on_open=lambda w: self.remote_prompt_opened.emit(w),
+                on_close=lambda pid: self.remote_prompt_closed.emit(pid),
+                on_state=self._state_cb("prompts"))
+            self._promptwatch.start()
         # hub READ tier + backup admin: a sync channel, wired whenever connected
         # (independent of agent/viewer) — the read tier back-reads history a wiped
         # local store lacks (§12.1), the backup client browses/targets the hub's
@@ -294,6 +314,9 @@ class HubController(QObject):
         if self._viewer is not None:
             self._viewer.stop()
             self._viewer = None
+        if self._promptwatch is not None:
+            self._promptwatch.stop()
+            self._promptwatch = None
         if self._tagsync is not None:
             self._tagsync.stop()
             self._tagsync = None
@@ -452,6 +475,30 @@ class HubController(QObject):
     _FRAME_DOC_MAX_PX = 960
     _FRAME_DOC_MIN_DT = 1.0 / 8      # ≤8 fps
     _FRAME_DOC_QUALITY = 80
+
+    # -- interaction prompts (§7.3): the hub relay -------------------------------
+    def publish_prompt(self, prompt) -> None:
+        """AGENT: mirror a device prompt raised locally up to the hub so viewers can answer
+        it. No-op unless we're an agent."""
+        if self._agent is not None:
+            from ..net.prompts import prompt_to_wire
+            self._agent.publish_prompt(prompt_to_wire(prompt))
+
+    def close_prompt(self, prompt_id, answer_text="", by="") -> None:
+        """AGENT: mirror a prompt RESOLUTION up to the hub → every viewer withdraws it."""
+        if self._agent is not None:
+            self._agent.close_prompt(str(prompt_id), str(answer_text), str(by))
+
+    def respond_remote_prompt(self, prompt_id, answer, by="") -> None:
+        """VIEWER: answer a hub-relayed prompt → routed to the owning agent, which resolves it
+        and drives the device (first-responder-wins). No-op unless we're a viewer."""
+        if self._promptwatch is not None:
+            self._promptwatch.respond(str(prompt_id), answer, by)
+
+    def _on_agent_prompt_response(self, prompt_id, answer, by) -> None:
+        """A viewer answered one of OUR prompts (on the agent loop) → marshal to the GUI, where
+        the app resolves it in the local store (→ the driver's on_response → RESPOND)."""
+        self.agent_prompt_answered.emit(str(prompt_id), answer, str(by or ""))
 
     def _send_remote_command(self, device_uuid, sink_id, value):
         """Dashboard → set a REMOTE device's control sink over the hub (§5.3). Non-

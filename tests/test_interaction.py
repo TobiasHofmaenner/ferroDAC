@@ -372,3 +372,72 @@ def test_device_respond_over_localapi_roundtrip(qapp):
             assert c.get("/query/device.prompts", headers=h).json()["result"] == []
     finally:
         srv.stop()
+
+
+@pytest.mark.ui
+def test_hub_prompt_relay_app_wiring(control_surface):
+    """The app's hub-relay handlers (§7.3): a VIEWER injects a remote prompt + relays the
+    answer with NO local provenance tag (the owner records it); an AGENT resolves a prompt a
+    viewer answered (driver callback + provenance tag + close broadcast); raising a device
+    prompt publishes it to the hub."""
+    import types
+
+    w, _s = control_surface
+
+    class _FakeHub:
+        actor = "viewer-a"
+
+        def __init__(self):
+            self.published, self.closed, self.responded = [], [], []
+
+        def publish_prompt(self, p):
+            self.published.append(p)
+
+        def close_prompt(self, pid, answer_text="", by=""):
+            self.closed.append((pid, answer_text, by))
+
+        def respond_remote_prompt(self, pid, answer, by=""):
+            self.responded.append((pid, answer, by))
+
+        def disconnect(self):
+            pass                                    # MainWindow.closeEvent calls this
+
+    w.hub = _FakeHub()
+
+    def _interaction_tags():
+        return [m for m in w.dashboard.markers.all() if m.kind == "interaction"]
+
+    # AGENT: raising a device prompt mirrors it to the hub
+    p = Prompt("dev-x", "Retract the arm?", kind=CONFIRM)
+    w._on_device_prompt(p, lambda a: None)
+    assert w.hub.published == [p]
+
+    # VIEWER: a remote prompt injects into the inbox; answering relays it and does NOT
+    # drop a local provenance tag (the owning agent owns that record).
+    wire = types.SimpleNamespace(
+        id="rp-1", device_uuid="lsc-uuid", question="Vent?", kind="confirm", title="",
+        options=[], severity="warn", timeout=0.0, on_timeout="stay", created=0.0)
+    n_before = len(_interaction_tags())
+    w._on_remote_prompt_opened(wire)
+    assert w.interactions.get("rp-1") is not None
+    assert w.interactions.resolve("rp-1", True, by="operator") is True
+    assert w.hub.responded == [("rp-1", True, "viewer-a")]        # answer relayed to the owner
+    assert len(_interaction_tags()) == n_before                   # NO local provenance tag
+
+    # a remote CLOSE (owner resolved it) withdraws it from the viewer inbox
+    w._on_remote_prompt_opened(types.SimpleNamespace(
+        id="rp-2", device_uuid="lsc", question="?", kind="confirm", title="",
+        options=[], severity="info", timeout=0.0, on_timeout="stay", created=0.0))
+    assert w.interactions.get("rp-2") is not None
+    w._on_remote_prompt_closed("rp-2")
+    assert w.interactions.get("rp-2") is None
+
+    # AGENT: a viewer answered OUR prompt → resolve locally (driver cb + provenance tag +
+    # a close broadcast so every surface withdraws).
+    answered = []
+    q = Prompt("dev-x", "Proceed?", kind=CONFIRM)
+    w.interactions.add(q, answered.append)
+    w._on_agent_prompt_answered(q.id, True, "viewer-b")
+    assert answered == [True]                                     # the driver callback fired
+    assert (q.id, "Yes", "hub:viewer-b") in w.hub.closed          # resolution broadcast
+    assert any(t.payload.get("prompt_id") == q.id for t in _interaction_tags())
