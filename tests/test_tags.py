@@ -7,7 +7,7 @@ Qt-free — the MarkerModel + tag entity only."""
 
 from ferrodac.core.markers import MarkerModel, is_movable
 from ferrodac.core.tag import (MEDIA, ORIGIN_DEVICE, ORIGIN_PROCESSOR,
-                               ORIGIN_SYSTEM, ORIGIN_USER, RECORDING,
+                               ORIGIN_SYSTEM, ORIGIN_USER, RECORDING, Marker,
                                marker_from_dict, marker_to_dict)
 
 
@@ -49,6 +49,35 @@ def test_explicit_immutable_overrides_the_default_rule():
     assert not loose.immutable and is_movable(loose)   # ...and un-pin a photo (explicit wins)
     m.move(loose.id, 40.0)
     assert m.get(loose.id).t == 40.0               # the un-pinned photo actually drags
+
+
+def test_device_emitted_tag_is_announced_for_hub_publish():
+    """A device raises a tag on the owning box (a fully-built Marker via emit_tag) →
+    it MUST reach the hub-sync publish path, which is wired to ``tag_changed``. The
+    device→app slot uses ``upsert_local``, so it announces (unlike plain ``upsert``,
+    the remote-merge path, which stays silent to avoid echo). Regression: device tags
+    that went through ``upsert`` were stored locally but never reached other clients."""
+    m = MarkerModel()
+    published: list[str] = []
+    m.tag_changed.connect(published.append)         # exactly what _wire_tags does
+
+    dev = Marker("evt-1", 5.0, kind="vent-close", label="Vent Valve closed",
+                 origin_kind=ORIGIN_DEVICE, origin_id="lsc-1",
+                 scope="device:lsc-1", immutable=True)
+    assert m.upsert_local(dev) is True
+    assert published == ["evt-1"]                   # announced → hub-sync publishes it
+    assert m.get("evt-1") is not None               # …and stored locally too
+
+    # a tag merged FROM a peer must NOT re-publish (that would echo back to the hub)
+    remote = Marker("evt-2", 6.0, origin_kind=ORIGIN_DEVICE, version=1)
+    assert m.upsert(remote) is True
+    assert published == ["evt-1"]                   # upsert() stayed silent
+
+    # a stale re-emit of the same id can't clobber a newer edit, and stays silent
+    m.update("evt-1", label="edited")               # bumps version, announces
+    published.clear()
+    assert m.upsert_local(Marker("evt-1", 5.0, label="stale", version=1)) is False
+    assert published == [] and m.get("evt-1").label == "edited"
 
 
 def test_immutable_persists_and_legacy_derives():

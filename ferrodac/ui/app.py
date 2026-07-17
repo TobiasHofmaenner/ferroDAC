@@ -1136,8 +1136,12 @@ class MainWindow(QMainWindow):
 
     def _on_device_tag(self, marker) -> None:
         """A device raised a tag (alarm/event) → merge it into the shared TagStore, from
-        which charts + the event log update. Runs on the GUI thread (QueuedConnection)."""
-        self.dashboard.markers.upsert(marker)
+        which charts + the event log update. Runs on the GUI thread (QueuedConnection).
+        upsert_LOCAL (not upsert): the device is on THIS box, so this is a LOCAL emission
+        that must be announced (tag_changed) and thus published to the hub → reaches
+        viewers. Plain upsert stays silent (it's for tags merged from a peer) and would
+        leave device tags stranded on the owning box (they never reached other clients)."""
+        self.dashboard.markers.upsert_local(marker)
 
     # -- device → app → device requests (core.interaction) -------------------
     def _device_name_for(self, device_id: str) -> str:
