@@ -840,7 +840,8 @@ def test_confirm_answer_writes_respond_index(fake):
     assert _spin(lambda: len(prompts) == 1)
     _p, on_response = prompts[0]
     on_response(True)                                        # operator answers Yes (the affirmative)
-    assert fake.responded == ["RESPOND 7 1"]                 # affirmative → option index 1
+    # The RESPOND transaction now runs on a worker (on_response is GUI-safe) → spin for it.
+    assert _spin(lambda: fake.responded == ["RESPOND 7 1"])  # affirmative → option index 1
 
 
 def test_choice_answer_maps_to_option_index(fake):
@@ -851,7 +852,7 @@ def test_choice_answer_maps_to_option_index(fake):
     assert _spin(lambda: len(prompts) == 1)
     _p, on_response = prompts[0]
     on_response("accepted")
-    assert fake.responded == ["RESPOND 4 2"]                 # "accepted" → index 2
+    assert _spin(lambda: fake.responded == ["RESPOND 4 2"])  # "accepted" → index 2 (async now)
 
 
 def test_done_drops_pending_without_double_answering(fake):
@@ -865,7 +866,10 @@ def test_done_drops_pending_without_double_answering(fake):
     fake.inject("?DONE,9,SEM,panel")                         # resolved on the front panel
     assert _spin(lambda: 9 not in dev._open_prompts)         # driver forgot the fw_id…
     on_response("SEM")                                       # …so a late answer does nothing
-    assert fake.responded == []                              # NO RESPOND — no double-answer
+    with dev._prompt_lock:                                   # deterministic even though answers
+        workers = list(dev._answer_threads)                  # are async now: a guarded no-op
+    assert workers == []                                     # spawns NO RESPOND worker at all…
+    assert fake.responded == []                              # …so NO RESPOND — no double-answer
 
 
 def test_reannounced_ask_reuses_the_same_prompt(fake):
@@ -905,4 +909,39 @@ def test_unknown_ask_kind_degrades_to_acknowledge(fake):
     assert _spin(lambda: len(prompts) == 1)
     assert prompts[0][0].kind == ACKNOWLEDGE
     prompts[0][1](True)                                      # OK → the single option, index 0
-    assert fake.responded == ["RESPOND 5 0"]
+    assert _spin(lambda: fake.responded == ["RESPOND 5 0"])  # async RESPOND → spin for it
+
+
+def test_on_response_returns_fast_even_with_io_lock_held(fake):
+    """THE GUI-freeze fix: on_response runs on the GUI thread (interactions store), while
+    the poll thread may hold the device io lock mid-MEAS for ~2 s. Answering must NOT
+    block on that lock — it returns in well under 100 ms and the RESPOND transaction
+    lands from a worker once the lock frees (DESIGN §21: callbacks are cheap)."""
+    dev = _device(fake)
+    prompts = _capture_prompts(dev)
+    fake.inject("?ASK,7,confirm,warn,0,2,No,Yes,Retract the arm?")
+    assert _spin(lambda: len(prompts) == 1)
+    _p, on_response = prompts[0]
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def _mid_meas_poller():                                  # simulate the poll thread mid-MEAS
+        with dev._io_lock:
+            held.set()
+            release.wait(5.0)
+
+    poller = threading.Thread(target=_mid_meas_poller, daemon=True)
+    poller.start()
+    assert held.wait(2.0)                                    # the io lock is now HELD
+    try:
+        t0 = time.perf_counter()
+        on_response(True)                                    # the operator clicks "Yes"
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.1                                 # returned immediately — no freeze
+        assert fake.responded == []                          # …and could NOT have landed yet:
+        #                                                      the lock is still held
+    finally:
+        release.set()
+    poller.join(2.0)
+    assert _spin(lambda: fake.responded == ["RESPOND 7 1"])  # the answer still reaches the wire

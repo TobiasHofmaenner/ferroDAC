@@ -600,12 +600,18 @@ class Dashboard(QObject):
         return did
 
     def update_detector(self, did: str, **fields) -> None:
+        import dataclasses
         with self._det_lock:
             det = self._detectors.get(did)
             if det is None:
                 return
-            for k, v in fields.items():
-                setattr(det, k, v)
+            # Atomic swap, not in-place setattrs: the CV runner + OCR pool read the
+            # detector attr-by-attr WITHOUT this lock, so a multi-field edit (ROI +
+            # parse mode) could be observed half-applied — one reading cropped with
+            # the new ROI but parsed with the old config. An in-flight read keeps
+            # the OLD, self-consistent object; the next scheduled read sees the new.
+            det = dataclasses.replace(det, **fields)
+            self._detectors[did] = det
         sp = self._sources.get(f"cv/{did}")
         if sp is not None:
             sp.name = det.name

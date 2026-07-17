@@ -15,6 +15,8 @@ delay, verifying the file — a failed encode is dropped, never indexed.
 from __future__ import annotations
 
 import logging
+import os
+import time
 
 from qtpy.QtCore import QObject, QTimer
 
@@ -48,9 +50,18 @@ class VideoCaptureService(QObject):
         self.reconcile()
 
     def stop(self) -> None:
+        """Orderly shutdown (closeEvent): close every open segment and commit it
+        SYNCHRONOUSLY. The normal path defers each commit behind a 1500 ms QTimer
+        grace period, but at exit the event loop dies before that timer can ever
+        fire — the deferred commit would never run and the final segment (up to
+        SEGMENT_S of footage per camera) would sit on disk unindexed, invisible
+        forever. We are on the GUI thread with nothing left to pump, so a short
+        BOUNDED wait for the recorder's file is acceptable here (shared deadline
+        across all cameras — their recorders finalize in parallel)."""
         self._timer.stop()
+        deadline = time.monotonic() + 2.0
         for data_id in list(self._active):
-            self._close(data_id)
+            self._close(data_id, deadline=deadline)
 
     # -- policy ---------------------------------------------------------------
     def _should_capture(self, dev) -> bool:
@@ -106,7 +117,10 @@ class VideoCaptureService(QObject):
         self._active[data_id] = {"t0": t0, "path": path, "dev": dev,
                                  "label": getattr(dev, "name", data_id)}
 
-    def _close(self, data_id: str) -> None:
+    def _close(self, data_id: str, deadline: float = None) -> None:
+        """Close one segment. `deadline` is set on the EXIT path only (stop()):
+        wait boundedly for the file, then commit right here; otherwise the commit
+        rides a QTimer grace delay as always."""
         seg = self._active.pop(data_id, None)
         if seg is None:
             return
@@ -115,9 +129,29 @@ class VideoCaptureService(QObject):
         except Exception:                 # noqa: BLE001
             pass
         t1 = self._now()
+        if deadline is not None:          # exit — no event loop left for a timer
+            self._wait_landed(seg["path"], deadline)
+            self._commit(data_id, seg, t1)   # same logic the timer would have run;
+            return                           # a file that never landed is logged
+            #                                  and skipped by _commit, not raised
         # QMediaRecorder finalizes the file asynchronously — commit after a grace
         # delay, verifying it landed (VideoStore.commit drops an empty/missing file)
         QTimer.singleShot(1500, lambda: self._commit(data_id, seg, t1))
+
+    @staticmethod
+    def _wait_landed(path: str, deadline: float) -> None:
+        """Bounded blocking poll (exit path only) for the recorder's async
+        finalization: return as soon as `path` is non-empty on disk — the same
+        'it landed' predicate VideoStore.commit verifies — or when the deadline
+        passes (the following commit then logs + skips the segment)."""
+        while time.monotonic() < deadline:
+            try:
+                if os.path.getsize(path) > 0:
+                    return
+            except OSError:
+                pass                      # not there yet
+            time.sleep(0.05)
+        log.debug("segment file still absent at exit deadline: %s", path)
 
     def _commit(self, data_id: str, seg: dict, t1: float) -> None:
         if not self._store.commit(data_id, seg["t0"], t1, seg["path"]):

@@ -59,6 +59,35 @@ class _OpWorker(QThread):
             self.failed.emit(str(exc))
 
 
+# QThreads that outlived shutdown's bounded waits (a probe hung on a dead serial
+# port, a cloud call mid-timeout). Destroying a RUNNING QThread is a qFatal abort
+# ("QThread: Destroyed while thread is still running") — the app "crashed on exit"
+# whenever a device call ran long. Parked threads are kept alive here and reaped
+# at interpreter exit with an UNBOUNDED wait: every blocking call under them has a
+# finite driver timeout, so this converts a hard abort into (at worst) a few
+# seconds' delay after the window closes.
+_parked: list = []
+
+
+def _park_thread(t) -> None:
+    log.warning("thread %s outlived shutdown — parked for exit reaping", t)
+    _parked.append(t)
+    t.finished.connect(lambda t=t: _parked.remove(t) if t in _parked else None)
+
+
+def _reap_parked() -> None:
+    for t in list(_parked):
+        try:
+            t.wait()                     # unbounded — bounded in practice by driver timeouts
+        except Exception:                # noqa: BLE001 — never block exit on a broken thread
+            pass
+
+
+import atexit  # noqa: E402  (module tail: the reaper must outlive every manager)
+
+atexit.register(_reap_parked)
+
+
 class DeviceManager(QObject):
     available_changed = Signal()
     active_changed = Signal()
@@ -79,6 +108,13 @@ class DeviceManager(QObject):
     device_prompt_withdrawn = Signal(str)  # a device RESOLVED one of its own prompts (its
     #                                 front panel / another transport, by prompt id) — the app
     #                                 retires it from the inbox, no answer (core.interaction).
+    _marshal = Signal(object)       # internal: re-emit a bare Signal on the manager's own
+    #                                 (GUI) thread. The *_sync verbs run on RAW worker
+    #                                 threads (agent asyncio.to_thread / localapi anyio) —
+    #                                 emitting the public signals there leaves receivers'
+    #                                 AutoConnection to classify the foreign thread, the
+    #                                 exact hazard the hubclient discipline forces
+    #                                 QueuedConnection everywhere else to avoid.
 
     def __init__(
         self,
@@ -103,6 +139,20 @@ class DeviceManager(QObject):
         self._scan.found.connect(self._merge_found)
         self.available_changed.connect(self._try_resolve)
         self.active_changed.connect(self._try_resolve)
+        # the trampoline is EXPLICITLY queued: the emit may come from a raw worker
+        # thread, the re-emit always runs on the manager's own (GUI) thread.
+        from qtpy.QtCore import Qt as _Qt
+        self._marshal.connect(lambda sig: sig.emit(), _Qt.QueuedConnection)
+
+    def _emit_gui(self, sig) -> None:
+        """Emit a public signal FROM ANY THREAD, delivered on the manager's own
+        thread. On the manager's thread it's a plain synchronous emit (no timing
+        change for local callers); from a foreign thread it trampolines through
+        the queued ``_marshal`` — the *_sync verbs' road home (see _marshal)."""
+        if QThread.currentThread() is self.thread():
+            sig.emit()
+        else:
+            self._marshal.emit(sig)
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
@@ -121,7 +171,8 @@ class DeviceManager(QObject):
 
     def stop(self) -> None:
         self._scan.stop()
-        self._scan.wait(3000)
+        if not self._scan.wait(3000):
+            _park_thread(self._scan)     # still probing — never destroy a running QThread
         for d in list(self._active.values()):
             try:
                 if self._engine is not None:
@@ -130,7 +181,8 @@ class DeviceManager(QObject):
             except Exception:
                 pass
         for w in list(self._workers):
-            w.wait(2000)
+            if not w.wait(2000):
+                _park_thread(w)          # a wedged device call — park it, don't abort
 
     # -- discovery merge -----------------------------------------------------
     def _merge_found(self, found: list) -> None:
@@ -284,9 +336,9 @@ class DeviceManager(QObject):
             device.write(sink_id, value)
         except Exception as exc:                # noqa: BLE001 — the reason goes in the Ack
             return False, str(exc)
-        self.active_changed.emit()
+        self._emit_gui(self.active_changed)     # runs on a raw worker thread — marshal
         if device.take_provenance_dirty():
-            self.provenance_changed.emit()
+            self._emit_gui(self.provenance_changed)
         return True, ""
 
     # -- synchronous configure (control plane §5.3, remote SetConfig) ---------
@@ -301,8 +353,8 @@ class DeviceManager(QObject):
             device.set_option(key, value)        # inline (agent is already off-loop)
         except Exception as exc:                 # noqa: BLE001 — reason → Ack
             return False, str(exc)
-        self.active_changed.emit()
-        self.available_changed.emit()
+        self._emit_gui(self.active_changed)      # raw worker thread — marshal home
+        self._emit_gui(self.available_changed)
         return True, ""
 
     def set_rate_sync(self, instance_id: str, hz: float) -> "tuple[bool, str]":
@@ -310,7 +362,7 @@ class DeviceManager(QObject):
         if device is None or not hasattr(device, "set_rate_hz"):
             return False, "device not active or fixed-rate"
         device.set_rate_hz(float(hz))
-        self.active_changed.emit()
+        self._emit_gui(self.active_changed)      # raw worker thread — marshal home
         return True, ""
 
     def rename_sync(self, instance_id: str, name: str) -> "tuple[bool, str]":
@@ -318,8 +370,8 @@ class DeviceManager(QObject):
         if device is None or not hasattr(device, "set_name"):
             return False, "device not found"
         device.set_name(name)
-        self.active_changed.emit()
-        self.available_changed.emit()
+        self._emit_gui(self.active_changed)      # raw worker thread — marshal home
+        self._emit_gui(self.available_changed)
         return True, ""
 
     def set_rate(self, instance_id: str, hz: float) -> None:

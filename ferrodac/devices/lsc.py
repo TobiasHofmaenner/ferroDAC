@@ -33,6 +33,7 @@ depth: the constructor rejects 1200 outright, mirroring lsa31 §3.1).
 from __future__ import annotations
 
 import json
+import logging
 import math
 import queue
 import sys
@@ -71,6 +72,8 @@ except Exception:  # pragma: no cover
 # distinct from a quiet-line read timeout. The reader stops + flags link-down on these so the
 # supervisor can auto-reconnect instead of spinning a dead FD forever (issue #10).
 _HARD_ERRORS = (serial.SerialException, OSError) if HAVE_SERIAL else (OSError,)
+
+log = logging.getLogger("ferrodac.lsc")
 
 BAUD = 1050000       # NEVER 1200 — that is the bootloader trigger (manual §1)
 TERM = b"\n"
@@ -750,6 +753,11 @@ class LSCDevice(BaseDevice):
         # ?DONE) and the GUI thread (on_response) → guarded by _prompt_lock.
         self._open_prompts: dict = {}
         self._prompt_lock = threading.Lock()
+        # In-flight RESPOND workers (rare — one per operator answer). on_response runs on
+        # the GUI thread and must NEVER block on device I/O (DESIGN §21: callbacks are
+        # cheap), so _respond hands the serial transaction to one of these; _disconnect
+        # joins them BOUNDEDLY. Guarded by _prompt_lock (list ops only, never held long).
+        self._answer_threads: list = []
 
     # -- discovery -------------------------------------------------------------- #
     @classmethod
@@ -837,6 +845,17 @@ class LSCDevice(BaseDevice):
             type(self)._cache.pop(self._port, None)
 
     def _disconnect(self) -> None:
+        # Give any queued operator answer (a RESPOND worker, see _respond) a BOUNDED
+        # chance to reach the wire before the port goes away. Called with no locks from
+        # the manager/GUI path (the worker can finish), but the reconnect supervisor
+        # calls this WITH the io lock already held — the worker is then stuck on that
+        # lock, the join expires, and the worker bails on its own None-check once the
+        # port is closed below. Bounded either way: never a hang, never an orphan
+        # touching a closed port.
+        with self._prompt_lock:
+            pending, self._answer_threads[:] = list(self._answer_threads), []
+        for t in pending:
+            t.join(timeout=1.0)
         # Leave physical outputs as the operator set them — an implicit vent/pump
         # change on disconnect would be an unsafe surprise, not a safe default.
         try:
@@ -1009,19 +1028,46 @@ class LSCDevice(BaseDevice):
 
     def _respond(self, fw_id: int, answer) -> None:
         """The Prompt's on_response, invoked once on the GUI thread by the store (first-
-        responder-wins): pop the fw_id (so a racing ?DONE / second responder can't double-
-        answer), map the answer to the option index, and send RESPOND <fw_id> <index>. Raises
-        if the link is down / the device refuses, so the store records the ack as failed."""
+        responder-wins). GUI-SAFE (the §21 contract: callbacks are cheap): only the
+        bookkeeping runs inline — pop the fw_id under _prompt_lock (the pop IS the claim,
+        exactly as before, so a racing ?DONE / second responder can't double-answer) and
+        map the answer to its option index. The blocking serial transaction (the io lock —
+        which the poll thread may hold mid-MEAS for ~2 s — plus RESPOND's own reply wait)
+        is handed to a short-lived worker thread, so this returns immediately and the
+        GUI never freezes on an answer. A RESPOND that then fails (link down / timeout /
+        =ERR) is LOGGED, never raised: the operator's intent was recorded; if the firmware
+        still cares it re-asks (?ASK re-announce / PROMPTS? on reconnect)."""
         with self._prompt_lock:
             entry = self._open_prompts.pop(fw_id, None)
         if entry is None:
             return                                 # already resolved (?DONE / another surface)
         prompt, options = entry
         index = self._answer_to_index(answer, options, prompt.kind)
-        with self._io_lock:
-            if self._lsc is None:
-                raise RuntimeError("LSC link is down")
-            self._lsc.respond(fw_id, index)
+        t = threading.Thread(target=self._send_respond, args=(fw_id, index),
+                             name=f"fd-lsc-respond-{self._port}", daemon=True)
+        t.start()                                  # started BEFORE tracking → join never sees
+        with self._prompt_lock:                    # an unstarted thread (which would raise)
+            self._answer_threads[:] = \
+                [w for w in self._answer_threads if w.is_alive()] + [t]
+
+    def _send_respond(self, fw_id: int, index: int) -> None:
+        """Worker body for ONE operator answer: the blocking RESPOND transaction, off the
+        GUI thread. Serialized with the poll/write/reconnect paths by the io lock. A link
+        torn down while the answer was queued (disconnect / the reconnect supervisor) is a
+        graceful bail-out — the port handle is only touched under the io lock and only
+        after a fresh None-check, and NOTHING raises out of this thread."""
+        try:
+            with self._io_lock:
+                lsc = self._lsc
+                if lsc is None:                    # closed while we waited for the lock
+                    log.warning("LSC %s: answer to prompt %d dropped — link is down",
+                                self._port, fw_id)
+                    return
+                lsc.respond(fw_id, index)
+        except Exception as exc:                   # noqa: BLE001 — logged, not raised: a worker
+            log.warning("LSC %s: RESPOND %d %d failed: %s",   # thread has nowhere to raise TO,
+                        self._port, fw_id, index, exc)        # and the firmware re-asks if the
+            #                                                   prompt is genuinely still open
 
     def _read(self, source: Source):
         with self._io_lock:

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 
 SEGMENT_S = 120.0          # rotation period — also the clip-edge granularity (§9.3)
@@ -63,6 +64,16 @@ def mark_prefer_software_encode() -> None:
 class VideoStore:
     def __init__(self, root: str):
         self.root = root                    # <app_dir>/video
+        self._lock = threading.RLock()      # serializes every index load-MODIFY-save
+        #                                     cycle: commit (GUI thread), mark_synced
+        #                                     (videosync thread), import_segment (hub
+        #                                     executor / backfill) race on index.json —
+        #                                     an unguarded interleave saves a stale
+        #                                     copy and silently drops entries. RLock,
+        #                                     not Lock: import_segment nests commit +
+        #                                     mark_synced. Plain READS stay lock-free
+        #                                     (segment_at runs off a GUI timer and
+        #                                     must never wait behind a segment write).
         self._cache: dict = {}              # cam_uuid -> ((mtime_ns, size), entries):
         #                                     memo of index.json keyed by the file's
         #                                     signature, so the per-tick scrub point
@@ -117,12 +128,13 @@ class VideoStore:
         a grace period). Returns False when the file never landed."""
         if not (os.path.exists(path) and os.path.getsize(path) > 0):
             return False
-        entries = self._load(cam_uuid)
-        entries.append({"t0": float(t0), "t1": float(t1),
-                        "file": os.path.basename(path),
-                        "size": os.path.getsize(path), "synced": False})
-        entries.sort(key=lambda e: e["t0"])
-        self._save(cam_uuid, entries)
+        with self._lock:                    # atomic vs mark_synced/import_segment
+            entries = self._load(cam_uuid)
+            entries.append({"t0": float(t0), "t1": float(t1),
+                            "file": os.path.basename(path),
+                            "size": os.path.getsize(path), "synced": False})
+            entries.sort(key=lambda e: e["t0"])
+            self._save(cam_uuid, entries)
         return True
 
     # -- queries -----------------------------------------------------------------
@@ -188,14 +200,15 @@ class VideoStore:
         retention notch (never drop footage the hub hasn't archived). Returns
         whether a matching segment was found."""
         key = seg_key(t0)
-        entries = self._load(cam_uuid)
-        hit = False
-        for e in entries:
-            if seg_key(e["t0"]) == key:
-                e["synced"] = bool(synced)
-                hit = True
-        if hit:
-            self._save(cam_uuid, entries)
+        with self._lock:                    # atomic vs commit/import_segment
+            entries = self._load(cam_uuid)
+            hit = False
+            for e in entries:
+                if seg_key(e["t0"]) == key:
+                    e["synced"] = bool(synced)
+                    hit = True
+            if hit:
+                self._save(cam_uuid, entries)
         return hit
 
     def read_segment_bytes(self, cam_uuid: str, t0: float) -> "bytes | None":
@@ -221,14 +234,18 @@ class VideoStore:
         if not data:
             return 0
         key = seg_key(t0)
-        if any(seg_key(e["t0"]) == key for e in self._load(cam_uuid)):
-            return 0                                     # already have it
-        path = self.segment_path(cam_uuid, t0)           # creates the camera dir
-        with open(path, "wb") as fh:
-            fh.write(data)
-        if not self.commit(cam_uuid, t0, t1, path):      # index + keep time order
-            return 0
-        self.mark_synced(cam_uuid, t0)                   # it exists on the peer
+        with self._lock:                                 # the have-it check and the
+            #                                              write+commit must be one
+            #                                              atomic step, or two racing
+            #                                              imports double-index t0
+            if any(seg_key(e["t0"]) == key for e in self._load(cam_uuid)):
+                return 0                                 # already have it
+            path = self.segment_path(cam_uuid, t0)       # creates the camera dir
+            with open(path, "wb") as fh:
+                fh.write(data)
+            if not self.commit(cam_uuid, t0, t1, path):  # index + keep time order
+                return 0
+            self.mark_synced(cam_uuid, t0)               # it exists on the peer
         return len(data)
 
     def covers(self, cam_uuid: str, t0: float, t1: float,
@@ -250,19 +267,20 @@ class VideoStore:
     def delete_older_than(self, cam_uuid: str, cutoff_t: float) -> int:
         """MANUAL cleanup: drop segments that END before cutoff_t. Returns bytes
         freed. (Materialized clips live in projects and are untouched.)"""
-        entries = self._load(cam_uuid)
-        keep, freed = [], 0
-        d = self.cam_dir(cam_uuid)
-        for e in entries:
-            if e["t1"] < cutoff_t:
-                freed += e["size"]
-                try:
-                    os.remove(os.path.join(d, e["file"]))
-                except OSError:
-                    pass
-            else:
-                keep.append(e)
-        self._save(cam_uuid, keep)
+        with self._lock:                    # same load-modify-save discipline
+            entries = self._load(cam_uuid)
+            keep, freed = [], 0
+            d = self.cam_dir(cam_uuid)
+            for e in entries:
+                if e["t1"] < cutoff_t:
+                    freed += e["size"]
+                    try:
+                        os.remove(os.path.join(d, e["file"]))
+                    except OSError:
+                        pass
+                else:
+                    keep.append(e)
+            self._save(cam_uuid, keep)
         return freed
 
     def prune_retention(self, cam_uuid: str, policy: str,
@@ -280,20 +298,21 @@ class VideoStore:
             window = val * (3600.0 if unit == "h" else 86400.0)
             return self.delete_older_than(cam_uuid, now - window)
         cap = val * (1e9 if unit == "gb" else 1e6)
-        entries = self._load(cam_uuid)
-        total = sum(e["size"] for e in entries)
-        freed = 0
-        d = self.cam_dir(cam_uuid)
-        while entries and total > cap:
-            e = entries.pop(0)                           # oldest first
-            total -= e["size"]
-            freed += e["size"]
-            try:
-                os.remove(os.path.join(d, e["file"]))
-            except OSError:
-                pass
-        if freed:
-            self._save(cam_uuid, entries)
+        with self._lock:                    # same load-modify-save discipline
+            entries = self._load(cam_uuid)
+            total = sum(e["size"] for e in entries)
+            freed = 0
+            d = self.cam_dir(cam_uuid)
+            while entries and total > cap:
+                e = entries.pop(0)                       # oldest first
+                total -= e["size"]
+                freed += e["size"]
+                try:
+                    os.remove(os.path.join(d, e["file"]))
+                except OSError:
+                    pass
+            if freed:
+                self._save(cam_uuid, entries)
         return freed
 
     # -- disk guard -----------------------------------------------------------------

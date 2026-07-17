@@ -62,6 +62,9 @@ class Engine(QObject):
 
     # -- device streaming ----------------------------------------------------
     def start_device(self, device) -> None:
+        if getattr(self, "_closed", False):
+            return                       # a connect completing after shutdown must
+        #                                  not start a poll thread into a dead bus
         self._devices[device.instance_id] = device
         device.start(self._ingest)
 
@@ -86,6 +89,7 @@ class Engine(QObject):
             self.tick.emit()
 
     def shutdown(self) -> None:
+        self._closed = True              # refuse late start_device (async connects)
         self._timer.stop()
         for d in list(self._devices.values()):
             try:

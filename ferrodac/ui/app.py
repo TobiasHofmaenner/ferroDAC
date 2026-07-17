@@ -3380,11 +3380,16 @@ class MainWindow(QMainWindow):
             self.reads.shutdown()           # cancel in-flight timeline reads
         if getattr(self, "_prefetcher", None) is not None:
             self._prefetcher.stop()         # stop the playback prefetch worker
-        if self.store_writer is not None:
-            self.store_writer.stop()        # flush the buffer + build final rollups
         self.dashboard.shutdown()
+        # Producers stop BEFORE the durable writer: devices stop streaming, the
+        # engine does its final drain (delivering the tail into the writer's pump),
+        # and only THEN the writer flushes + builds final rollups. The old order
+        # (writer first) silently dropped everything sampled after its last flush
+        # on every orderly exit — against the writer's own lossless guarantee.
         self.manager.stop()
         self.engine.shutdown()
+        if self.store_writer is not None:
+            self.store_writer.stop()        # deliver the backlog, flush, final rollups
         super().closeEvent(event)
         # closing the MAIN window quits the app — otherwise a still-open Timeline or
         # config dialog (a top-level window) keeps the Qt event loop alive and the

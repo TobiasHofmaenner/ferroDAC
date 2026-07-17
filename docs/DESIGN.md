@@ -1759,6 +1759,38 @@ returns a callable `Subscription` (back-compat: calling it unsubscribes).
   `requires_gui` opt-out; driver `_read`/`_connect`/`_write` on the device's own
   threads. All Qt-free imports so a driver/processor-only plugin stays Qt-free.
 
+### 21.4 Choosing the tool (normative — added after the 2026-07-17 concurrency audit)
+
+New concurrent work picks the FIRST matching mechanism — never a bare thread at a
+call site:
+
+- a **continuous stream of readings** → a bus worker lane
+  (`engine.subscribe(sink, thread="worker", mode=…, name="fd-…")`);
+- a **finite user-visible job** (export, clone, download, pin) → a **TaskRunner**
+  task (progress/ETA/cancel/reentrancy keys for free);
+- a **UI-initiated read** of the store/resolver → **ReadService**
+  (supersession + coalescing; never a thread per call);
+- **per-processor compute** → the conflating processor pool (`fd-proc`);
+- **device I/O** → the driver's own poll/reader threads under the platform
+  contract, or `manager._run_async` when initiated from the UI;
+- a **long-lived Qt-free service loop** (sync, prefetch) → the shared periodic-
+  worker skeleton (daemon thread + Event stop + bounded join), or a
+  `ReconnectingClient`-style asyncio-loop-in-thread if it owns a network session
+  (confined to `net/`);
+- **GUI-thread scheduling** → a parented QTimer.
+
+Every worker is Qt-free and crosses back to the GUI ONLY via an explicitly
+`Qt.QueuedConnection` signal or `GuiBridge.post/post_and_wait`
+(`QMetaObject.invokeMethod` is reserved for Qt-Multimedia object affinity in the
+camera driver — do not copy it). `QThread` is used only when the worker object
+itself must emit Qt signals; everything else is a plain `threading.Thread`. Every
+thread is named `fd-<purpose>` so the watchdog, `stats()` and a crash dump can
+attribute it. A public signal that may be emitted from a foreign thread goes
+through a queued trampoline on its owning QObject (see
+`DeviceManager._emit_gui`) — receivers must never depend on AutoConnection
+classifying a raw worker correctly. Never destroy a possibly-running QThread at
+shutdown: bounded-join, then park + reap at exit (`manager._park_thread`).
+
 ## 22. Display plane is PULL — state-driven rendering (decided 2026-07-09)
 
 The 2026-07 pipeline review's finding: §7.2/§7.4 decided one windowed query
