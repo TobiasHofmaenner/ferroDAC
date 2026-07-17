@@ -188,6 +188,9 @@ class LSC:
         self._sinks: Optional[list] = None
         self._desynced = False                 # a timed-out reply may have left the stream
         #                                        offset by one → resync on the next send (§6)
+        self._rx_partial = b""                 # a line whose read_until() timed out mid-line (under
+        #                                        load) — stitched to its tail so a truncated line is
+        #                                        never emitted as a bogus '=' reply / '!' / '?' line
         # Optional background reader (start_reader): decouples '!'/'#' delivery from polling
         # (issue #4). When running it OWNS port reads — '=' replies go to _reply_q, '#'/'!'
         # are dispatched to the callbacks the moment they arrive — and commands read their
@@ -316,14 +319,21 @@ class LSC:
             raise LSCError(f"send {line!r} failed: {exc}") from exc
 
     def _readline(self) -> Optional[str]:
-        """One LF-terminated line, stripped; None on timeout / blank."""
+        """One LF-terminated line, stripped; None on timeout / blank. A read_until() that times
+        out MID-LINE (the reader thread starved under concurrent load) returns a fragment with no
+        terminator; that fragment is buffered and stitched to its tail on the next read, so a
+        truncated line is never surfaced as a (wrong-arity) reply, event, or prompt."""
         ser = self._ser                        # snapshot: check-then-use is atomic vs close()
         if ser is None:
             raise LSCError("port not open")
         data = ser.read_until(TERM)
         if not data:
             return None
-        text = data.decode("ascii", "replace").strip("\r\n \t")
+        if not data.endswith(TERM):            # timed out mid-line under load:
+            self._rx_partial += data           # stash the fragment, wait for its tail
+            return None
+        line, self._rx_partial = self._rx_partial + data, b""
+        text = line.decode("ascii", "replace").strip("\r\n \t")
         return text or None
 
     def read_message(self):
