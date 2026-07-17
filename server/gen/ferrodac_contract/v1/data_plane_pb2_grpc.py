@@ -147,6 +147,16 @@ class ViewerStub:
                 request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RemoveDeviceRequest.SerializeToString,
                 response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.FromString,
                 _registered_method=True)
+        self.WatchPrompts = channel.unary_stream(
+                '/ferrodac_contract.v1.Viewer/WatchPrompts',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchPromptsRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.PromptEvent.FromString,
+                _registered_method=True)
+        self.RespondPrompt = channel.unary_unary(
+                '/ferrodac_contract.v1.Viewer/RespondPrompt',
+                request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RespondPromptRequest.SerializeToString,
+                response_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.FromString,
+                _registered_method=True)
         self.WatchFrames = channel.unary_stream(
                 '/ferrodac_contract.v1.Viewer/WatchFrames',
                 request_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.SubscribeRequest.SerializeToString,
@@ -213,6 +223,22 @@ class ViewerServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def WatchPrompts(self, request, context):
+        """Interaction §7.3: watch OPEN device prompts (snapshot of open, then live
+        opens/closes) so a viewer can surface + answer them in its Requests inbox.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RespondPrompt(self, request, context):
+        """Interaction §7.3: answer an open prompt — the hub routes it to the owning
+        agent, which resolves it locally and drives the device (first-responder-wins).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def WatchFrames(self, request, context):
         """Live video frames for EXPLICITLY named image sources. Opening this stream
         IS the demand signal: the hub tells the owning agent to start encoding
@@ -264,6 +290,16 @@ def add_ViewerServicer_to_server(servicer, server):
             'RemoveRemoteDevice': grpc.unary_unary_rpc_method_handler(
                     servicer.RemoveRemoteDevice,
                     request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RemoveDeviceRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.SerializeToString,
+            ),
+            'WatchPrompts': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchPrompts,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchPromptsRequest.FromString,
+                    response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.PromptEvent.SerializeToString,
+            ),
+            'RespondPrompt': grpc.unary_unary_rpc_method_handler(
+                    servicer.RespondPrompt,
+                    request_deserializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.RespondPromptRequest.FromString,
                     response_serializer=ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.SerializeToString,
             ),
             'WatchFrames': grpc.unary_stream_rpc_method_handler(
@@ -487,6 +523,60 @@ class Viewer:
             target,
             '/ferrodac_contract.v1.Viewer/RemoveRemoteDevice',
             ferrodac__contract_dot_v1_dot_data__plane__pb2.RemoveDeviceRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchPrompts(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/ferrodac_contract.v1.Viewer/WatchPrompts',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.WatchPromptsRequest.SerializeToString,
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.PromptEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RespondPrompt(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ferrodac_contract.v1.Viewer/RespondPrompt',
+            ferrodac__contract_dot_v1_dot_data__plane__pb2.RespondPromptRequest.SerializeToString,
             ferrodac__contract_dot_v1_dot_data__plane__pb2.Ack.FromString,
             options,
             channel_credentials,
