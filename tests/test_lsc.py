@@ -799,6 +799,21 @@ def _capture_prompts(dev):
     return prompts
 
 
+def test_done_withdraws_the_prompt_from_the_inbox(fake):
+    """A '?DONE' (the front panel / another host answered) retires the prompt from the app
+    inbox via BaseDevice.withdraw_prompt — a modal handled ON THE DEVICE stops lingering as
+    pending. It's withdrawn by the SAME uuid the ?ASK raised it under."""
+    dev = _device(fake)
+    prompts = _capture_prompts(dev)
+    withdrawn = []
+    dev.set_prompt_withdraw_sink(withdrawn.append)
+    fake.inject("?ASK,9,confirm,warn,0,2,Yes,No,Retract the arm?")
+    assert _spin(lambda: len(prompts) == 1)
+    prompt, _cb = prompts[0]
+    fake.inject("?DONE,9,Yes,panel")                    # answered on the instrument panel
+    assert _spin(lambda: withdrawn == [prompt.id])      # withdrawn by the same Prompt uuid
+
+
 def test_ask_raises_prompt_through_ask_path(fake):
     """A '?ASK' surfaced by the reader thread becomes a core.interaction Prompt delivered
     through BaseDevice.ask — the fields map correctly (mirrors the !EVT→tag path)."""

@@ -97,6 +97,25 @@ def test_store_withdraw_drops_without_invoking_callback(qapp):
     assert store.withdraw("dev-1") == 0                 # idempotent — nothing left to withdraw
 
 
+def test_store_withdraw_ids_drops_a_specific_prompt(qapp):
+    """withdraw_ids() retires prompts BY id without answering — the device resolved that exact
+    request on its own panel (?DONE), so it leaves the inbox without a callback."""
+    from ferrodac.ui.interactions import PendingInteractions
+
+    store = PendingInteractions()
+    called, resolved = [], []
+    store.resolved.connect(resolved.append)
+    a = Prompt("dev-1", "?", kind=CONFIRM)
+    b = Prompt("dev-1", "?", kind=CONFIRM)
+    store.add(a, called.append)
+    store.add(b, called.append)
+
+    assert store.withdraw_ids(a.id) == 1                 # only that prompt id goes
+    assert store.get(a.id) is None and store.get(b.id) is not None
+    assert called == [] and resolved == []              # no callback, no provenance tag
+    assert store.withdraw_ids(a.id) == 0                # idempotent
+
+
 def test_store_resolve_records_callback_failure(qapp):
     """A driver on_response that throws must not break the store, and the resolved record
     must report the failure (ok=False) so the audit tag stays honest."""

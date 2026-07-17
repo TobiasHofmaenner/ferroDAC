@@ -946,12 +946,14 @@ class LSCDevice(BaseDevice):
 
     def _on_done(self, done: Done) -> None:
         """A ?DONE — the front panel or another host already answered (first-responder-wins).
-        Drop the fw_id so our on_response becomes a GUARDED NO-OP: a late operator answer can
-        never RESPOND again, so the device is never double-answered. (There is no per-prompt
-        driver→store withdraw channel — the ask/on_response contract is the whole surface — so
-        this guard is how a device-resolved prompt is dropped WITHOUT re-calling the device.)"""
+        Drop the fw_id so our on_response becomes a GUARDED NO-OP (a late operator answer can
+        never RESPOND again → never double-answered), AND withdraw the prompt from the app's
+        inbox so a modal answered ON THE DEVICE doesn't linger as pending (via the platform
+        withdraw channel, BaseDevice.withdraw_prompt)."""
         with self._prompt_lock:
-            self._open_prompts.pop(done.id, None)
+            entry = self._open_prompts.pop(done.id, None)
+        if entry is not None:
+            self.withdraw_prompt(entry[0].id)      # entry = (Prompt, options) → retire by uuid
 
     def _ask_to_prompt(self, ask: Ask) -> Prompt:
         """Map a firmware ?ASK onto a Qt-free core.interaction.Prompt. The device owns the

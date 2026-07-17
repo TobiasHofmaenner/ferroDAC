@@ -333,6 +333,8 @@ class MainWindow(QMainWindow):
         # thread → QueuedConnection. On resolve we auto-emit a provenance tag.
         self.interactions = PendingInteractions(self)
         self.manager.device_prompt.connect(self._on_device_prompt, Qt.QueuedConnection)
+        self.manager.device_prompt_withdrawn.connect(
+            self._on_device_prompt_withdrawn, Qt.QueuedConnection)
         self.manager.device_removed.connect(self._on_device_removed)
         self.interactions.added.connect(self._on_prompt_added)
         self.interactions.resolved.connect(self._on_prompt_resolved)
@@ -1157,6 +1159,12 @@ class MainWindow(QMainWindow):
         the toast + fills the inbox). Runs on the GUI thread (QueuedConnection); the
         driver's on_response is invoked here when the operator answers."""
         self.interactions.add(prompt, on_response)
+
+    def _on_device_prompt_withdrawn(self, prompt_id) -> None:
+        """A device RESOLVED its own request (its front panel / another transport answered) →
+        retire it from the inbox without this app answering it, so a handled-on-device modal
+        doesn't linger as pending. GUI thread (QueuedConnection)."""
+        self.interactions.withdraw_ids(prompt_id)
 
     def _on_device_removed(self, ids) -> None:
         """A device was removed → withdraw its still-open requests (no answer, no callback

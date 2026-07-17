@@ -126,6 +126,7 @@ class BaseDevice(Device):
         self._emit = None
         self._tag_sink = None            # platform-injected device→tag channel (§7.3)
         self._prompt_sink = None         # platform-injected device→app→device request channel
+        self._prompt_withdraw_sink = None  # device resolved its own prompt → retire it from the inbox
         # Platform-owned per-device serialization (threading contract, above).
         # Re-entrant so a driver's own `with self._io_lock` (legacy) nests safely.
         self._io_lock = threading.RLock()
@@ -399,6 +400,26 @@ class BaseDevice(Device):
             try:
                 sink(prompt, on_response)
             except Exception:              # a prompt must never break acquisition
+                pass
+
+    def set_prompt_withdraw_sink(self, sink) -> None:
+        """Platform hook: install the ``callable(prompt_id)`` that RETIRES a device-raised
+        request from the app store — the DEVICE resolved it itself (its front panel / another
+        transport answered first, first-responder-wins), so it must leave the inbox WITHOUT
+        this app answering it. Injected by the DeviceManager like the prompt sink; ``None``
+        disables it. A driver never sets this itself."""
+        self._prompt_withdraw_sink = sink
+
+    def withdraw_prompt(self, prompt_id) -> None:
+        """Retire a request THIS device raised via :meth:`ask`, because the device resolved it
+        locally (its ``?DONE`` / an answer on the instrument). Drops it from the app's inbox
+        WITHOUT answering it — no double-answer. Runs on the reader thread; the sink marshals
+        to the GUI thread. A safe no-op until wired."""
+        sink = self._prompt_withdraw_sink
+        if sink is not None:
+            try:
+                sink(prompt_id)
+            except Exception:              # a withdrawal must never break acquisition
                 pass
 
     def _poll_loop(self) -> None:

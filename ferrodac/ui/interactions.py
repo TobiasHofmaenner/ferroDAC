@@ -162,7 +162,19 @@ class PendingInteractions(QObject):
         Match on device_id (the prompt carries data_id = uuid-or-instance_id), so pass
         both the uuid and the instance_id, like ``has_pending``."""
         ids = {d for d in device_ids if d}
-        victims = [pid for pid, e in self._open.items() if e.prompt.device_id in ids]
+        return self._drop([pid for pid, e in self._open.items() if e.prompt.device_id in ids])
+
+    def withdraw_ids(self, *prompt_ids) -> int:
+        """Retire specific OPEN prompts BY id, WITHOUT invoking on_response — the device (its
+        front panel / another transport) or a future hub peer already resolved them, so they
+        must leave the inbox without this app answering (no double-answer, no provenance tag).
+        The per-prompt counterpart to :meth:`withdraw` (which retires by device). Returns how
+        many were dropped."""
+        return self._drop([pid for pid in prompt_ids if pid in self._open])
+
+    def _drop(self, victims: list) -> int:
+        """Remove open prompts (by id) + their timers and signal — the shared body of
+        withdraw / withdraw_ids. Never touches on_response (a withdrawal is not an answer)."""
         for pid in victims:
             self._open.pop(pid, None)
             t = self._timers.pop(pid, None)

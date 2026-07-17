@@ -154,6 +154,25 @@ def test_device_prompt_channel_wired_on_add(qapp):
     assert got == [(prompt, cb)]                     # …it reached device_prompt with its callback
 
 
+def test_device_prompt_withdraw_channel_wired_on_add(qapp):
+    """A device also gets a WITHDRAW channel: withdraw_prompt(id) reaches
+    DeviceManager.device_prompt_withdrawn — the device resolved its own prompt (?DONE) and the
+    app retires it from the inbox. Safe no-op before it is wired (the prompt channel's twin)."""
+    mgr = DeviceManager([], engine=None, registry=None)
+    got = []
+    mgr.device_prompt_withdrawn.connect(got.append)
+
+    dev = _MintedDevice("pysrc-wd")
+    dev.withdraw_prompt("x")                          # no sink yet → safe no-op, no crash
+    assert got == []
+
+    mgr.add_user_device(dev, user=True)
+    assert dev._prompt_withdraw_sink is not None      # manager injected the withdraw sink
+    dev.withdraw_prompt("prompt-uuid-1")
+    qapp.processEvents()
+    assert got == ["prompt-uuid-1"]                   # …it reached device_prompt_withdrawn
+
+
 def test_remove_emits_device_removed_for_prompt_withdrawal(qapp):
     """remove() announces the device's ids on device_removed so the app can withdraw its
     open requests (core.interaction) — carries (uuid, instance_id)."""

@@ -76,6 +76,9 @@ class DeviceManager(QObject):
     device_removed = Signal(object)  # a device was REMOVED (user remove) — carries its
     #                                 (uuid, instance_id). The app withdraws that device's
     #                                 open prompts so none linger with a dead-driver callback.
+    device_prompt_withdrawn = Signal(str)  # a device RESOLVED one of its own prompts (its
+    #                                 front panel / another transport, by prompt id) — the app
+    #                                 retires it from the inbox, no answer (core.interaction).
 
     def __init__(
         self,
@@ -158,6 +161,8 @@ class DeviceManager(QObject):
             device.set_tag_sink(self.device_tag.emit)
         if hasattr(device, "set_prompt_sink"):
             device.set_prompt_sink(self.device_prompt.emit)
+        if hasattr(device, "set_prompt_withdraw_sink"):
+            device.set_prompt_withdraw_sink(self.device_prompt_withdrawn.emit)
 
     def add(self, instance_id: str, *, user: bool = False) -> None:
         """Activate a device. ``user=True`` marks an explicit user add (the Devices
