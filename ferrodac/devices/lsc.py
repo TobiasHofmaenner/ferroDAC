@@ -7,13 +7,14 @@ outside ferroDAC (cal stations, flashing scripts):
     LSC line-oriented ASCII protocol (see the firmware repo's
     ``docs/programming-manual.md``). Plain synchronous methods; no ferroDAC/Qt.
     The wire is demuxed by first byte: ``=`` solicited reply, ``#`` streamed
-    frame, ``!`` asynchronous event — these interleave, so a pending command's
-    ``=`` reply is taken as the next ``=`` line while ``#``/``!`` are surfaced
-    via callbacks.
+    frame, ``!`` asynchronous event, ``?`` an operator prompt (``?ASK`` raised /
+    ``?DONE`` resolved) — these interleave, so a pending command's ``=`` reply is
+    taken as the next ``=`` line while ``#``/``!``/``?`` are surfaced via callbacks.
   * :class:`LSCDevice` — the thin ferroDAC ``BaseDevice`` wrapper. It is
     SELF-DESCRIBING: on connect it reads ``DESCRIBE?`` and builds its
     ferroDAC ``Source``/``Sink`` objects from that schema — nothing is
-    hard-coded. Device-emitted ``!EVT`` lines become tags (origin=device).
+    hard-coded. Device-emitted ``!EVT`` lines become tags (origin=device), and
+    ``?ASK`` prompt lines become device→app→device requests via ``BaseDevice.ask``.
 
 Link: front mini-USB → FTDI FT232R → Due UART0, **1,050,000 baud 8N1, no flow
 control, LF terminator** (the measured-clean end-to-end rate — manual §1).
@@ -42,6 +43,8 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from ..core.base import BaseDevice
+from ..core.interaction import (
+    ACKNOWLEDGE, CHOICE, CONFIRM, KINDS, SEVERITIES, STAY, Prompt)
 from ..core.serial_arbiter import PORTS_IN_USE, SERIAL_LOCK
 from ..core.serial_connect import open_and_identify
 from ..core.tag import ORIGIN_DEVICE, Marker, color_for
@@ -123,6 +126,29 @@ class Event:
     detail: str
 
 
+@dataclass(frozen=True)
+class Ask:
+    """A device-raised operator prompt (manual §8):
+    ``?ASK,<id>,<kind>,<sev>,<timeout_ms>,<nopts>,<opt0>[,<opt1>...],<question>``.
+    ``id`` is a small firmware int the RESPOND/DONE correlate on; ``options`` is the
+    ordered answer set (RESPOND carries the 0-based index into it)."""
+    id: int
+    kind: str                    # confirm|choice|text|acknowledge (firmware slug)
+    severity: str                # info|warn|critical
+    timeout_ms: int              # device-side deadline, 0 = none
+    options: tuple               # ordered answer options (RESPOND indexes into this)
+    question: str                # the full question (may contain commas — it is the tail)
+
+
+@dataclass(frozen=True)
+class Done:
+    """A device-side prompt resolution (manual §8): ``?DONE,<id>,<answer>,<by>`` —
+    the front panel or another host answered first (first-responder-wins)."""
+    id: int
+    answer: str
+    by: str
+
+
 # --------------------------------------------------------------------------- #
 #  Reusable, dependency-free controller
 # --------------------------------------------------------------------------- #
@@ -136,14 +162,17 @@ class LSC:
             schema = lsc.describe()
             values = lsc.meas()          # {source_id: typed_value}
 
-    ``#`` stream frames and ``!`` events that arrive while awaiting a ``=`` reply
-    are surfaced through the ``on_stream`` / ``on_event`` callbacks (set them on
-    the instance or pass in the constructor) so nothing is silently dropped.
+    ``#`` stream frames, ``!`` events and ``?`` prompts (``?ASK``/``?DONE``) that
+    arrive while awaiting a ``=`` reply are surfaced through the ``on_stream`` /
+    ``on_event`` / ``on_ask`` / ``on_done`` callbacks (set them on the instance or
+    pass in the constructor) so nothing is silently dropped.
     """
 
     def __init__(self, port: str, baud: int = BAUD, timeout: float = 1.0,
                  on_event: Optional[Callable[[Event], None]] = None,
-                 on_stream: Optional[Callable[[StreamFrame], None]] = None):
+                 on_stream: Optional[Callable[[StreamFrame], None]] = None,
+                 on_ask: Optional[Callable[["Ask"], None]] = None,
+                 on_done: Optional[Callable[["Done"], None]] = None):
         if baud == 1200:                       # defence in depth (SAFETY, above)
             raise LSCError("1200 baud is the LSC bootloader trigger")
         self.port = port
@@ -151,6 +180,8 @@ class LSC:
         self.timeout = timeout
         self.on_event = on_event
         self.on_stream = on_stream
+        self.on_ask = on_ask                   # '?ASK' — a device-raised operator prompt (§8)
+        self.on_done = on_done                 # '?DONE' — that prompt resolved (panel/other host)
         self._ser = None
         self._schema: Optional[dict] = None
         self._sources: Optional[list] = None   # cached DESCRIBE sources[] (order!)
@@ -257,6 +288,8 @@ class LSC:
                 self._dispatch(self.on_stream, self._parse_frame(raw))
             elif c == "!":
                 self._dispatch(self.on_event, self._parse_event(raw))
+            elif c == "?":
+                self._dispatch_prompt(raw)         # ?ASK/?DONE → on_ask/on_done (manual §8)
             # else: bare/unknown line — skip
 
     def _drain_reply_q(self) -> None:
@@ -296,8 +329,9 @@ class LSC:
     def read_message(self):
         """Read ONE unsolicited device→host line and classify it by first byte
         (manual §2): :class:`Reply` (``=``), :class:`StreamFrame` (``#``),
-        :class:`Event` (``!``), or None (timeout / unknown prefix). This is the
-        pull API a stream-mode consumer loops on."""
+        :class:`Event` (``!``), :class:`Ask`/:class:`Done` (``?``), or None
+        (timeout / unknown prefix). This is the pull API a stream-mode consumer
+        loops on."""
         raw = self._readline()
         if raw is None:
             return None
@@ -308,6 +342,8 @@ class LSC:
             return self._parse_frame(raw)
         if c == "!":
             return self._parse_event(raw)
+        if c == "?":
+            return self._parse_prompt(raw)     # Ask / Done / None (manual §8)
         return None                            # bare / unknown line — ignore
 
     def _await_reply(self) -> str:
@@ -333,6 +369,8 @@ class LSC:
                 self._dispatch(self.on_stream, self._parse_frame(raw))
             elif c == "!":
                 self._dispatch(self.on_event, self._parse_event(raw))
+            elif c == "?":
+                self._dispatch_prompt(raw)         # ?ASK/?DONE → on_ask/on_done (manual §8)
             # else: bare/unknown line — skip
         self._desynced = True
         raise LSCError("no reply (too many interleaved frames)")
@@ -371,6 +409,67 @@ class LSC:
         kind = parts[2] if len(parts) > 2 else ""
         detail = parts[3] if len(parts) > 3 else ""
         return Event(ms=ms, kind=kind, detail=detail)
+
+    def _dispatch_prompt(self, raw: str) -> None:
+        """Classify a ``?`` prompt line and route it: ``?ASK`` → ``on_ask``,
+        ``?DONE`` → ``on_done`` (manual §8). An unknown ``?`` verb is skipped."""
+        msg = self._parse_prompt(raw)
+        if isinstance(msg, Ask):
+            self._dispatch(self.on_ask, msg)
+        elif isinstance(msg, Done):
+            self._dispatch(self.on_done, msg)
+
+    @staticmethod
+    def _parse_prompt(raw: str):
+        """Classify a ``?`` device→host prompt line (manual §8) into :class:`Ask` /
+        :class:`Done`, or None for an unknown/malformed ``?`` verb (ignored, like a
+        bare line — a bad prompt never crashes the demux)."""
+        tok, _, rest = raw[1:].partition(",")   # drop the leading '?'; split verb ↔ body
+        tok = tok.upper()
+        if tok == "ASK":
+            return LSC._parse_ask(rest)
+        if tok == "DONE":
+            return LSC._parse_done(rest)
+        return None
+
+    @staticmethod
+    def _parse_ask(rest: str) -> "Optional[Ask]":
+        # "<id>,<kind>,<sev>,<timeout_ms>,<nopts>,<opt0>[,<opt1>...],<question>".
+        # The question is the tail (may contain commas); nopts locates where it starts.
+        fields = rest.split(",")
+        if len(fields) < 6:
+            return None                          # malformed — ignore rather than raise
+        try:
+            fw_id = int(fields[0])
+        except ValueError:
+            return None
+        kind = fields[1].strip()
+        sev = fields[2].strip()
+        try:
+            timeout_ms = int(fields[3])
+        except ValueError:
+            timeout_ms = 0
+        try:
+            nopts = max(0, int(fields[4]))
+        except ValueError:
+            nopts = 0
+        options = tuple(f.strip() for f in fields[5:5 + nopts])
+        question = ",".join(fields[5 + nopts:]).strip()   # tail — commas preserved
+        return Ask(id=fw_id, kind=kind, severity=sev, timeout_ms=timeout_ms,
+                   options=options, question=question)
+
+    @staticmethod
+    def _parse_done(rest: str) -> "Optional[Done]":
+        # "<id>,<answer>,<by>" — answer/by are simple tokens; keep any stray commas
+        # in `by` out of the way with a bounded split.
+        fields = rest.split(",", 2)
+        try:
+            fw_id = int(fields[0])
+        except (IndexError, ValueError):
+            return None
+        answer = fields[1].strip() if len(fields) > 1 else ""
+        by = fields[2].strip() if len(fields) > 2 else ""
+        return Done(id=fw_id, answer=answer, by=by)
 
     @staticmethod
     def _parse_err(payload: str) -> tuple[int, str]:
@@ -479,6 +578,25 @@ class LSC:
 
     def stream_off(self) -> str:
         return self._query("STREAM OFF")
+
+    # -- operator prompts (device→app→device requests, manual §8) ------------- #
+    def respond(self, fw_id: int, index: int) -> str:
+        """Answer an OPEN device prompt: ``RESPOND <id> <index>`` — ``index`` is the
+        0-based position in the ``?ASK`` options (manual §8). First-responder-wins across
+        the front panel and every host, so the firmware harmlessly ignores a RESPOND for
+        an already-resolved id. Raises :class:`LSCError` on an ``=ERR`` reply."""
+        line = f"RESPOND {int(fw_id)} {int(index)}"
+        payload = self._transact(line)
+        if payload == "ERR" or payload.startswith("ERR,"):
+            code, msg = self._parse_err(payload)
+            raise LSCError(f"respond {line!r} error {code}: {msg}", code=code)
+        return payload
+
+    def prompts_query(self) -> str:
+        """``PROMPTS?`` — ask the device to re-announce every OPEN prompt as a fresh
+        ``?ASK`` (manual §8), so a late/reconnecting host re-learns a mid-modal request.
+        The store is idempotent-by-id, so a re-announced prompt de-dups."""
+        return self._query("PROMPTS?")
 
 
 # --------------------------------------------------------------------------- #
@@ -614,6 +732,14 @@ class LSCDevice(BaseDevice):
         # !EVT lines become device-origin tags via BaseDevice.emit_tag() (§7.3). Delivery
         # is driven by the LSC controller's background reader thread — the moment an event
         # arrives, NOT gated on a MEAS?/poll cycle (issue #4).
+        # ?ASK lines become device→app→device prompts via BaseDevice.ask(). fw_id -> (Prompt,
+        # options): the firmware knows only the small int id (not the Prompt's uuid), so we keep
+        # the map to translate a ?DONE and to send RESPOND <fw_id> <index> back. It OUTLIVES a
+        # reconnect (same LSCDevice) so PROMPTS? re-announces the SAME Prompt uuid → the store
+        # de-dups instead of duplicating an open request. Touched by the reader thread (?ASK/
+        # ?DONE) and the GUI thread (on_response) → guarded by _prompt_lock.
+        self._open_prompts: dict = {}
+        self._prompt_lock = threading.Lock()
 
     # -- discovery -------------------------------------------------------------- #
     @classmethod
@@ -662,6 +788,8 @@ class LSCDevice(BaseDevice):
         #                                           (the tag sink is already wired by the manager;
         #                                            the reader is off, so idn() dispatches !EVT
         #                                            synchronously — start_reader() is after identify)
+        lsc.on_ask = self._on_ask                 # a modal already open on connect surfaces too
+        lsc.on_done = self._on_done               # (both fire on the reader thread once it starts)
         try:
             parsed = open_and_identify(lsc, _parse_idn)   # open+warm-up+retried *IDN? (#9)
             if parsed is None:
@@ -682,6 +810,13 @@ class LSCDevice(BaseDevice):
             # timeline in real time even while the device sits idle — no MEAS?/poll needed
             # (issue #4). Inside the try so a failure here still closes the port.
             lsc.start_reader()
+            # Re-announce any modal already open on the front panel so a mid-modal RECONNECT
+            # re-surfaces it (the reader delivers the ?ASK; the store de-dups by uuid). Tolerate
+            # firmware without PROMPTS? — an =ERR here must not fail an otherwise-good connect.
+            try:
+                lsc.prompts_query()
+            except LSCError:
+                pass
         except Exception:
             lsc.close()
             raise
@@ -789,6 +924,91 @@ class LSCDevice(BaseDevice):
             payload={"ms_since_boot": evt.ms, "detail": evt.detail},
             immutable=True,                       # an emitted fact — time is fixed
         )
+
+    # -- operator prompts (?ASK/?DONE → BaseDevice.ask, mirror of _on_event) --- #
+    def _on_ask(self, ask: Ask) -> None:
+        """A ?ASK surfaced by the reader thread → a device→app→device Prompt via
+        BaseDevice.ask(), in real time (mirrors _on_event / issue #4). Keeps fw_id →
+        (Prompt, options) so ?DONE can be translated and the answer mapped back to the
+        firmware option index. A re-announced fw_id (PROMPTS?/reconnect) re-uses the SAME
+        Prompt so the store de-dups. Runs on the reader thread; ask's injected sink
+        marshals to the GUI thread."""
+        with self._prompt_lock:
+            existing = self._open_prompts.get(ask.id)
+            if existing is not None:
+                prompt = existing[0]              # re-announce → SAME uuid, store de-dups
+            else:
+                prompt = self._ask_to_prompt(ask)
+                self._open_prompts[ask.id] = (prompt, tuple(ask.options))
+        # on_response runs on the GUI thread when the operator answers (first-responder-wins);
+        # bind the firmware id so the callback maps the answer to the option index + RESPONDs.
+        self.ask(prompt, on_response=lambda answer, fw_id=ask.id: self._respond(fw_id, answer))
+
+    def _on_done(self, done: Done) -> None:
+        """A ?DONE — the front panel or another host already answered (first-responder-wins).
+        Drop the fw_id so our on_response becomes a GUARDED NO-OP: a late operator answer can
+        never RESPOND again, so the device is never double-answered. (There is no per-prompt
+        driver→store withdraw channel — the ask/on_response contract is the whole surface — so
+        this guard is how a device-resolved prompt is dropped WITHOUT re-calling the device.)"""
+        with self._prompt_lock:
+            self._open_prompts.pop(done.id, None)
+
+    def _ask_to_prompt(self, ask: Ask) -> Prompt:
+        """Map a firmware ?ASK onto a Qt-free core.interaction.Prompt. The device owns the
+        timeout (its ?DONE by=timeout closes the request), so on_timeout=STAY: the host never
+        independently auto-answers (the §safety model — a host timeout is not a 2nd authority)."""
+        sev = ask.severity if ask.severity in SEVERITIES else "info"
+        timeout = ask.timeout_ms / 1000.0 if ask.timeout_ms and ask.timeout_ms > 0 else None
+        return Prompt(
+            device_id=self.data_id,
+            question=ask.question,
+            kind=self._prompt_kind(ask.kind),
+            options=list(ask.options),
+            severity=sev,
+            timeout=timeout,
+            on_timeout=STAY,
+        )
+
+    @staticmethod
+    def _prompt_kind(fw_kind: str) -> str:
+        """Firmware kind slug → a core.interaction kind. An unknown slug degrades to
+        ACKNOWLEDGE (a single OK), so a new firmware kind still renders (never a crash)."""
+        k = (fw_kind or "").strip().lower()
+        return k if k in KINDS else ACKNOWLEDGE
+
+    @staticmethod
+    def _answer_to_index(answer, options, kind) -> int:
+        """The operator's answer → the 0-based firmware option INDEX RESPOND carries. A
+        confirm's first firmware option is the affirmative (True→0, False→1); a choice maps
+        by option string; acknowledge/text collapse to the single/first option. TOTAL — a
+        surprising answer maps to 0 rather than raising inside the on_response callback."""
+        if kind == CONFIRM:
+            return 0 if answer else 1
+        if kind == CHOICE:
+            if isinstance(answer, str) and answer in options:
+                return options.index(answer)
+            if isinstance(answer, bool):          # bool is an int subclass — guard before int
+                return 0
+            if isinstance(answer, int) and 0 <= answer < max(len(options), 1):
+                return answer                     # already an index
+            return 0
+        return 0                                   # acknowledge / text / unknown
+
+    def _respond(self, fw_id: int, answer) -> None:
+        """The Prompt's on_response, invoked once on the GUI thread by the store (first-
+        responder-wins): pop the fw_id (so a racing ?DONE / second responder can't double-
+        answer), map the answer to the option index, and send RESPOND <fw_id> <index>. Raises
+        if the link is down / the device refuses, so the store records the ack as failed."""
+        with self._prompt_lock:
+            entry = self._open_prompts.pop(fw_id, None)
+        if entry is None:
+            return                                 # already resolved (?DONE / another surface)
+        prompt, options = entry
+        index = self._answer_to_index(answer, options, prompt.kind)
+        with self._io_lock:
+            if self._lsc is None:
+                raise RuntimeError("LSC link is down")
+            self._lsc.respond(fw_id, index)
 
     def _read(self, source: Source):
         with self._io_lock:

@@ -16,6 +16,8 @@ from ferrodac.devices.lsc import (  # noqa: E402
     LSC,
     LSCDevice,
     LSCError,
+    Ask,
+    Done,
     Event,
     ProbeResult,
     StreamFrame,
@@ -24,6 +26,7 @@ from ferrodac.devices.lsc import (  # noqa: E402
     probe_port,
 )
 from ferrodac.core.device import Modality, SinkKind  # noqa: E402
+from ferrodac.core.interaction import ACKNOWLEDGE, CHOICE, CONFIRM  # noqa: E402
 from ferrodac.core.tag import ORIGIN_DEVICE  # noqa: E402
 
 IDN = "Ferrovac,LSC,0001,demo-0.1,LSCIAKTHFIHELIOS"
@@ -71,6 +74,9 @@ class FakeSerial:
         self.commands = []                               # every line the host sent (for asserts)
         self.drop_next_reply = False                     # simulate a device that misses one reply
         self.idn_fail = 0                                # first N *IDN? return ERR (first-connect #9)
+        self.responded = []                              # every RESPOND line the host sent (§8 asserts)
+        self.reannounce = []                             # extra ?ASK lines PROMPTS? re-emits (§8)
+        self.no_prompts = False                          # simulate firmware without the PROMPTS? verb
         self._lock = threading.Lock()                    # _buf is touched by the reader thread too
 
     # -- pyserial surface the controller touches --
@@ -137,6 +143,13 @@ class FakeSerial:
             return ["=OK"]
         if up.startswith("STREAM "):
             self.streaming = True
+            return ["=OK"]
+        if up == "PROMPTS?":                              # re-announce any open prompt (§8)
+            if self.no_prompts:                          # older firmware without the verb
+                return ['=ERR,1,"Unknown command"']
+            return ["=OK"] + list(self.reannounce)
+        if up.startswith("RESPOND"):                     # host answers a prompt (§8)
+            self.responded.append(line)                  # e.g. "RESPOND 7 0"
             return ["=OK"]
         if ":" in line:
             left, right = line.split(":", 1)
@@ -727,3 +740,153 @@ def test_device_write_action_sends_do(fake):
     fake.commands.clear()
     dev._write(action, None)
     assert "fib_xfer:DO" in fake.commands
+
+
+# -- issue #12: operator prompts (?ASK/?DONE) → the request/response channel ---- #
+#
+# The firmware raises a modal on its front panel with `?ASK` and resolves it with
+# `?DONE`; before this fix both fell through the =/#/! demux and were silently DROPPED.
+# Now the driver classifies them into Ask/Done, surfaces ?ASK as a core.interaction
+# Prompt via BaseDevice.ask, sends the answer back as `RESPOND <fw_id> <index>`, and
+# drops a device-resolved (?DONE) prompt WITHOUT double-answering.
+
+# -- controller: demux + parse (mirrors the =/#/! tests) --
+
+def test_read_message_classifies_prompt_lines(fake):
+    """read_message classifies '?' lines: ?ASK → Ask, ?DONE → Done (the demux fix)."""
+    with LSC("/dev/ttyUSB0") as lsc:
+        fake.inject("?ASK,2,confirm,critical,5000,2,Yes,No,Proceed, right now?")
+        ask = lsc.read_message()
+        assert isinstance(ask, Ask)
+        assert (ask.id, ask.kind, ask.severity) == (2, "confirm", "critical")
+        assert ask.timeout_ms == 5000 and ask.options == ("Yes", "No")
+        assert ask.question == "Proceed, right now?"          # the tail keeps its comma
+        fake.inject("?DONE,2,Yes,operator")
+        done = lsc.read_message()
+        assert isinstance(done, Done)
+        assert (done.id, done.answer, done.by) == (2, "Yes", "operator")
+
+
+def test_ask_before_reply_is_surfaced_synchronously(fake):
+    """A '?ASK' interleaved before a '=' reply is surfaced via on_ask while the reply is
+    still returned — the demux contract at the synchronous _await_reply site (manual §2)."""
+    asks = []
+    with LSC("/dev/ttyUSB0", on_ask=asks.append) as lsc:
+        lsc.describe()
+        fake.inject("?ASK,1,acknowledge,info,0,0,Refill the LN2 dewar")   # before the reply
+        m = lsc.meas()
+        assert m["p_loadlock"] == pytest.approx(8.4e-07)      # reply still parsed
+    assert len(asks) == 1
+    assert asks[0].kind == "acknowledge" and asks[0].question == "Refill the LN2 dewar"
+    assert asks[0].options == ()                              # nopts 0 → no options
+
+
+def test_malformed_ask_is_ignored_not_crashing(fake):
+    """A short/garbled '?ASK' returns None (ignored like a bare line) — a bad prompt line
+    never crashes the demux."""
+    with LSC("/dev/ttyUSB0") as lsc:
+        fake.inject("?ASK,bogus")                             # far too few fields
+        assert lsc.read_message() is None
+        fake.inject("?WAT,1,2,3")                             # unknown '?' verb
+        assert lsc.read_message() is None
+
+
+# -- device wrapper: ?ASK → Prompt via ask, RESPOND, ?DONE, PROMPTS? --
+
+def _capture_prompts(dev):
+    prompts = []
+    dev.set_prompt_sink(lambda p, cb: prompts.append((p, cb)))
+    return prompts
+
+
+def test_ask_raises_prompt_through_ask_path(fake):
+    """A '?ASK' surfaced by the reader thread becomes a core.interaction Prompt delivered
+    through BaseDevice.ask — the fields map correctly (mirrors the !EVT→tag path)."""
+    dev = _device(fake)
+    prompts = _capture_prompts(dev)
+    fake.inject("?ASK,9,choice,warn,4500,2,FC,SEM,Which detector is installed?")
+    assert _spin(lambda: len(prompts) == 1)
+    prompt, _cb = prompts[0]
+    assert prompt.kind == CHOICE
+    assert list(prompt.options) == ["FC", "SEM"]
+    assert prompt.question == "Which detector is installed?"
+    assert prompt.severity == "warn"
+    assert prompt.timeout == pytest.approx(4.5)              # ms → seconds
+    assert prompt.device_id == dev.data_id                  # raised BY this device
+
+
+def test_confirm_answer_writes_respond_index(fake):
+    """Answering a confirm writes 'RESPOND <fw_id> <index>' — True → the affirmative
+    option 0, False → option 1 (the answer→option-index mapping)."""
+    dev = _device(fake)
+    prompts = _capture_prompts(dev)
+    fake.inject("?ASK,7,confirm,warn,0,2,Yes,No,Retract the arm?")
+    assert _spin(lambda: len(prompts) == 1)
+    _p, on_response = prompts[0]
+    on_response(True)                                        # operator answers Yes
+    assert fake.responded == ["RESPOND 7 0"]                 # True → option index 0
+
+
+def test_choice_answer_maps_to_option_index(fake):
+    """A choice answer (an option STRING) is mapped back to its firmware option INDEX."""
+    dev = _device(fake)
+    prompts = _capture_prompts(dev)
+    fake.inject("?ASK,4,choice,info,0,3,idle,requested,accepted,Pick a state")
+    assert _spin(lambda: len(prompts) == 1)
+    _p, on_response = prompts[0]
+    on_response("accepted")
+    assert fake.responded == ["RESPOND 4 2"]                 # "accepted" → index 2
+
+
+def test_done_drops_pending_without_double_answering(fake):
+    """A '?DONE' (the panel or another host answered first) drops the pending prompt so a
+    LATE operator answer is a guarded no-op — the device is NEVER double-answered."""
+    dev = _device(fake)
+    prompts = _capture_prompts(dev)
+    fake.inject("?ASK,9,choice,info,0,2,FC,SEM,Which detector?")
+    assert _spin(lambda: len(prompts) == 1)
+    _p, on_response = prompts[0]
+    fake.inject("?DONE,9,SEM,panel")                         # resolved on the front panel
+    assert _spin(lambda: 9 not in dev._open_prompts)         # driver forgot the fw_id…
+    on_response("SEM")                                       # …so a late answer does nothing
+    assert fake.responded == []                              # NO RESPOND — no double-answer
+
+
+def test_reannounced_ask_reuses_the_same_prompt(fake):
+    """A re-announced fw_id (PROMPTS? / reconnect) re-uses the SAME Prompt object (uuid), so
+    the idempotent-by-id store de-dups instead of showing the request twice."""
+    dev = _device(fake)
+    prompts = _capture_prompts(dev)
+    fake.inject("?ASK,3,confirm,warn,0,2,Yes,No,Retract?")
+    assert _spin(lambda: len(prompts) == 1)
+    fake.inject("?ASK,3,confirm,warn,0,2,Yes,No,Retract?")   # PROMPTS?/reconnect re-emit
+    assert _spin(lambda: len(prompts) == 2)                  # ask() fired again…
+    assert prompts[1][0] is prompts[0][0]                    # …with the SAME Prompt (uuid)
+
+
+def test_prompts_query_sent_on_connect(fake):
+    """On connect the driver sends 'PROMPTS?' so a mid-modal reconnect re-announces any
+    still-open front-panel prompt."""
+    dev = _device(fake)
+    assert "PROMPTS?" in fake.commands
+    assert dev._lsc is not None
+
+
+def test_connect_survives_firmware_without_prompts_verb(fake):
+    """An '=ERR' to PROMPTS? (older firmware that lacks the verb) must NOT fail an
+    otherwise-good connect — the driver tolerates it."""
+    fake.no_prompts = True
+    dev = _device(fake)                                      # _connect must still succeed
+    assert dev._lsc is not None and dev._firmware == "demo-0.1"
+
+
+def test_unknown_ask_kind_degrades_to_acknowledge(fake):
+    """An unrecognised firmware kind degrades to ACKNOWLEDGE (a single OK) — a new kind
+    still renders, never crashes."""
+    dev = _device(fake)
+    prompts = _capture_prompts(dev)
+    fake.inject("?ASK,5,scan-select,info,0,0,New kind of question")
+    assert _spin(lambda: len(prompts) == 1)
+    assert prompts[0][0].kind == ACKNOWLEDGE
+    prompts[0][1](True)                                      # OK → the single option, index 0
+    assert fake.responded == ["RESPOND 5 0"]
