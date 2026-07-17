@@ -153,6 +153,24 @@ class MarkerModel(QObject):
         self.changed.emit()
         return True
 
+    def upsert_local(self, m: Marker) -> bool:
+        """Ingest a pre-built tag that originated on THIS box — a device/processor
+        raised it via ``emit_tag`` (the marker is fully built, unlike ``add``'s
+        by-field create). Store it by id and announce it LOCALLY (``tag_changed``)
+        so the hub-sync publishes it to peers. This is the crucial difference from
+        ``upsert``, which is for tags merged FROM a peer and stays silent to avoid
+        echoing them back. LWW-guarded like ``upsert`` so a stray re-emit of the
+        same id can't clobber a newer edit. Returns True if it changed our state."""
+        cur = self._markers.get(m.id)
+        if cur is not None and m.version < cur.version:
+            return False                         # stale — ignore
+        if cur is not None and m.version == cur.version and not m.deleted \
+                and not cur.deleted:
+            return False                         # idempotent same-version re-emit
+        self._markers[m.id] = m
+        self._local(m.id)                        # bump + changed + tag_changed → publish
+        return True
+
     # -- queries -------------------------------------------------------------
     def get(self, mid: str) -> Marker | None:
         m = self._markers.get(mid)
