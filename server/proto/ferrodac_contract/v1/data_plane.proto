@@ -284,6 +284,7 @@ message AgentMessage {
     Retire retire = 4;
     Heartbeat heartbeat = 5;
     Ack ack = 6;                 // control: result of a Command (correlated by request_id)
+    PromptEvent prompt = 7;      // interaction §7.3: a device prompt opened / closed on this agent
   }
 }
 
@@ -305,6 +306,61 @@ message HubMessage {
     Configure configure = 5;     // control §5.3: set an option / rate / name
     AddDevice add_device = 6;    // remote device addition: onboard an available device
     RemoveDevice remove_device = 7;   // remote device removal: retire an active remote device
+    PromptResponse prompt_response = 8;  // interaction §7.3: a viewer's answer routed to the owner
+  }
+}
+
+// --------------------------------------------------------------------------- //
+//  Interaction prompts (§7.3) — a device-raised request relayed over the hub so a
+//  VIEWER can answer it. The owning AGENT publishes opens/closes up its Ingest
+//  session (AgentMessage.prompt); the hub mirrors them to every viewer's
+//  WatchPrompts stream; a viewer's RespondPrompt routes back down to the owner
+//  (HubMessage.prompt_response), which resolves it locally + drives the device.
+//  First-responder-wins is arbitrated by the owning agent's local store.
+// --------------------------------------------------------------------------- //
+message WirePrompt {
+  string id = 1;                 // Prompt.id (uuid — correlates the answer back)
+  string device_uuid = 2;       // the raising device's data_id
+  string question = 3;
+  string kind = 4;              // confirm | choice | text | acknowledge
+  string title = 5;
+  repeated string options = 6;  // for kind=choice
+  string severity = 7;          // info | warn | critical
+  double timeout = 8;           // seconds; 0 = none (advisory on a viewer)
+  string on_timeout = 9;        // abort | stay | <default> (advisory on a viewer)
+  double created = 10;
+}
+message PromptClosed {
+  string id = 1;
+  string answer_text = 2;       // display-only rendering of the answer
+  string by = 3;                // who resolved it (operator | connector:* | device | timeout:*)
+}
+message PromptEvent {
+  oneof ev {
+    WirePrompt opened = 1;      // a new open prompt to mirror to viewers
+    PromptClosed closed = 2;    // it resolved anywhere → every surface withdraws it
+  }
+}
+message PromptResponse {        // hub -> owning agent: a remote answer to resolve locally
+  string id = 1;
+  string by = 2;
+  oneof value {
+    bool boolean = 3;           // confirm
+    string text = 4;            // choice option / text
+    bool trigger = 5;           // acknowledge
+  }
+}
+message WatchPromptsRequest {
+  string token = 1;
+}
+message RespondPromptRequest { // viewer -> hub: an answer to an open prompt
+  string token = 1;
+  string id = 2;
+  string by = 3;
+  oneof value {
+    bool boolean = 4;
+    string text = 5;
+    bool trigger = 6;
   }
 }
 
@@ -411,6 +467,12 @@ service Viewer {
   // Remote device removal: ask the owning client (by device uuid) to retire an active
   // remote device — the reverse of AddRemoteDevice; it then drops from the catalog.
   rpc RemoveRemoteDevice(RemoveDeviceRequest) returns (Ack);
+  // Interaction §7.3: watch OPEN device prompts (snapshot of open, then live
+  // opens/closes) so a viewer can surface + answer them in its Requests inbox.
+  rpc WatchPrompts(WatchPromptsRequest) returns (stream PromptEvent);
+  // Interaction §7.3: answer an open prompt — the hub routes it to the owning
+  // agent, which resolves it locally and drives the device (first-responder-wins).
+  rpc RespondPrompt(RespondPromptRequest) returns (Ack);
   // Live video frames for EXPLICITLY named image sources. Opening this stream
   // IS the demand signal: the hub tells the owning agent to start encoding
   // while >=1 watcher holds a ref, stop on the last close. Latest-wins

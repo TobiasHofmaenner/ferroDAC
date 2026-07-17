@@ -309,6 +309,12 @@ class MainWindow(QMainWindow):
         self.hub.connection_changed.connect(self._on_hub_connection,
                                             Qt.QueuedConnection)
         self.hub.link_state.connect(self._on_hub_link, Qt.QueuedConnection)
+        # interaction §7.3 hub relay: a viewer surfaces + answers device prompts raised on
+        # the owning agent. All three fire from hub worker threads → QueuedConnection.
+        self._remote_prompt_ids: set = set()   # hub-injected prompts — the agent owns their tag
+        self.hub.remote_prompt_opened.connect(self._on_remote_prompt_opened, Qt.QueuedConnection)
+        self.hub.remote_prompt_closed.connect(self._on_remote_prompt_closed, Qt.QueuedConnection)
+        self.hub.agent_prompt_answered.connect(self._on_agent_prompt_answered, Qt.QueuedConnection)
 
         # working-LAYOUT autosave (per-project working.json) — layout only now
         self._active_layout_path = None    # a named layout open → autosave to it too
@@ -805,6 +811,8 @@ class MainWindow(QMainWindow):
         read-out and refresh hub-dependent views. The button COLOUR is driven
         separately by the REAL link state (`_on_hub_link`), not by this assumption."""
         self.sync_status.set_state("connecting" if connected else "offline")
+        if not connected:
+            self._retire_remote_prompts()       # relay gone → drop un-answerable remote cards
         if self.reads is not None:
             self.reads.invalidate()             # hub tier joined/left → coverage moved
         # surface (or retire) the hub's historic catalog as routable ports
@@ -951,6 +959,9 @@ class MainWindow(QMainWindow):
         viewer = s.value("hub/viewer", True, type=bool)
         if addr and (agent or viewer):
             self.hub.connect(addr, agent, viewer)
+            if agent:      # re-publish our still-open prompts so a joining viewer sees them
+                for prompt in self.interactions.pending():
+                    self.hub.publish_prompt(prompt)
 
     def _add_tag(self):
         dlg = _MarkerDialog(parent=self)
@@ -1159,19 +1170,62 @@ class MainWindow(QMainWindow):
         the toast + fills the inbox). Runs on the GUI thread (QueuedConnection); the
         driver's on_response is invoked here when the operator answers."""
         self.interactions.add(prompt, on_response)
+        if self.interactions.get(prompt.id) is not None:   # not dropped by the flood guard
+            self.hub.publish_prompt(prompt)                # mirror to the hub (no-op unless agent)
 
     def _on_device_prompt_withdrawn(self, prompt_id) -> None:
         """A device RESOLVED its own request (its front panel / another transport answered) →
         retire it from the inbox without this app answering it, so a handled-on-device modal
         doesn't linger as pending. GUI thread (QueuedConnection)."""
         self.interactions.withdraw_ids(prompt_id)
+        self.hub.close_prompt(prompt_id, by="device")   # tell viewers it resolved on the device
+
+    def _on_remote_prompt_opened(self, wire) -> None:
+        """VIEWER: a device prompt raised on ANOTHER client (its owning agent) → surface it in
+        OUR inbox; answering relays back to the owner over the hub. Idempotent by id (the store
+        dedups a re-announce / snapshot)."""
+        if self.interactions.get(wire.id) is not None:
+            # already in our inbox → our OWN published prompt echoed back to us (we're also a
+            # viewer on this hub), or a re-announced remote we already hold. Do NOT re-inject or
+            # mark it 'remote' — a local prompt must keep its real driver callback + its tag/close.
+            return
+        from ..net.prompts import prompt_from_wire
+        prompt = prompt_from_wire(wire)
+        self._remote_prompt_ids.add(prompt.id)
+        self.interactions.add(
+            prompt,
+            on_response=lambda answer, pid=prompt.id: self.hub.respond_remote_prompt(
+                pid, answer, by=self.hub.actor))
+
+    def _on_remote_prompt_closed(self, prompt_id) -> None:
+        """VIEWER: a remote prompt resolved (answered anywhere / device / owner disconnect) →
+        withdraw it from our inbox."""
+        self.interactions.withdraw_ids(prompt_id)
+        self._remote_prompt_ids.discard(prompt_id)
+
+    def _retire_remote_prompts(self) -> None:
+        """The hub relay is gone (disconnect / link drop) → retire any remote prompt cards, which
+        can no longer be answered, rather than leave dead entries that silently no-op on a click."""
+        if self._remote_prompt_ids:
+            self.interactions.withdraw_ids(*self._remote_prompt_ids)
+            self._remote_prompt_ids.clear()
+
+    def _on_agent_prompt_answered(self, prompt_id, answer, by) -> None:
+        """AGENT: a viewer answered a prompt WE own (over the hub) → resolve it in the local
+        store, which fires the driver's on_response (→ RESPOND to the device) and broadcasts the
+        resolution to every surface. first-responder-wins: a no-op if already answered."""
+        self.interactions.resolve(prompt_id, answer, by=(f"hub:{by}" if by else "hub"))
 
     def _on_device_removed(self, ids) -> None:
         """A device was removed → withdraw its still-open requests (no answer, no callback
         into the now-dead driver). ids = (uuid, instance_id); a prompt carries whichever is
         its data_id, so match on both."""
         uuid, instance_id = ids
+        idset = {uuid, instance_id}
+        gone = [p.id for p in self.interactions.pending() if p.device_id in idset]
         self.interactions.withdraw(uuid, instance_id)
+        for pid in gone:      # AGENT: close them on the hub too, else viewers keep ghost cards
+            self.hub.close_prompt(pid, by="device removed")
 
     def _on_prompt_added(self, prompt) -> None:
         """A new request arrived → pop the non-blocking arrival toast and (for a critical
@@ -1191,6 +1245,12 @@ class MainWindow(QMainWindow):
         fact (reuses the tag path, like an emitted device event)."""
         prompt = entry.prompt
         answer = entry.answer
+        if prompt.id in self._remote_prompt_ids:
+            # a hub-injected (remote) prompt answered on THIS viewer: the answer already relayed
+            # to the OWNING agent (via on_response), which emits the provenance tag + broadcasts
+            # the close. We must NOT double-record it here.
+            self._remote_prompt_ids.discard(prompt.id)
+            return
         if answer is True:
             shown = "Yes"
         elif answer is False:
@@ -1214,6 +1274,9 @@ class MainWindow(QMainWindow):
                      "answered_by": entry.answered_by, "question": prompt.question,
                      "ok": ok},
             immutable=True)
+        # AGENT: broadcast the resolution over the hub so every viewer withdraws it (no-op
+        # unless we're an agent). This is the close that closes it everywhere.
+        self.hub.close_prompt(prompt.id, shown, entry.answered_by)
 
     def _refresh_requests_badge(self) -> None:
         """Keep the Requests dock title showing the pending count (a persistent badge)."""

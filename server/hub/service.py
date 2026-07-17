@@ -71,6 +71,13 @@ class IngestServicer(rpc.IngestServicer):
                         mine.discard(msg.retire.device_uuid)
                     elif which == "ack":
                         self.hub.deliver_ack(msg.ack)   # control: command result (§5.3)
+                    elif which == "prompt":             # interaction §7.3: opened / closed
+                        ev = msg.prompt
+                        sub = ev.WhichOneof("ev")
+                        if sub == "opened":
+                            self.hub.prompt_opened(ev.opened, outq)
+                        elif sub == "closed":
+                            self.hub.prompt_closed(ev.closed)
                     elif which == "heartbeat":
                         pass
             finally:
@@ -91,6 +98,7 @@ class IngestServicer(rpc.IngestServicer):
         finally:
             task.cancel()
             self.hub.unregister_agent_session(agent, outq)   # drop the agent-id route
+            self.hub.close_prompts_for(outq)   # its open prompts vanish (viewers withdraw)
             for device_uuid in mine:    # session ended ⇒ its devices vanish
                 self.hub.retire(device_uuid)
                 self.hub.unregister_agent(device_uuid)
@@ -126,6 +134,29 @@ class ViewerServicer(rpc.ViewerServicer):
         """Ask the owning client (by device uuid) to retire an active device — the
         reverse of AddRemoteDevice."""
         return await self.hub.remove_device(request)
+
+    async def WatchPrompts(self, request, context):  # noqa: N802
+        """Interaction §7.3: OPEN device prompts — snapshot of open, then live opens/closes.
+        Register BEFORE snapshotting so nothing is missed in the gap (a dup is an
+        idempotent add-by-id in the viewer's store)."""
+        # UNBOUNDED: prompts are low-volume (like tags/projects), and a dropped 'closed' would
+        # strand a resolved prompt on a viewer forever with no in-connection recovery.
+        q: asyncio.Queue = asyncio.Queue()
+        self.hub.add_prompt_watcher(q)
+        try:
+            for wire in self.hub.open_prompts():
+                yield pb.PromptEvent(opened=wire)
+            while True:
+                yield await q.get()
+        except asyncio.CancelledError:      # client/stream went away — clean end
+            pass
+        finally:
+            self.hub.remove_prompt_watcher(q)
+
+    async def RespondPrompt(self, request, context):  # noqa: N802
+        """Interaction §7.3: answer an open prompt → routed to the owning agent, which
+        resolves it locally + drives the device (first-responder-wins)."""
+        return self.hub.respond_prompt(request)
 
     async def WatchCatalog(self, request, context):  # noqa: N802
         q: asyncio.Queue = asyncio.Queue(maxsize=256)

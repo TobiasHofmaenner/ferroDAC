@@ -22,6 +22,7 @@ E2E = [
     "sync_e2e",     # sync mirror + live tail + read tier (ListSources/Coverage/Query/ReadRaw/Trace)
     "video_sync_e2e",  # §9.3 ph3: segment sync mirror + live tail + on-demand backfill (byte-exact)
     "e2e",          # agent → hub → viewer: transparent remote device, subscribe, retire
+    "prompts_e2e",  # §7.3 interaction prompt relay: publish → WatchPrompts → RespondPrompt routing
     "net_e2e",      # app net layer round-trip (convert + agent/viewer), incl. Trace
     "frames_e2e",   # §9 live video: demand-driven WatchFrames, raw bit-exact round-trip
     "docs_collab_e2e",  # live collab rooms: seed/fan-out/compaction/snapshot/persist
