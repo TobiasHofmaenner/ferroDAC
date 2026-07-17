@@ -97,6 +97,7 @@ class DeviceManager(QObject):
         self._registry = registry if registry is not None else DeviceRegistry()
         self._pending: dict[str, dict] = {}     # uuid -> desired config (session restore)
         self._resolving = False
+        self._last_scan: set | None = None      # last discovery result (log on CHANGE only)
 
         self._scan = _DiscoveryWorker(self._discoverable, scan_interval)
         self._scan.found.connect(self._merge_found)
@@ -133,9 +134,11 @@ class DeviceManager(QObject):
 
     # -- discovery merge -----------------------------------------------------
     def _merge_found(self, found: list) -> None:
-        log.info("discovery found %d device(s): %s", len(found),
-                 ", ".join(d.instance_id for d in found) or "—")
         seen = {d.instance_id for d in found}
+        if seen != self._last_scan:              # a ~2 s steady-state scan is not news:
+            log.info("discovery found %d device(s): %s", len(found),   # log only when a
+                     ", ".join(d.instance_id for d in found) or "—")   # device appears
+            self._last_scan = set(seen)                                # or vanishes
         changed = False
         for d in found:
             iid = d.instance_id
