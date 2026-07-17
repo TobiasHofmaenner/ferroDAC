@@ -327,6 +327,82 @@ def test_device_remote_list_and_add_remote(control_surface):
                    {"agent_id": "ferrodac@rig-1", "instance_id": "ghost"}, scope="control")
 
 
+@pytest.mark.ui
+def test_unified_sink_control_local_and_remote(control_surface):
+    """sink.list unifies local + remote control sinks, and sink.set / device.set_sink write to
+    BOTH: a local sink via the manager, a remote (hub) sink via the dashboard's send_command —
+    the fix for 'LLM can't vent the remote LSC'."""
+    from ferrodac.ui.workspace import SinkPort
+
+    w, s = control_surface
+    w.dashboard._sinks["psu:1#enable"] = SinkPort(
+        "psu:1#enable", "Enable", "bool", "", "PSU", "device",
+        device_id="psu:1", sink_id="enable", remote=False)
+    w.dashboard._sinks["lsc-uuid#vent"] = SinkPort(
+        "lsc-uuid#vent", "Vent", "action", "", "LSC", "device",
+        device_id="lsc-uuid", sink_id="vent", remote=True)
+
+    listed = {d["key"]: d for d in assert_json_able(s.dispatch("sink.list", scope="read"))}
+    assert listed["psu:1#enable"]["location"] == "local"
+    assert listed["lsc-uuid#vent"]["location"] == "remote"      # both in ONE unified list
+
+    # a LOCAL sink routes to the manager (spy write_sync so no real device is needed)
+    local = []
+    w.manager.write_sync = lambda iid, sid, val: (local.append((iid, sid, val)), (True, ""))[1]
+    out = s.dispatch("sink.set", {"key": "psu:1#enable", "value": True}, scope="control")
+    assert out["location"] == "local" and local == [("psu:1", "enable", True)]
+
+    # a REMOTE sink routes over the hub (send_command), by KEY and by device.set_sink alike
+    sent = []
+    w.dashboard.send_command = lambda did, sid, val: sent.append((did, sid, val))
+    out = s.dispatch("sink.set", {"key": "lsc-uuid#vent"}, scope="control")   # an ACTION: no value
+    assert out["location"] == "remote" and sent == [("lsc-uuid", "vent", None)]
+    s.dispatch("device.set_sink", {"instance_id": "lsc-uuid", "sink_id": "vent"}, scope="control")
+    assert sent[-1] == ("lsc-uuid", "vent", None)                # device.set_sink is remote-aware too
+
+    # a remote write with no hub link is a clear error, not a silent no-op
+    w.dashboard.send_command = None
+    with pytest.raises(ControlError):
+        s.dispatch("sink.set", {"key": "lsc-uuid#vent"}, scope="control")
+    # sink.set needs control scope; an unknown key errors
+    with pytest.raises(ScopeError):
+        s.dispatch("sink.set", {"key": "psu:1#enable", "value": False}, scope="read")
+    with pytest.raises(ControlError):
+        s.dispatch("sink.set", {"key": "nope#x", "value": 1}, scope="control")
+
+
+@pytest.mark.ui
+def test_device_list_folds_in_remote_devices(control_surface):
+    """device.list is unified: local devices are location:'local'; a connected hub's remote
+    devices appear alongside them tagged location:'remote'."""
+    from ferrodac.core.device import DeviceDescriptor, Interface, Status
+
+    w, s = control_surface
+
+    class _FakeHub:
+        connected = True
+
+        def active_remote(self):
+            return {"ferrodac@rig-1": [("lsc-uuid", DeviceDescriptor(
+                instance_id="lsc:0001", driver="lsc", name="LSC", uuid="lsc-uuid",
+                interface=Interface(kind="hub"), status=Status.CONNECTED))]}
+
+        def remote_available(self):
+            return {}
+
+        def disconnect(self):
+            pass
+
+    w.hub = _FakeHub()
+    out = assert_json_able(s.dispatch("device.list", scope="read"))
+    locs = {d["name"]: d["location"] for d in out["active"]}
+    assert locs.get("LSC") == "remote"                 # the remote device is IN device.list
+    assert all(d.get("location") in ("local", "remote") for d in out["active"])
+    # device.get resolves the remote device too
+    got = s.dispatch("device.get", {"instance_id": "lsc-uuid"}, scope="read")
+    assert got["location"] == "remote" and got["name"] == "LSC"
+
+
 # -- tags --------------------------------------------------------------------
 @pytest.mark.ui
 def test_tag_update_edits_metadata_against_real_markers(control_surface):

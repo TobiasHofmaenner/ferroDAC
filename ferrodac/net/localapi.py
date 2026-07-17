@@ -181,7 +181,7 @@ class LocalApiServer:
                 "self-describing 'verbs', so an external program can pilot the app."),
             "capabilities": [
                 "Read live and historical device data — sources are scalars, spectra/traces, or video",
-                "Control instruments — sinks are setpoints, toggles, actions and enums",
+                "Control instruments — sink.list then sink.set {key, value}; sinks are setpoints, toggles, actions and enums. Local and remote (hub) devices are read + controlled identically",
                 "Build the dashboard — add chart/readout panels and route sources onto them",
                 "Annotate — drop tags on the shared timeline; devices raise their own alarm tags",
                 "Answer device requests — a device can ask the operator a question mid-workflow (device.prompts / device.respond)",
@@ -228,7 +228,8 @@ class LocalApiServer:
                 "Annotate an event: tag.add {label, t?} marks the shared timeline",
                 "Answer a device: poll device.prompts for open requests -> device.respond {id, answer} when a device needs an operator answer to proceed",
                 "Run an experiment: record.start {label} -> drive the instruments -> record.stop (auto-exports a labelled bundle)",
-                "Use another client's instrument: hub.connect -> device.remote_list -> device.add_remote {agent_id, instance_id}; its channels then appear in source.list",
+                "Use another client's instrument: hub.connect -> device.remote_list -> device.add_remote {agent_id, instance_id}; it then appears in device.list (location:'remote') and its channels in source.list",
+                "Control any device (local OR remote): sink.list to find the sink key -> sink.set {key, value}; a remote sink routes over the hub (confirm via source.read on its readback source)",
                 "Bring in external data: device.create a Python device that fetches/computes, then chart it like any source",
                 "Get results out: export.csv for a time window (returns the CSV), or export.window for a full reimportable bundle",
             ],

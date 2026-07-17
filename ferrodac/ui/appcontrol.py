@@ -69,6 +69,15 @@ def _source_port_dict(sp) -> dict:
             "origin": sp.origin, "kind": sp.kind, "online": bool(sp.online)}
 
 
+def _sink_dict(sp) -> dict:
+    """Serialize a device CONTROL SinkPort (workspace.py) for the unified sink catalog. A local
+    and a remote sink look identical — 'location' is the only tell, and you set them the SAME
+    way (sink.set {key, value}); the dashboard routes a remote write over the hub."""
+    return {"key": sp.key, "name": sp.name, "dtype": sp.dtype, "unit": sp.unit,
+            "device": sp.origin, "location": "remote" if sp.remote else "local",
+            "online": bool(sp.online), "min": sp.smin, "max": sp.smax}
+
+
 def _reading_value(dtype: str, reading):
     """JSON-safe current value for a source, keyed off its declared dtype: a scalar
     (float/bool) is coerced to a plain number/bool (a numpy scalar isn't JSON-able);
@@ -165,10 +174,26 @@ def build_control_surface(app) -> ControlSurface:
 
     # -- queries (read) ------------------------------------------------------
     def _device_list(_):
-        return {"active": [_dev_dict(d) for d in app.manager.active_descriptors()],
-                "available": [_dev_dict(d) for d in app.manager.available_descriptors()]}
-    s.query("device.list", gui(_device_list), description="List active + available devices.",
-            returns="{active: [...], available: [...]}")
+        active = [{**_dev_dict(d), "location": "local"}
+                  for d in app.manager.active_descriptors()]
+        available = [{**_dev_dict(d), "location": "local"}
+                     for d in app.manager.available_descriptors()]
+        hub = getattr(app, "hub", None)
+        if hub is not None and getattr(hub, "connected", False):
+            for aid, devs in hub.active_remote().items():         # onboarded from another client
+                for (_u, d) in devs:
+                    active.append({**_dev_dict(d), "location": "remote", "agent_id": aid})
+            for aid, devs in hub.remote_available().items():      # addable (device.add_remote)
+                for d in devs:
+                    available.append({**_dev_dict(d), "location": "remote", "agent_id": aid})
+        return {"active": active, "available": available}
+    s.query("device.list", gui(_device_list),
+            description="List ALL devices — local (this machine) AND remote (shared by another hub "
+                        "client), unified. 'location' is 'local' or 'remote'; a remote device is "
+                        "read and controlled EXACTLY like a local one (same source.list / "
+                        "source.read / sink.list / sink.set). 'active' = streaming; 'available' = "
+                        "addable (device.add for local, device.add_remote for remote).",
+            returns="{active: [{...,location,agent_id?}], available: [{...,location}]}")
 
     def _project_list(_):
         pm = getattr(app, "_project_mgr", None)
@@ -235,21 +260,86 @@ def build_control_surface(app) -> ControlSurface:
                            "connect is async — poll device.list for active / error + last_error.",
                params={"instance_id": {"type": "string", "required": True}})
 
+    # -- unified sink control: local + remote look identical; the dashboard routes -------
+    def _find_sink(key=None, device_id=None, sink_id=None):
+        """Resolve a device CONTROL SinkPort from the dashboard's UNIFIED catalog (local OR
+        remote) by key, or by (device_id, sink_id). Runs on the GUI thread (reads _sinks)."""
+        sinks = app.dashboard._sinks
+        if key:
+            sp = sinks.get(str(key))
+            return sp if (sp is not None and sp.kind == "device") else None
+        for sp in list(sinks.values()):
+            if sp.kind == "device" and sp.sink_id == sink_id and sp.device_id == device_id:
+                return sp
+        return None
+
+    def _set_sink_unified(*, key=None, device_id=None, sink_id=None, value=None):
+        """Write a sink through the dashboard's UNIFIED path: LOCAL via the manager
+        (synchronous, real result), REMOTE over the hub (fire-and-forget — the sink's readback
+        source is the real success signal). Resolves + issues a remote command on the GUI thread;
+        the manager write blocks so it stays off it."""
+        sink = gb.post_and_wait(
+            lambda: _find_sink(key=key, device_id=device_id, sink_id=sink_id), reraise=True)
+        if sink is None:
+            if device_id and sink_id:            # a local device the dashboard hasn't caught up to
+                ok, detail = app.manager.write_sync(device_id, sink_id, value)
+                if not ok:
+                    raise ControlError(detail or "write failed")
+                return {"ok": True, "location": "local"}
+            raise ControlError(f"no controllable sink {key!r} — see sink.list")
+        if sink.remote:
+            def _send():
+                send = app.dashboard.send_command
+                if send is None:
+                    raise ControlError("not connected to a hub — can't reach the remote device")
+                send(sink.device_id, sink.sink_id, value)
+            gb.post_and_wait(_send, reraise=True)      # remote command on the GUI thread (non-blocking)
+            return {"ok": True, "key": sink.key, "value": value, "location": "remote",
+                    "note": "sent over the hub to the owning client (async — confirm with "
+                            "source.read on the sink's readback source)"}
+        ok, detail = app.manager.write_sync(sink.device_id, sink.sink_id, value)
+        if not ok:
+            raise ControlError(detail or "write failed")
+        return {"ok": True, "key": sink.key, "value": value, "location": "local"}
+
     def _device_set_sink(p):     # OFF the GUI thread — write_sync may block on I/O
         for k in ("instance_id", "sink_id"):
             if k not in p:
                 raise ControlError(f"device.set_sink needs '{k}'")
-        ok, detail = app.manager.write_sync(str(p["instance_id"]), str(p["sink_id"]),
-                                            p.get("value"))
-        if not ok:
-            raise ControlError(detail or "write failed")
-        return {"ok": True}
+        return _set_sink_unified(device_id=str(p["instance_id"]), sink_id=str(p["sink_id"]),
+                                 value=p.get("value"))
     s.register("device.set_sink", _device_set_sink,
-               description="Set a device control sink (setpoint/toggle/enum/action). "
-                           "value: number/bool/str, or omit for an ACTION.",
+               description="Set a device control sink (setpoint/toggle/enum/action) by instance_id "
+                           "+ sink_id — works for LOCAL and REMOTE (hub) devices alike. value: "
+                           "number/bool/str, or omit for an ACTION. (sink.set {key,value} is the "
+                           "port-keyed equivalent — same effect.)",
                params={"instance_id": {"type": "string", "required": True},
                        "sink_id": {"type": "string", "required": True},
                        "value": {"type": "any"}})
+
+    def _sink_list(_):
+        return [_sink_dict(sp) for sp in app.dashboard._sinks.values() if sp.kind == "device"]
+    s.query("sink.list", gui(_sink_list),
+            description="List every device CONTROL sink — setpoint/toggle/enum/action — LOCAL and "
+                        "REMOTE unified (the write side; source.list / source.read are the read "
+                        "side). Set one with sink.set {key, value}. 'location' is local/remote but "
+                        "you set them the SAME way.",
+            returns="[{key, name, dtype, unit, device, location, online, min, max}]")
+
+    def _sink_set(p):
+        key = str(p.get("key") or "")
+        if not key:
+            raise ControlError("sink.set needs 'key' (see sink.list)")
+        return _set_sink_unified(key=key, value=p.get("value"))
+    s.register("sink.set", _sink_set,
+               description="Set ANY device control sink by its port key (see sink.list) — the ONE "
+                           "control verb: a local sink writes to the device here, a remote (hub) "
+                           "sink routes the command to the owning client. value: bool/number/option "
+                           "string; for an ACTION sink omit value (or pass true). Remote writes are "
+                           "async — confirm via the sink's readback source (source.read).",
+               params={"key": {"type": "string", "required": True},
+                       "value": {"type": "any"}},
+               returns="{ok, key, value, location, note?}")
 
     s.register("layout.add_panel",
                gui(lambda p: {"panel_id": app.dashboard.add_panel(str(p.get("kind", "chart")))}),
@@ -505,10 +595,23 @@ def build_control_surface(app) -> ControlSurface:
     def _device_get(p):
         iid = str(p["instance_id"])
         desc = app.manager.descriptor(iid)          # active OR available; None if unknown
-        if desc is None:
+        if desc is None:                            # not local → maybe a remote (hub) device
+            hub = getattr(app, "hub", None)
+            if hub is not None and getattr(hub, "connected", False):
+                for aid, devs in hub.active_remote().items():
+                    for (u, d) in devs:
+                        if iid in (u, d.instance_id):
+                            return {**_dev_dict(d), "location": "remote", "agent_id": aid,
+                                    "active": True}
+                for aid, devs in hub.remote_available().items():
+                    for d in devs:
+                        if iid in (getattr(d, "uuid", None), d.instance_id):
+                            return {**_dev_dict(d), "location": "remote", "agent_id": aid,
+                                    "active": False}
             raise ControlError(f"unknown device: {iid}")
         out = _dev_dict(desc)
         out.update({
+            "location": "local",
             "active": app.manager.is_active(iid),
             "model": desc.model, "firmware": desc.firmware,
             "hardware_id": desc.hardware_id, "manufacturer": desc.manufacturer,
