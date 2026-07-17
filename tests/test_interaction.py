@@ -412,6 +412,14 @@ def test_hub_prompt_relay_app_wiring(control_surface):
     w._on_device_prompt(p, lambda a: None)
     assert w.hub.published == [p]
 
+    # BOTH ROLES: our own published prompt echoed back to our OWN viewer stream must be IGNORED
+    # (not marked remote) — else answering it locally would skip its tag + close broadcast.
+    echo = types.SimpleNamespace(
+        id=p.id, device_uuid="dev-x", question=p.question, kind="confirm", title="",
+        options=[], severity="info", timeout=0.0, on_timeout="stay", created=0.0)
+    w._on_remote_prompt_opened(echo)
+    assert p.id not in w._remote_prompt_ids            # our own prompt is not treated as remote
+
     # VIEWER: a remote prompt injects into the inbox; answering relays it and does NOT
     # drop a local provenance tag (the owning agent owns that record).
     wire = types.SimpleNamespace(
@@ -441,3 +449,19 @@ def test_hub_prompt_relay_app_wiring(control_surface):
     assert answered == [True]                                     # the driver callback fired
     assert (q.id, "Yes", "hub:viewer-b") in w.hub.closed          # resolution broadcast
     assert any(t.payload.get("prompt_id") == q.id for t in _interaction_tags())
+
+    # DEVICE REMOVED: the agent also CLOSES the device's open prompts on the hub, so viewers
+    # don't keep ghost cards (not just a local withdraw).
+    w.hub.closed.clear()
+    r = Prompt("gauge-uuid", "?", kind=CONFIRM)
+    w._on_device_prompt(r, lambda a: None)
+    w._on_device_removed(("gauge-uuid", "gauge-1"))
+    assert any(c[0] == r.id for c in w.hub.closed)                # closed on the hub
+
+    # DISCONNECT: remote prompt cards are retired (not left dead + clickable-but-no-op).
+    w._on_remote_prompt_opened(types.SimpleNamespace(
+        id="rp-3", device_uuid="x", question="?", kind="confirm", title="",
+        options=[], severity="info", timeout=0.0, on_timeout="stay", created=0.0))
+    assert w.interactions.get("rp-3") is not None
+    w._retire_remote_prompts()                                   # link dropped
+    assert w.interactions.get("rp-3") is None and not w._remote_prompt_ids

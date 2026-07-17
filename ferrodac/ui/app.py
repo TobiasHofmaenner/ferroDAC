@@ -811,6 +811,8 @@ class MainWindow(QMainWindow):
         read-out and refresh hub-dependent views. The button COLOUR is driven
         separately by the REAL link state (`_on_hub_link`), not by this assumption."""
         self.sync_status.set_state("connecting" if connected else "offline")
+        if not connected:
+            self._retire_remote_prompts()       # relay gone → drop un-answerable remote cards
         if self.reads is not None:
             self.reads.invalidate()             # hub tier joined/left → coverage moved
         # surface (or retire) the hub's historic catalog as routable ports
@@ -1168,7 +1170,8 @@ class MainWindow(QMainWindow):
         the toast + fills the inbox). Runs on the GUI thread (QueuedConnection); the
         driver's on_response is invoked here when the operator answers."""
         self.interactions.add(prompt, on_response)
-        self.hub.publish_prompt(prompt)    # mirror to the hub for viewers (no-op unless agent)
+        if self.interactions.get(prompt.id) is not None:   # not dropped by the flood guard
+            self.hub.publish_prompt(prompt)                # mirror to the hub (no-op unless agent)
 
     def _on_device_prompt_withdrawn(self, prompt_id) -> None:
         """A device RESOLVED its own request (its front panel / another transport answered) →
@@ -1181,6 +1184,11 @@ class MainWindow(QMainWindow):
         """VIEWER: a device prompt raised on ANOTHER client (its owning agent) → surface it in
         OUR inbox; answering relays back to the owner over the hub. Idempotent by id (the store
         dedups a re-announce / snapshot)."""
+        if self.interactions.get(wire.id) is not None:
+            # already in our inbox → our OWN published prompt echoed back to us (we're also a
+            # viewer on this hub), or a re-announced remote we already hold. Do NOT re-inject or
+            # mark it 'remote' — a local prompt must keep its real driver callback + its tag/close.
+            return
         from ..net.prompts import prompt_from_wire
         prompt = prompt_from_wire(wire)
         self._remote_prompt_ids.add(prompt.id)
@@ -1195,6 +1203,13 @@ class MainWindow(QMainWindow):
         self.interactions.withdraw_ids(prompt_id)
         self._remote_prompt_ids.discard(prompt_id)
 
+    def _retire_remote_prompts(self) -> None:
+        """The hub relay is gone (disconnect / link drop) → retire any remote prompt cards, which
+        can no longer be answered, rather than leave dead entries that silently no-op on a click."""
+        if self._remote_prompt_ids:
+            self.interactions.withdraw_ids(*self._remote_prompt_ids)
+            self._remote_prompt_ids.clear()
+
     def _on_agent_prompt_answered(self, prompt_id, answer, by) -> None:
         """AGENT: a viewer answered a prompt WE own (over the hub) → resolve it in the local
         store, which fires the driver's on_response (→ RESPOND to the device) and broadcasts the
@@ -1206,7 +1221,11 @@ class MainWindow(QMainWindow):
         into the now-dead driver). ids = (uuid, instance_id); a prompt carries whichever is
         its data_id, so match on both."""
         uuid, instance_id = ids
+        idset = {uuid, instance_id}
+        gone = [p.id for p in self.interactions.pending() if p.device_id in idset]
         self.interactions.withdraw(uuid, instance_id)
+        for pid in gone:      # AGENT: close them on the hub too, else viewers keep ghost cards
+            self.hub.close_prompt(pid, by="device removed")
 
     def _on_prompt_added(self, prompt) -> None:
         """A new request arrived → pop the non-blocking arrival toast and (for a critical

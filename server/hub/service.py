@@ -139,7 +139,9 @@ class ViewerServicer(rpc.ViewerServicer):
         """Interaction §7.3: OPEN device prompts — snapshot of open, then live opens/closes.
         Register BEFORE snapshotting so nothing is missed in the gap (a dup is an
         idempotent add-by-id in the viewer's store)."""
-        q: asyncio.Queue = asyncio.Queue(maxsize=256)
+        # UNBOUNDED: prompts are low-volume (like tags/projects), and a dropped 'closed' would
+        # strand a resolved prompt on a viewer forever with no in-connection recovery.
+        q: asyncio.Queue = asyncio.Queue()
         self.hub.add_prompt_watcher(q)
         try:
             for wire in self.hub.open_prompts():
