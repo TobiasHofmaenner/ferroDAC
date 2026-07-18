@@ -34,6 +34,13 @@ class HubAgent(ReconnectingClient):
         self._lock = threading.Lock()
         self._devices: dict = {}               # uuid -> pb.DeviceDescriptor
         self._id2uuid: dict = {}               # device-id (instance_id OR data_id) -> uuid
+        # §7.3 open-prompt mirror: id -> pb.WirePrompt for every prompt WE published
+        # that has not been closed. Replayed by _outgen on every (re)connect — the hub
+        # closes an agent's prompts when its session drops, so without the replay a
+        # network blip / hub restart left viewers blind to still-open prompts. Only
+        # ever fed by publish_prompt (the app publishes LOCAL prompts only), so a
+        # remote-injected prompt can never echo back through here.
+        self._open_prompts: dict = {}
         # (uuid, source_id, active) — viewers started/stopped watching a camera
         # (§9). Called on the AGENT's asyncio thread; the wirer marshals.
         self._on_frame_demand = on_frame_demand
@@ -205,11 +212,20 @@ class HubAgent(ReconnectingClient):
 
     # -- interaction prompts (§7.3): mirror opens/closes to the hub -----------
     def publish_prompt(self, wire) -> None:
-        """Mirror an OPEN device prompt (a pb.WirePrompt) up to the hub so viewers see it."""
+        """Mirror an OPEN device prompt (a pb.WirePrompt) up to the hub so viewers see it.
+        Also recorded in the open-prompt mirror, which _outgen replays on every
+        (re)connect — so a prompt published while offline / before the first session
+        still reaches the hub, and a reconnect re-opens what the hub closed."""
+        with self._lock:
+            self._open_prompts[wire.id] = wire
         self._send(pb.AgentMessage(prompt=pb.PromptEvent(opened=wire)))
 
     def close_prompt(self, prompt_id: str, answer_text: str = "", by: str = "") -> None:
-        """Mirror a prompt RESOLUTION up to the hub → every viewer withdraws it."""
+        """Mirror a prompt RESOLUTION up to the hub → every viewer withdraws it. Drops
+        it from the replay mirror too, so a prompt resolved while offline is never
+        resurrected on the next (re)connect."""
+        with self._lock:
+            self._open_prompts.pop(str(prompt_id), None)
         self._send(pb.AgentMessage(prompt=pb.PromptEvent(closed=pb.PromptClosed(
             id=str(prompt_id), answer_text=str(answer_text), by=str(by)))))
 
@@ -287,8 +303,14 @@ class HubAgent(ReconnectingClient):
             agent_id=self._agent_id, contract_version=CONTRACT_VERSION))
         with self._lock:
             descs = list(self._devices.values())
+            prompts = list(self._open_prompts.values())
         for d in descs:                        # (re)announce on every (re)connect
             yield pb.AgentMessage(announce=d)
+        for w in prompts:                      # …and re-open still-open prompts (§7.3):
+            #                                    the hub closed them when the previous
+            #                                    session dropped; viewers re-inject
+            #                                    idempotently (dedup by id).
+            yield pb.AgentMessage(prompt=pb.PromptEvent(opened=w))
         while True:                            # link state comes from watch_connectivity
             msg = await outq.get()
             if msg is None or self._stop.is_set():

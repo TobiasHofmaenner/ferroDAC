@@ -3,7 +3,9 @@
 An AGENT raises a device prompt; a VIEWER sees it via WatchPrompts and answers it with
 RespondPrompt; the hub routes the answer down to the owning agent (on_prompt_response); the
 agent publishes the resolution and every viewer withdraws it. Also: a late viewer converges
-from the open-prompt snapshot, and an agent disconnect closes its open prompts.
+from the open-prompt snapshot, an agent disconnect closes its open prompts, and an agent
+RECONNECT re-publishes its still-open prompts (the mirror) — answerable again, while a
+prompt resolved offline stays closed.
 
     docker compose run --rm hub python tests/prompts_e2e.py
 """
@@ -121,8 +123,36 @@ async def main() -> int:
     assert closed[-1].WhichOneof("ev") == "closed" and closed[-1].closed.id == "p-2"
     print("✓ agent disconnect closes its open prompts")
 
+    # 7) the agent comes BACK (blip / hub restart) → its still-open prompts re-publish
+    #    from the open-prompt mirror, so a late viewer sees p-2 again; a prompt raised
+    #    AND resolved while offline (p-3) must not resurrect.
+    agent.publish_prompt(pb.WirePrompt(id="p-3", device_uuid="lsc-uuid", question="Purge?"))
+    agent.close_prompt("p-3", by="device")            # resolved while offline
+    agent.start()                                     # the reconnect
+    back: list = []
+    bready, bdone = asyncio.Event(), asyncio.Event()
+    btask = asyncio.create_task(watch(addr, back, bready, 1, bdone))
+    await asyncio.wait_for(bdone.wait(), 10)          # snapshot OR the live re-open
+    btask.cancel()
+    reopened = [e.opened.id for e in back if e.WhichOneof("ev") == "opened"]
+    assert reopened == ["p-2"], back
+    print("✓ agent reconnect re-publishes still-open prompts (offline-closed ones stay closed)")
+
+    # 8) …and the re-published prompt is ANSWERABLE: the owner route was refreshed to
+    #    the agent's NEW session, so RespondPrompt still lands as on_prompt_response.
+    async with grpc.aio.insecure_channel(addr) as ch:
+        ack2 = await rpc.ViewerStub(ch).RespondPrompt(
+            pb.RespondPromptRequest(id="p-2", by="viewer-c", boolean=False))
+        assert ack2.ok, ack2.detail
+    assert await _until(lambda: len(answered) >= 2), \
+        "an answer to a re-published prompt never reached the reconnected agent"
+    assert answered[-1] == ("p-2", False, "viewer-c"), answered
+    print("✓ re-published prompt routes answers down the NEW agent session")
+    agent.stop()
+
     await server.stop(grace=0.5)
-    print("\nPROMPTS E2E PASS — publish, answer-routing, resolution, snapshot, disconnect")
+    print("\nPROMPTS E2E PASS — publish, answer-routing, resolution, snapshot, disconnect, "
+          "reconnect re-publish")
     return 0
 
 

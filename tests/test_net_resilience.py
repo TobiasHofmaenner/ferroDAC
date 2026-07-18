@@ -155,3 +155,72 @@ def test_agent_reannounces_after_hub_restart():
         agent.stop()
     assert before, "device never appeared in the catalog on first connect"
     assert after, "agent did not re-announce after the hub restart"
+
+
+def test_outgen_replays_the_open_prompt_mirror():
+    """§7.3 reconnect: every (re)connected session must RE-PUBLISH the agent's
+    still-open prompts (the hub closes them when a session drops, leaving viewers
+    blind after a blip/restart) — and must NOT resurrect one closed while offline."""
+    from ferrodac_contract.v1 import data_plane_pb2 as pb
+
+    ag = HubAgent("127.0.0.1:1", agent_id="t")           # never started: offline
+    ag.publish_prompt(pb.WirePrompt(id="p-1", device_uuid="d", question="A?"))
+    ag.publish_prompt(pb.WirePrompt(id="p-2", device_uuid="d", question="B?"))
+    ag.close_prompt("p-2", by="device")                  # resolved while offline
+
+    async def session_opening():
+        # what _run_session does before draining the queue
+        ag._stop = asyncio.Event()
+        ag._outq = asyncio.Queue()
+        ag._outq.put_nowait(None)                        # end the generator after the replay
+        return [m async for m in ag._outgen()]
+
+    msgs = asyncio.run(session_opening())
+    assert msgs[0].WhichOneof("msg") == "hello"
+    opened = [m.prompt.opened.id for m in msgs
+              if m.WhichOneof("msg") == "prompt" and m.prompt.WhichOneof("ev") == "opened"]
+    assert opened == ["p-1"], f"mirror replay wrong: {opened}"
+
+
+def test_promptwatch_respond_reports_the_ack():
+    """§7.3 answer relay: the viewer must HEAR what became of its answer — a delivered
+    Ack, an authoritative hub rejection (ok=False: prompt gone), or NO Ack at all
+    (None: channel down / transport failure) — never a silent void (the old behavior
+    swallowed everything and the card just vanished)."""
+    from ferrodac_contract.v1 import data_plane_pb2 as pb
+
+    from ferrodac.net.prompts import HubPromptWatch
+
+    results = []
+    w = HubPromptWatch("127.0.0.1:1")
+
+    # not started (no loop): the caller hears the failure immediately
+    w.respond("p-1", True, on_result=lambda ok, d: results.append((ok, d)))
+    assert results == [(None, "prompt channel not running")]
+
+    class _Stub:
+        def __init__(self, ack=None, boom=None):
+            self.ack, self.boom = ack, boom
+
+        async def RespondPrompt(self, req):              # noqa: N802
+            if self.boom is not None:
+                raise self.boom
+            return self.ack
+
+    def roundtrip(stub):
+        w._stub = stub
+        req = pb.RespondPromptRequest(id="p", boolean=True)
+        asyncio.run(w._respond(req, lambda ok, d: results.append((ok, d))))
+        return results[-1]
+
+    assert roundtrip(_Stub(ack=pb.Ack(ok=True))) == (True, "")
+    assert roundtrip(_Stub(ack=pb.Ack(ok=False, detail="no such open prompt"))) == \
+        (False, "no such open prompt")
+    ok, detail = roundtrip(_Stub(boom=RuntimeError("hub unreachable")))
+    assert ok is None and "unreachable" in detail
+    # between sessions (stub gone): also a no-Ack, not silence
+    assert roundtrip(None) == (None, "prompt channel disconnected")
+    # and a broken observer must never propagate out of the relay
+    w._stub = _Stub(ack=pb.Ack(ok=True))
+    asyncio.run(w._respond(pb.RespondPromptRequest(id="p", boolean=True),
+                           lambda ok, d: 1 / 0))

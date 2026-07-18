@@ -42,11 +42,15 @@ class HubController(QObject):
     remote_prompt_opened = Signal(object)  # a remote OPEN prompt (pb.WirePrompt) → inject into the inbox
     remote_prompt_closed = Signal(str)     # a remote prompt resolved (id) → withdraw from the inbox
     agent_prompt_answered = Signal(str, object, str)  # a viewer answered OUR prompt: (id, answer, by)
+    # the RespondPrompt Ack for an answer WE relayed: (prompt_id, ok, detail). ok is
+    # three-valued (see HubPromptWatch.respond): True=delivered, False=hub rejected it
+    # (prompt gone), None=no Ack (unreachable) — the app restores the card on None.
+    remote_prompt_answer_acked = Signal(str, object, str)
     _do_add = Signal(str)                 # marshal manager.add(instance_id) to the GUI thread
     _do_remove = Signal(str)              # marshal manager.remove(instance_id) to the GUI thread
 
     def __init__(self, dashboard, engine, manager, parent=None, store=None,
-                 resolver=None, video_store=None):
+                 resolver=None, video_store=None, reads=None):
         super().__init__(parent)
         self.dashboard = dashboard
         self.engine = engine
@@ -54,6 +58,8 @@ class HubController(QObject):
         self._store = store              # local durable ZarrStore (for hub sync)
         self._video_store = video_store  # local ambient-video store (§9.3 ph3 sync)
         self._resolver = resolver        # local read resolver (gets a hub READ tier)
+        self._reads = reads              # ReadService — the read tier's bg coverage
+        #                                  refreshes ride it (§21.4, no ad-hoc threads)
         self._read_chan = None           # sync channel for the hub read tier
         self._backup_client = None       # hub Backup service client (§20)
         self._gitcred_client = None      # hub git-credential client (transparent dial)
@@ -229,7 +235,7 @@ class HubController(QObject):
             self._gitcred_client = HubGitCredentialClient(self._read_chan)
             if self._resolver is not None:
                 from ..net.readtier import HubReadTier
-                tier = HubReadTier(self._read_chan)
+                tier = HubReadTier(self._read_chan, reads=self._reads)
                 self._resolver.set_remote(tier)
                 self._read_tier = tier                # exposed for the playback prefetcher
                 self._hub_sources = tier.sources()    # one ListSources for the catalog
@@ -491,9 +497,19 @@ class HubController(QObject):
 
     def respond_remote_prompt(self, prompt_id, answer, by="") -> None:
         """VIEWER: answer a hub-relayed prompt → routed to the owning agent, which resolves it
-        and drives the device (first-responder-wins). No-op unless we're a viewer."""
-        if self._promptwatch is not None:
-            self._promptwatch.respond(str(prompt_id), answer, by)
+        and drives the device (first-responder-wins). The RespondPrompt Ack surfaces on
+        `remote_prompt_answer_acked` (never blocking the GUI — the RPC runs on the watch
+        thread); the app restores the card when the answer went nowhere. Not a viewer →
+        an immediate no-Ack, so the answer is never silently lost."""
+        pid = str(prompt_id)
+        if self._promptwatch is None:
+            self.remote_prompt_answer_acked.emit(pid, None, "not connected to the hub")
+            return
+        # fires on the prompt-watch thread — the app connects QueuedConnection
+        self._promptwatch.respond(
+            pid, answer, by,
+            on_result=lambda ok, detail, pid=pid:
+                self.remote_prompt_answer_acked.emit(pid, ok, detail))
 
     def _on_agent_prompt_response(self, prompt_id, answer, by) -> None:
         """A viewer answered one of OUR prompts (on the agent loop) → marshal to the GUI, where

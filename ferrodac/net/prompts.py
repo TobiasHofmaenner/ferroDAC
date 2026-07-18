@@ -53,8 +53,17 @@ class HubPromptWatch(ReconnectingClient):
         self._stub = None
 
     # -- public API (any thread) --------------------------------------------
-    def respond(self, prompt_id: str, answer, by: str = "") -> None:
-        """Answer a remote prompt → RespondPrompt, which the hub routes to the owning agent."""
+    def respond(self, prompt_id: str, answer, by: str = "", on_result=None) -> None:
+        """Answer a remote prompt → RespondPrompt, which the hub routes to the owning agent.
+
+        ``on_result(ok, detail)`` (optional) reports the Ack, fired on the watch
+        thread — the Qt glue must marshal. Three-valued ``ok``:
+          * True  — the hub accepted + routed the answer to the owning agent;
+          * False — the hub REJECTED it (the prompt is gone: answered elsewhere /
+                    owner disconnected) — authoritative, the answer went nowhere;
+          * None  — no Ack at all (channel down / hub unreachable) — the answer
+                    went nowhere, but the prompt may still be open.
+        """
         req = pb.RespondPromptRequest(id=str(prompt_id), by=str(by))
         if isinstance(answer, bool):
             req.boolean = answer               # confirm / acknowledge (True)
@@ -62,24 +71,44 @@ class HubPromptWatch(ReconnectingClient):
             req.trigger = True                 # a bare action
         else:
             req.text = str(answer)             # choice option / text
-        self._schedule(self._respond(req))
+        if not self._schedule(self._respond(req, on_result)):
+            self._report(on_result, None, "prompt channel not running")
 
     # -- internals -----------------------------------------------------------
-    def _schedule(self, coro) -> None:
+    def _schedule(self, coro) -> bool:
         loop = self._loop
         if loop is not None:
-            loop.call_soon_threadsafe(lambda: loop.create_task(coro))
-        else:
-            coro.close()                       # not running yet
+            try:
+                loop.call_soon_threadsafe(lambda: loop.create_task(coro))
+                return True
+            except RuntimeError:               # loop already closed — worker is gone
+                pass
+        coro.close()                           # not running (yet) — nothing will Ack
+        return False
 
-    async def _respond(self, req) -> None:
-        stub = self._stub
-        if stub is None:
+    @staticmethod
+    def _report(on_result, ok, detail) -> None:
+        if on_result is None:
             return
         try:
-            await stub.RespondPrompt(req)
-        except Exception:                      # transient — a lost answer re-surfaces on snapshot
-            pass
+            on_result(ok, detail)
+        except Exception:                      # a bad observer must never break the loop
+            log.debug("respond on_result callback failed", exc_info=True)
+
+    async def _respond(self, req, on_result=None) -> None:
+        """Send the answer and report the Ack. A dropped/failed relay is no longer
+        silent: the viewer keeps/restores the card on a bad result (the answer went
+        nowhere) — a still-open prompt also re-surfaces on the reconnect snapshot."""
+        stub = self._stub
+        if stub is None:                       # between sessions — no hub to hear us
+            self._report(on_result, None, "prompt channel disconnected")
+            return
+        try:
+            ack = await stub.RespondPrompt(req)
+        except Exception as e:                 # transport failure — no Ack ever came
+            self._report(on_result, None, str(e) or "hub unreachable")
+            return
+        self._report(on_result, bool(ack.ok), ack.detail or "")
 
     async def _run_session(self, ch) -> None:
         self._stub = rpc.ViewerStub(ch)

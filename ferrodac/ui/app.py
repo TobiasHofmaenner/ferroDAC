@@ -299,7 +299,8 @@ class MainWindow(QMainWindow):
         self.hub = HubController(
             self.dashboard, engine, manager, self,
             store=self.store_writer.store if self.store_writer is not None else None,
-            resolver=self.resolver, video_store=self._video_store)
+            resolver=self.resolver, video_store=self._video_store,
+            reads=self.reads)   # hub read tier's bg coverage refreshes ride it (§21.4)
         # All three fire from hub worker threads (gRPC / sync) — force
         # QueuedConnection so the slots run on the GUI thread (see hubclient).
         # A bound method (not a lambda) gives the queued call an explicit
@@ -314,11 +315,15 @@ class MainWindow(QMainWindow):
                                             Qt.QueuedConnection)
         self.hub.link_state.connect(self._on_hub_link, Qt.QueuedConnection)
         # interaction §7.3 hub relay: a viewer surfaces + answers device prompts raised on
-        # the owning agent. All three fire from hub worker threads → QueuedConnection.
+        # the owning agent. All four fire from hub worker threads → QueuedConnection.
         self._remote_prompt_ids: set = set()   # hub-injected prompts — the agent owns their tag
+        # answers relayed to an owning agent, awaiting their RespondPrompt Ack:
+        # id -> Prompt, so a no-Ack failure can put the card back (nothing heard it)
+        self._inflight_remote_answers: dict = {}
         self.hub.remote_prompt_opened.connect(self._on_remote_prompt_opened, Qt.QueuedConnection)
         self.hub.remote_prompt_closed.connect(self._on_remote_prompt_closed, Qt.QueuedConnection)
         self.hub.agent_prompt_answered.connect(self._on_agent_prompt_answered, Qt.QueuedConnection)
+        self.hub.remote_prompt_answer_acked.connect(self._on_remote_prompt_ack, Qt.QueuedConnection)
 
         # working-LAYOUT autosave (per-project working.json) — layout only now
         self._active_layout_path = None    # a named layout open → autosave to it too
@@ -831,7 +836,9 @@ class MainWindow(QMainWindow):
         read-out and refresh hub-dependent views. The button COLOUR is driven
         separately by the REAL link state (`_on_hub_link`), not by this assumption."""
         self.sync_status.set_state("connecting" if connected else "offline")
-        if not connected:
+        if connected:
+            self._republish_local_prompts()     # seed the fresh agent's prompt mirror (§7.3)
+        else:
             self._retire_remote_prompts()       # relay gone → drop un-answerable remote cards
         if self.reads is not None:
             self.reads.invalidate()             # hub tier joined/left → coverage moved
@@ -993,10 +1000,9 @@ class MainWindow(QMainWindow):
         agent = s.value("hub/agent", True, type=bool)
         viewer = s.value("hub/viewer", True, type=bool)
         if addr and (agent or viewer):
+            # still-open prompts re-publish via _on_hub_connection →
+            # _republish_local_prompts (the one hook every connect path shares)
             self.hub.connect(addr, agent, viewer)
-            if agent:      # re-publish our still-open prompts so a joining viewer sees them
-                for prompt in self.interactions.pending():
-                    self.hub.publish_prompt(prompt)
 
     def _add_tag(self):
         dlg = _MarkerDialog(parent=self)
@@ -1225,25 +1231,73 @@ class MainWindow(QMainWindow):
             # mark it 'remote' — a local prompt must keep its real driver callback + its tag/close.
             return
         from ..net.prompts import prompt_from_wire
-        prompt = prompt_from_wire(wire)
+        self._inject_remote_prompt(prompt_from_wire(wire))
+
+    def _inject_remote_prompt(self, prompt) -> None:
+        """File a hub-relayed (remote) prompt in the inbox, marked remote: answering it relays
+        to the owning agent instead of a local driver. Also the restore path when a relayed
+        answer got no Ack (the card comes back with the same relay callback)."""
         self._remote_prompt_ids.add(prompt.id)
         self.interactions.add(
             prompt,
-            on_response=lambda answer, pid=prompt.id: self.hub.respond_remote_prompt(
-                pid, answer, by=self.hub.actor))
+            on_response=lambda answer, p=prompt: self._relay_remote_answer(p, answer))
+
+    def _relay_remote_answer(self, prompt, answer) -> None:
+        """A remote card was answered on THIS viewer → relay it to the owning agent. The card
+        already left the inbox (resolve dropped it — the store API answers-and-drops in one
+        act); stash the prompt until the RespondPrompt Ack so a failed relay can restore it
+        instead of vanishing the answer silently (`_on_remote_prompt_ack`)."""
+        self._inflight_remote_answers[prompt.id] = prompt
+        self.hub.respond_remote_prompt(prompt.id, answer, by=self.hub.actor)
+
+    def _on_remote_prompt_ack(self, prompt_id, ok, detail) -> None:
+        """The RespondPrompt Ack for an answer we relayed (§7.3, GUI thread). ok is
+        three-valued (see HubPromptWatch.respond): True — delivered to the owning agent
+        (its close broadcast withdraws the card everywhere, nothing to do). False — the
+        hub REJECTED it: the prompt is gone (answered elsewhere / owner offline), so
+        restoring the card would resurrect an unanswerable ghost — surface the failure
+        instead (the close that removed it has already fanned out to us). None — no Ack
+        at all (hub unreachable): the answer went NOWHERE and the prompt may well still
+        be open, so put the card back (same relay callback) for a retry; a reconnect's
+        WatchPrompts snapshot re-injects/dedups it either way."""
+        prompt = self._inflight_remote_answers.pop(prompt_id, None)
+        if ok is True:
+            return
+        msg = f"⚠ Answer not delivered — {detail or 'request no longer open on the hub'}"
+        if ok is None and prompt is not None and self.hub.roles[1]:
+            # roles[1]: the viewer relay is still up — a restore is answerable. After a
+            # full disconnect the remote cards are retired instead (_retire_remote_prompts).
+            self._inject_remote_prompt(prompt)
+            msg += " — the request is back in the inbox"
+        self.statusBar().showMessage(msg, 8000)
 
     def _on_remote_prompt_closed(self, prompt_id) -> None:
         """VIEWER: a remote prompt resolved (answered anywhere / device / owner disconnect) →
-        withdraw it from our inbox."""
+        withdraw it from our inbox. Also drops any inflight answer stash — a late no-Ack
+        result must not restore a card the hub just declared closed."""
         self.interactions.withdraw_ids(prompt_id)
         self._remote_prompt_ids.discard(prompt_id)
+        self._inflight_remote_answers.pop(prompt_id, None)
 
     def _retire_remote_prompts(self) -> None:
         """The hub relay is gone (disconnect / link drop) → retire any remote prompt cards, which
         can no longer be answered, rather than leave dead entries that silently no-op on a click."""
+        self._inflight_remote_answers.clear()   # nothing to restore once the relay is gone
         if self._remote_prompt_ids:
             self.interactions.withdraw_ids(*self._remote_prompt_ids)
             self._remote_prompt_ids.clear()
+
+    def _republish_local_prompts(self) -> None:
+        """Hub (re)connected → re-publish OUR still-open prompts, so a viewer that joins (or
+        rejoins after a hub restart) sees them; publish_prompt no-ops unless we're an agent.
+        CRITICAL SEAM: pending() also holds REMOTE-INJECTED prompts (ones we surfaced as a
+        viewer) — re-publishing those would echo another agent's prompts back as OURS, so
+        only prompts we own (not in _remote_prompt_ids) go up. Below this, the agent's own
+        session keeps an open-prompt mirror it replays on every RECONNECT (net.agent), so
+        this seeds each fresh connection and the mirror heals every blip thereafter."""
+        for prompt in self.interactions.pending():
+            if prompt.id not in self._remote_prompt_ids:
+                self.hub.publish_prompt(prompt)
 
     def _on_agent_prompt_answered(self, prompt_id, answer, by) -> None:
         """AGENT: a viewer answered a prompt WE own (over the hub) → resolve it in the local

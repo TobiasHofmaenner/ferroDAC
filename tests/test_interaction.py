@@ -465,3 +465,109 @@ def test_hub_prompt_relay_app_wiring(control_surface):
     assert w.interactions.get("rp-3") is not None
     w._retire_remote_prompts()                                   # link dropped
     assert w.interactions.get("rp-3") is None and not w._remote_prompt_ids
+
+
+class _RelayFakeHub:
+    """The prompt-relay face of HubController, for driving the app handlers directly."""
+    actor = "viewer-a"
+
+    def __init__(self, roles=(True, True)):
+        self.roles = roles                          # (agent, viewer) — like the real property
+        self.connected = True
+        self.read_tier = None                       # _reconcile_prefetcher reads these
+        self.video_backfill = None
+        self.published, self.closed, self.responded = [], [], []
+
+    def hub_sources(self):
+        return []                                   # dashboard.refresh_ports reads it
+
+    def publish_prompt(self, p):
+        self.published.append(p)
+
+    def close_prompt(self, pid, answer_text="", by=""):
+        self.closed.append((pid, answer_text, by))
+
+    def respond_remote_prompt(self, pid, answer, by=""):
+        self.responded.append((pid, answer, by))
+
+    def disconnect(self):
+        pass                                        # MainWindow.closeEvent calls this
+
+
+def _wire(pid, device="lsc-uuid", question="Vent?"):
+    import types
+    return types.SimpleNamespace(
+        id=pid, device_uuid=device, question=question, kind="confirm", title="",
+        options=[], severity="warn", timeout=0.0, on_timeout="stay", created=0.0)
+
+
+@pytest.mark.ui
+def test_hub_reconnect_republishes_local_prompts_only(control_surface):
+    """DEFERRED §7.3 item 1, app side: a hub (re)connection re-publishes the app's
+    still-open LOCAL prompts (so a joining/rejoining viewer sees them) through the one
+    hook every connect path shares (_on_hub_connection). CRITICAL SEAM: a hub-INJECTED
+    (remote) prompt sitting in the same store must NOT be re-published — that would
+    echo another agent's prompt back to the hub as ours."""
+    w, _s = control_surface
+    w.hub = _RelayFakeHub()
+
+    local = Prompt("dev-x", "Retract the arm?", kind=CONFIRM)
+    w._on_device_prompt(local, lambda a: None)          # published once on raise
+    w._on_remote_prompt_opened(_wire("rp-echo"))        # a remote one shares the store
+    assert w.interactions.get("rp-echo") is not None
+    w.hub.published.clear()
+
+    w._on_hub_connection(True)                          # the (re)connect hook
+    assert [p.id for p in w.hub.published] == [local.id]   # ours, and ONLY ours
+
+    # and a disconnect still retires the remote card through the same hook
+    w._on_hub_connection(False)
+    assert w.interactions.get("rp-echo") is None
+    assert w.interactions.get(local.id) is not None     # a LOCAL prompt survives offline
+
+
+@pytest.mark.ui
+def test_remote_prompt_answer_ack_flow(control_surface):
+    """DEFERRED §7.3 item 2, app side: a viewer's relayed answer is only *settled* on the
+    RespondPrompt Ack. ok=True → card stays gone; no Ack (None: hub unreachable) → the
+    answer went nowhere, so the card is RESTORED (same relay callback, answerable again);
+    ok=False (hub says the prompt is gone) → no ghost card, just the failure notice; and
+    a close that raced in front of a late no-Ack wins (no resurrection)."""
+    w, _s = control_surface
+    w.hub = _RelayFakeHub(roles=(False, True))          # viewer-only client
+
+    # delivered: nothing comes back, stash is clean
+    w._on_remote_prompt_opened(_wire("rp-1"))
+    assert w.interactions.resolve("rp-1", True, by="operator") is True
+    assert w.hub.responded == [("rp-1", True, "viewer-a")]
+    assert "rp-1" in w._inflight_remote_answers          # awaiting the Ack
+    w._on_remote_prompt_ack("rp-1", True, "")
+    assert w.interactions.get("rp-1") is None and not w._inflight_remote_answers
+
+    # no Ack (hub unreachable): the card comes back, marked remote, answerable again
+    w._on_remote_prompt_opened(_wire("rp-2"))
+    w.interactions.resolve("rp-2", True, by="operator")
+    assert w.interactions.get("rp-2") is None            # optimistic clear…
+    w._on_remote_prompt_ack("rp-2", None, "hub unreachable")
+    assert w.interactions.get("rp-2") is not None        # …restored on the failed relay
+    assert "rp-2" in w._remote_prompt_ids                # still a REMOTE card (no local tag)
+    w.interactions.resolve("rp-2", False, by="operator") # the retry relays again
+    assert w.hub.responded[-1] == ("rp-2", False, "viewer-a")
+
+    # hub REJECTED it (prompt gone — answered elsewhere / owner offline): no ghost card
+    w._on_remote_prompt_ack("rp-2", False, "no such open prompt (already answered?)")
+    assert w.interactions.get("rp-2") is None and not w._inflight_remote_answers
+
+    # a close racing ahead of a late no-Ack must win — never resurrect a closed prompt
+    w._on_remote_prompt_opened(_wire("rp-3"))
+    w.interactions.resolve("rp-3", True, by="operator")
+    w._on_remote_prompt_closed("rp-3")                   # owner's close lands first
+    w._on_remote_prompt_ack("rp-3", None, "deadline exceeded")
+    assert w.interactions.get("rp-3") is None            # stays closed
+
+    # relay fully gone (not a viewer anymore) → no restore either, just the notice
+    w.hub.roles = (False, False)
+    w._on_remote_prompt_opened(_wire("rp-4"))
+    w.interactions.resolve("rp-4", True, by="operator")
+    w._on_remote_prompt_ack("rp-4", None, "not connected to the hub")
+    assert w.interactions.get("rp-4") is None
