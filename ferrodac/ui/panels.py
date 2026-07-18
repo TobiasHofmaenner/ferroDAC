@@ -356,25 +356,34 @@ class ChartPanel(Panel):
         # Marker items are WINDOWED to the visible time range (see _sync_markers):
         # a pan/zoom must re-sync which ones exist, throttled — a drag emits range
         # changes per frame, and a full marker diff per frame defeats the point.
-        # TWO cadences: DURING a gesture (150 ms) the sync is LIGHT — window
-        # membership only, existing labels untouched, new arrivals label-less —
-        # because the "which 40 get labels" set shifts with every range step and a
-        # labeledness flip recreates the item (~40 ms each: a wheel-zoom over a
-        # tag-dense span churned dozens per step — the 'zooming feels dreadful'
-        # regression). The FULL sync (label reassignment) runs once, after the
-        # range has settled for 500 ms.
+        # DURING a range gesture, marker items are HIDDEN outright (one cheap
+        # setVisible sweep on the first step) and the full re-sync + re-show runs
+        # once the range has settled for 500 ms. Measured: a zoom step at field
+        # scale is ~64 ms without marker items and ~513 ms with them — even
+        # UNCHANGED labels re-anchor their TextItem on every transform change, so
+        # no amount of sync hysteresis makes visible markers cheap mid-gesture.
+        # (_marker_win_timer remains the throttled FULL re-sync used by reconcile
+        # mode flips and other nudges.)
         self._marker_win_timer = QTimer(self)
         self._marker_win_timer.setSingleShot(True)
         self._marker_win_timer.setInterval(150)
-        self._marker_win_timer.timeout.connect(
-            lambda: self._sync_markers(reassign_labels=False))
+        self._marker_win_timer.timeout.connect(self._sync_markers)
+        self._markers_hidden = False
         self._marker_settle_timer = QTimer(self)
         self._marker_settle_timer.setSingleShot(True)
         self._marker_settle_timer.setInterval(500)
         self._marker_settle_timer.timeout.connect(self._sync_markers)
 
         def _range_changed(*_a):
-            self._marker_win_timer.start()
+            if not self._markers_hidden and self._marker_lines:
+                self._markers_hidden = True
+                for entry in self._marker_lines.values():
+                    # DETACH, not hide: a hidden item (and its label child) still
+                    # receives the ViewBox's per-transform callbacks — measured
+                    # ~490 ms/zoom-step with 150 hidden items vs ~64 ms with none.
+                    # Scene removal is what disconnects them (pyqtgraph re-binds
+                    # on re-add); the objects are kept for the settle re-add.
+                    self.plot.removeItem(entry[0])
             self._marker_settle_timer.start()
         self._pi.vb.sigXRangeChanged.connect(_range_changed)
         # Live curve redraws are THROTTLED (leading + trailing edge, ~10 Hz): every
@@ -476,9 +485,13 @@ class ChartPanel(Panel):
     #                      autorange churn). Lines are cheap; labels are budgeted to
     #                      the most recent few — zooming in re-labels what's visible.
 
-    def _sync_markers(self, reassign_labels=True):
+    def _sync_markers(self):
         if self.markers is None:
             return
+        if self._markers_hidden:                      # gesture over → re-attach the
+            self._markers_hidden = False              # detached items, then sync
+            for entry in self._marker_lines.values():  # normally (prune/update/label)
+                self.plot.addItem(entry[0], ignoreBounds=True)
         # window + cap the materialized items (shared _budget_markers policy — see
         # its docstring; pan/zoom re-syncs via _marker_win_timer). While FOLLOWING,
         # the cap drops to the last few: a live grow view eventually contains the
@@ -495,13 +508,7 @@ class ChartPanel(Panel):
         for mid, m in current.items():
             want = "region" if (m.kind == RECORDING and m.t_end is not None) else "line"
             entry = self._marker_lines.get(mid)
-            if reassign_labels:
-                wl = mid in labeled
-            elif entry is not None:                   # mid-gesture LIGHT sync: keep
-                wl = getattr(entry[0], "label", None) is not None   # labels as-is
-            else:
-                wl = False                            # new arrivals label-less until
-            #                                           the settle pass reassigns
+            wl = mid in labeled
             if entry is not None and (
                     entry[1] != want                      # type changed (live→region)
                     or (want == "line"                    # label budget moved (an
