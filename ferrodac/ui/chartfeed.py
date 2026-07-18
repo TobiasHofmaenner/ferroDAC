@@ -223,10 +223,11 @@ class ChartFeed:
         if not changed and not force:
             return
         if changed:
-            # marker LABELS are review-time UI: they materialize when parked/playing
-            # and drop to plain lines while live-following (the view transform then
-            # changes every advance, and each label re-anchors per change — the
-            # overnight watchdog's dominant class). See ChartPanel.live_follow.
+            # Marker density is review-time UI: while live-following, panels keep a
+            # SMALL materialized marker set with no labels (the view transform
+            # changes every advance and every scene item pays per-paint geometry —
+            # the overnight watchdog's dominant classes); parked/playing gets the
+            # full budget + labels. See Panel.live_follow.
             follow = mode is Mode.LIVE
             for panel in self._panels():
                 if getattr(panel, "live_follow", None) is not None \
@@ -234,7 +235,12 @@ class ChartFeed:
                     panel.live_follow = follow
                     t = getattr(panel, "_marker_win_timer", None)
                     if t is not None:
-                        t.start()                    # re-sync labels on the throttle
+                        t.start()                    # charts: re-sync on the throttle
+                    elif hasattr(panel, "_sync_markers"):
+                        try:
+                            panel._sync_markers()    # waterfalls: direct (cheap diff)
+                        except Exception:            # noqa: BLE001 — display-only
+                            pass
         if mode is Mode.PARKED:
             self._draw_windows(tc, owned=True)
         else:

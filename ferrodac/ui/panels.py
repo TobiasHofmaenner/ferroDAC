@@ -90,6 +90,12 @@ class Panel(Widget):
     the plugin API). `kind` defaults to "panel" for legacy callers."""
 
     kind = "panel"
+    #: LIVE-FOLLOW hint (ChartFeed.reconcile flips it on mode changes): while the
+    #: view follows the live edge, marker-drawing panels keep their materialized
+    #: item population SMALL (the view transform changes on every advance, and each
+    #: scene item pays per-paint geometry work); parked/review views get the full
+    #: budget + labels.
+    live_follow = True
 
 
 class PanelConfigDialog(QDialog):
@@ -455,19 +461,16 @@ class ChartPanel(Panel):
     #                      autorange churn). Lines are cheap; labels are budgeted to
     #                      the most recent few — zooming in re-labels what's visible.
 
-    #: While LIVE-FOLLOWING the view transform changes on every advance, so even a
-    #: budgeted label population re-anchors continuously (the overnight watchdog's
-    #: dominant class). Labels are for REVIEW: they materialize when the chart is
-    #: parked/playing (ChartFeed.reconcile flips this on mode changes) and show as
-    #: plain lines while following the live edge.
-    live_follow = True
-
     def _sync_markers(self):
         if self.markers is None:
             return
         # window + cap the materialized items (shared _budget_markers policy — see
-        # its docstring; pan/zoom re-syncs via _marker_win_timer)
-        current = _budget_markers(self.markers.visible(), self.plot, axis=0)
+        # its docstring; pan/zoom re-syncs via _marker_win_timer). While FOLLOWING,
+        # the cap drops to the last few: a live grow view eventually contains the
+        # whole catalog, and ~150 items × N panels of per-paint boundingRect work +
+        # scene-index churn as the window slides was the residual ~1 s paint class.
+        cap = 20 if self.live_follow else 150
+        current = _budget_markers(self.markers.visible(), self.plot, axis=0, cap=cap)
         budget = 0 if self.live_follow else self._LABEL_BUDGET
         labeled = set(sorted(current, key=lambda mid: current[mid].t)
                       [-budget:]) if budget else set()
@@ -1481,7 +1484,8 @@ class WaterfallPanel(Panel):
         axis — so a recording span or a tag shows where it sits in the scans."""
         if self.markers is None:
             return
-        current = _budget_markers(self.markers.visible(), self.plot, axis=1)
+        cap = 20 if self.live_follow else 150      # small while live (see Panel.live_follow)
+        current = _budget_markers(self.markers.visible(), self.plot, axis=1, cap=cap)
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid))
@@ -1799,7 +1803,8 @@ class SpectrumWaterfallPanel(Panel):
         (Y) axis of the waterfall."""
         if self.markers is None:
             return
-        current = _budget_markers(self.markers.visible(), self.p_wf, axis=1)
+        cap = 20 if self.live_follow else 150      # small while live (see Panel.live_follow)
+        current = _budget_markers(self.markers.visible(), self.p_wf, axis=1, cap=cap)
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.p_wf.removeItem(self._marker_lines.pop(mid))
