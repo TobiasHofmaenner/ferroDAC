@@ -222,6 +222,19 @@ class ChartFeed:
         self._last_mode = mode
         if not changed and not force:
             return
+        if changed:
+            # marker LABELS are review-time UI: they materialize when parked/playing
+            # and drop to plain lines while live-following (the view transform then
+            # changes every advance, and each label re-anchors per change — the
+            # overnight watchdog's dominant class). See ChartPanel.live_follow.
+            follow = mode is Mode.LIVE
+            for panel in self._panels():
+                if getattr(panel, "live_follow", None) is not None \
+                        and panel.live_follow != follow:
+                    panel.live_follow = follow
+                    t = getattr(panel, "_marker_win_timer", None)
+                    if t is not None:
+                        t.start()                    # re-sync labels on the throttle
         if mode is Mode.PARKED:
             self._draw_windows(tc, owned=True)
         else:

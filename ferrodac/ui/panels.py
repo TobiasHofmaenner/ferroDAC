@@ -455,14 +455,22 @@ class ChartPanel(Panel):
     #                      autorange churn). Lines are cheap; labels are budgeted to
     #                      the most recent few — zooming in re-labels what's visible.
 
+    #: While LIVE-FOLLOWING the view transform changes on every advance, so even a
+    #: budgeted label population re-anchors continuously (the overnight watchdog's
+    #: dominant class). Labels are for REVIEW: they materialize when the chart is
+    #: parked/playing (ChartFeed.reconcile flips this on mode changes) and show as
+    #: plain lines while following the live edge.
+    live_follow = True
+
     def _sync_markers(self):
         if self.markers is None:
             return
         # window + cap the materialized items (shared _budget_markers policy — see
         # its docstring; pan/zoom re-syncs via _marker_win_timer)
         current = _budget_markers(self.markers.visible(), self.plot, axis=0)
+        budget = 0 if self.live_follow else self._LABEL_BUDGET
         labeled = set(sorted(current, key=lambda mid: current[mid].t)
-                      [-self._LABEL_BUDGET:])
+                      [-budget:]) if budget else set()
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid)[0])
