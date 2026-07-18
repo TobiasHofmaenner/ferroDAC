@@ -34,7 +34,7 @@ class HubReadTier:
     """Resolver tier backed by the hub's Store service (read side)."""
 
     def __init__(self, channel, token: str = "", timeout: float = _TIMEOUT,
-                 coverage_ttl: float = 3.0):
+                 coverage_ttl: float = 3.0, reads=None):
         self.stub = rpc.StoreStub(channel)
         self.token = token
         self.timeout = timeout
@@ -43,6 +43,10 @@ class HubReadTier:
         self._cov_cache: dict = {}                   # series -> (monotonic_ts, intervals)
         self._cov_inflight: set = set()              # series with a bg refresh running
         self._cov_lock = threading.Lock()
+        # ReadService (store.asyncread) — background coverage refreshes ride its
+        # worker pool per §21.4 (no ad-hoc threads at call sites). None (headless /
+        # tests / degraded startup) falls back to a daemon thread.
+        self._reads = reads
 
     # -- tier protocol (same shape as RamTier / ZarrStore) -------------------
     def coverage(self, series) -> list:
@@ -81,8 +85,13 @@ class HubReadTier:
         return cov
 
     def _refresh_coverage_async(self, series) -> None:
-        """Fetch coverage on a daemon thread + update the cache. Deduped per series
-        so a burst of GUI-thread partitions triggers ONE refresh."""
+        """Fetch coverage in the background + update the cache. Deduped per series
+        (`_cov_inflight`, kept even under ReadService: it prevents a burst of
+        GUI-thread partitions submitting concurrent GetCoverage RPCs that would
+        hog both pool workers on a slow hub — key supersession alone would allow
+        that). Rides the ReadService (§21.4: UI-initiated reads never spawn ad-hoc
+        threads); without one (tests / headless) a daemon thread is the documented
+        fallback so the GUI-thread caller still never blocks."""
         with self._cov_lock:
             if series in self._cov_inflight:
                 return
@@ -95,7 +104,14 @@ class HubReadTier:
                 with self._cov_lock:
                     self._cov_inflight.discard(series)
 
-        threading.Thread(target=work, name="hub-cov-refresh", daemon=True).start()
+        if self._reads is not None:
+            # the cache update IS the delivery (the next coverage() call serves
+            # it) — no on_result marshal needed. The key namespaces hub-coverage
+            # refreshes away from other ReadService users.
+            self._reads.call(work, key="hub-cov:" + str(series))
+        else:
+            threading.Thread(target=work, name="hub-cov-refresh",
+                             daemon=True).start()
 
     def query(self, series, t0, t1, max_points=2000):
         try:

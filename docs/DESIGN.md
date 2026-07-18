@@ -1726,7 +1726,12 @@ returns a callable `Subscription` (back-compat: calling it unsubscribes).
   `diagnostics.install_gui_watchdog()` logs any GUI stall > threshold WITH the main
   thread's stack — the audit's months-invisible costs become log lines.
 
-### 21.3 Async reads + tasks (target; next steps on these rails)
+### 21.3 Async reads + tasks (implemented; §21.4 records the selection rule)
+
+> NOTE (2026-07-18): TaskRunner shipped as a QObject in `ui/tasks.py` — the
+> "Qt-free core/tasks.py + thin ui/taskui.py" split described below was not
+> performed (the doc and code disagreed; the audit flagged it). The Qt-free-core
+> intent stands as a future refactor; until then `ui/tasks.py` IS the runner.
 
 - **ReadService** (Qt-free, `store/asyncread.py`): ALL UI-initiated resolver reads run
   on a small dedicated pool (2 threads, so a 4 s hub-RPC timeout can't starve local

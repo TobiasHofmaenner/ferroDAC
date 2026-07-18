@@ -215,7 +215,9 @@ def build_control_surface(app) -> ControlSurface:
         return {"t0": t0, "t1": t1, "mode": getattr(tc.mode, "value", str(tc.mode))}
     s.query("time.window", _time_window, description="The current replay time window + mode.")
 
-    s.query("tag.list", lambda _: app.dashboard.markers.to_list(),
+    # gui()-wrapped: MarkerModel is GUI-confined — the (threadpool) localapi caller
+    # must not read it directly (same discipline as tag.add / tag.update / tag.remove).
+    s.query("tag.list", gui(lambda _: app.dashboard.markers.to_list()),
             description="All tags/markers.")
 
     def _hub_status(_):

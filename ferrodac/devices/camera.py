@@ -401,7 +401,16 @@ class CameraDevice(BaseDevice):
                                  Qt.QueuedConnection)     # (no Q_ARG in PySide6)
         return True
 
-    def stop_segment(self) -> None:
-        if self._controller is not None:
-            QMetaObject.invokeMethod(self._controller, "end_clip",
-                                     Qt.QueuedConnection)
+    def stop_segment(self, immediate: bool = False) -> None:
+        if self._controller is None:
+            return
+        from qtpy.QtCore import QThread
+        if immediate and QThread.currentThread() is self._controller.thread():
+            # EXIT path: a queued invoke would never be delivered (no event-loop
+            # turns remain), so the recorder was never stopped and the segment's
+            # tail could be left unfinalized (moov-less). The controller lives on
+            # the GUI thread and stop() runs there — a direct call is affinity-safe.
+            self._controller.end_clip()
+            return
+        QMetaObject.invokeMethod(self._controller, "end_clip",
+                                 Qt.QueuedConnection)

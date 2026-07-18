@@ -34,7 +34,9 @@ class CVRunner(QThread):
 
     def run(self) -> None:
         self._running = True
-        pool = ThreadPoolExecutor(max_workers=4)
+        # named per the observability convention (§21.4): threads show up as
+        # fd-ocr_0 … fd-ocr_3 in the watchdog / stats() / a crash dump
+        pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fd-ocr")
         last: dict = {}        # detector id -> last fire (monotonic)
         inflight: dict = {}    # detector id -> Future
         try:

@@ -13,9 +13,9 @@ Degrades to a no-op if grpcio isn't importable.
 from __future__ import annotations
 
 import logging
-import threading
 
 from . import GRPC_AVAILABLE, GRPC_CHANNEL_OPTIONS
+from ..core.periodic import PeriodicWorker
 from ..core.videostore import VideoStore
 from ..core.videosync import VideoSyncEngine
 
@@ -97,7 +97,10 @@ class VideoSyncRunner:
     """Runs `VideoSyncEngine.sync_once()` on a background thread every `interval`
     seconds (and once on start) until stopped. Reconnect-safe: a failed pass is
     logged and retried; the hub's reported state drives what re-uploads, so
-    nothing is lost or duplicated. Mirrors net.sync.SyncRunner."""
+    nothing is lost or duplicated. Mirrors net.sync.SyncRunner.
+
+    The thread ("ferrodac-videosync") is the shared PeriodicWorker skeleton
+    (§21.4); the channel is opened/closed ON that thread via on_start/on_stop."""
 
     def __init__(self, local_store: VideoStore, addr: str, interval: float = 10.0,
                  token: str = "", on_status=None):
@@ -106,8 +109,11 @@ class VideoSyncRunner:
         self.interval = interval
         self.token = token
         self._on_status = on_status
-        self._stop = threading.Event()
-        self._thread: "threading.Thread | None" = None
+        self._channel = None
+        self._engine: "VideoSyncEngine | None" = None
+        self._worker = PeriodicWorker(self._pass, interval, "ferrodac-videosync",
+                                      run_immediately=True,
+                                      on_start=self._open, on_stop=self._close)
 
     def _report(self, state: str, detail: str = "") -> None:
         if self._on_status is not None:
@@ -117,37 +123,38 @@ class VideoSyncRunner:
                 pass
 
     def start(self) -> bool:
-        if not GRPC_AVAILABLE or self._thread is not None or self.local_store is None:
+        if not GRPC_AVAILABLE or self.local_store is None:
             return False
-        self._thread = threading.Thread(target=self._run, name="ferrodac-videosync",
-                                        daemon=True)
-        self._thread.start()
-        return True
+        return self._worker.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+        self._worker.stop(timeout=2.0)
 
-    def _run(self) -> None:
-        channel = grpc.insecure_channel(self.addr, options=GRPC_CHANNEL_OPTIONS)
-        engine = VideoSyncEngine(self.local_store, GrpcVideoTransport(channel, self.token))
+    # -- worker thread ---------------------------------------------------------
+    def _open(self) -> None:
+        self._channel = grpc.insecure_channel(self.addr, options=GRPC_CHANNEL_OPTIONS)
+        self._engine = VideoSyncEngine(self.local_store,
+                                       GrpcVideoTransport(self._channel, self.token))
         log.info("video sync started → %s", self.addr)
         self._report("connecting", f"→ {self.addr}")
-        while not self._stop.is_set():
-            try:
-                n = engine.sync_once()
-                if n:
-                    log.info("synced %d segment(s)", n)
-                    self._report("idle", f"synced {n} clip segment(s)")
-                else:
-                    self._report("idle", "video up to date")
-            except Exception as exc:                     # noqa: BLE001 (reconnect next tick)
-                log.warning("video sync pass failed (retry in %.0fs): %s",
-                            self.interval, exc)
-                self._report("error", str(exc).splitlines()[0][:80])
-            self._stop.wait(self.interval)
-        channel.close()
+
+    def _pass(self) -> None:
+        try:
+            n = self._engine.sync_once()
+            if n:
+                log.info("synced %d segment(s)", n)
+                self._report("idle", f"synced {n} clip segment(s)")
+            else:
+                self._report("idle", "video up to date")
+        except Exception as exc:                         # noqa: BLE001 (reconnect next tick)
+            log.warning("video sync pass failed (retry in %.0fs): %s",
+                        self.interval, exc)
+            self._report("error", str(exc).splitlines()[0][:80])
+
+    def _close(self) -> None:
+        if self._channel is not None:
+            self._channel.close()
+            self._channel = None
+        self._engine = None
         log.info("video sync stopped")
         self._report("offline", "")

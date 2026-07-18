@@ -234,7 +234,13 @@ class BaseDevice(Device):
     def disconnect(self) -> None:
         self.stop()
         try:
-            self._disconnect()
+            # Under the io guard: stop() joins the poll thread BOUNDEDLY, so a read
+            # wedged past the join timeout may still be inside the port when we get
+            # here — closing it mid-read is undefined on some platforms (Windows
+            # pyserial close-during-read). The guard waits out the driver's own
+            # read timeout instead (concurrency-audit finding).
+            with self._guard():
+                self._disconnect()
         finally:
             self._status = Status.DISCONNECTED
 

@@ -32,6 +32,7 @@ import time as _time
 
 import numpy as np
 
+from ..core.periodic import PeriodicWorker
 from .intervals import intersect as _intersect
 from .intervals import subtract as _subtract
 
@@ -61,34 +62,28 @@ class PlaybackPrefetcher:
         self._wm_nav = -1                 # the tc.nav the watermark was computed for
         self._pin_seq = 0                 # unique epoch per pin (no cross-pin tail-append)
         self._pin_lock = threading.Lock()  # serialize pins (no two writers → no dup/tear)
-        self._wake = threading.Event()
-        self._stop = threading.Event()
-        self._thread: "threading.Thread | None" = None
+        # the §21.4 shared loop skeleton: re-target on wake() (TimeContext
+        # notifications), else a 0.25 s heartbeat; run_immediately stays False —
+        # the first pass follows the first heartbeat/notify, as before.
+        self._worker = PeriodicWorker(self._pass, 0.25, "fd-prefetch")
         self._unsub = None
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> bool:
-        if self._thread is not None or self.hub is None:
+        if self._worker.running or self.hub is None:
             return False
         self._unsub = self.tc.subscribe(self.wake)
-        self._thread = threading.Thread(target=self._run, name="fd-prefetch",
-                                        daemon=True)
-        self._thread.start()
-        return True
+        return self._worker.start()
 
     def stop(self) -> None:
-        self._stop.set()
-        self._wake.set()
+        self._worker.stop(timeout=2.0)
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
         self._watermark = None
 
     def wake(self) -> None:
-        self._wake.set()
+        self._worker.wake()
 
     def buffered_until(self) -> "float | None":
         """The gate reads this on the GUI thread — a plain field read, never blocks.
@@ -101,17 +96,6 @@ class PlaybackPrefetcher:
         return self._watermark
 
     # -- worker --------------------------------------------------------------
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self._wake.wait(timeout=0.25)     # re-target on notify, else heartbeat
-            self._wake.clear()
-            if self._stop.is_set():
-                break
-            try:
-                self._pass()
-            except Exception:                 # noqa: BLE001 — a bad pass never kills the loop
-                log.debug("prefetch pass failed", exc_info=True)
-
     def _pass(self) -> None:
         nav = self.tc.nav                     # supersession token (navigation only)
         head = self.tc.head
@@ -165,7 +149,7 @@ class PlaybackPrefetcher:
         if back:
             self._deliver(self._on_filled)    # debounced: one redraw per backfill pass
             if budget[0] <= 0:                # backfill hit the budget → more to do:
-                self._wake.set()              # continue now, don't wait the heartbeat
+                self._worker.wake()           # continue now, don't wait the heartbeat
 
     def _hub_cov(self, src) -> list:
         try:

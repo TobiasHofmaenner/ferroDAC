@@ -432,7 +432,11 @@ class DeviceManager(QObject):
 
     def instance_for_uuid(self, uuid: str) -> str | None:
         """The instance_id of the active device carrying this UUID, if any."""
-        for iid, dev in self._active.items():
+        # ATOMIC snapshot: called from hub agent worker threads (remote command /
+        # configure handlers) while the GUI thread merges discovery into the dict.
+        # list() is one C-level op (atomic under the GIL); iterating the live dict
+        # could raise RuntimeError('dictionary changed size') into a remote Ack.
+        for iid, dev in list(self._active.items()):
             if getattr(dev, "uuid", None) == uuid:
                 return iid
         return None
@@ -443,7 +447,7 @@ class DeviceManager(QObject):
         fp = self._registry.fingerprint_for(uuid)
         if fp is None:
             return None
-        for iid, dev in self._available.items():
+        for iid, dev in list(self._available.items()):   # snapshot (see instance_for_uuid)
             if getattr(dev, "fingerprint", None) == fp:
                 return iid
         return None
@@ -527,10 +531,11 @@ class DeviceManager(QObject):
         return device.describe() if device else None
 
     def available_descriptors(self) -> list[DeviceDescriptor]:
-        return [d.describe() for d in self._available.values()]
+        # snapshot: read from the hub agent's worker thread (see instance_for_uuid)
+        return [d.describe() for d in list(self._available.values())]
 
     def active_descriptors(self) -> list[DeviceDescriptor]:
-        return [d.describe() for d in self._active.values()]
+        return [d.describe() for d in list(self._active.values())]   # snapshot
 
     def active_devices(self) -> list:
         """The live Device OBJECTS (not descriptors) — for capability-probed

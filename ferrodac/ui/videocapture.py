@@ -125,7 +125,13 @@ class VideoCaptureService(QObject):
         if seg is None:
             return
         try:
-            seg["dev"].stop_segment()
+            if deadline is not None:      # exit: deliver end_clip DIRECTLY — a
+                try:                      # queued invoke never lands after quit
+                    seg["dev"].stop_segment(immediate=True)
+                except TypeError:         # a device without the kwarg
+                    seg["dev"].stop_segment()
+            else:
+                seg["dev"].stop_segment()
         except Exception:                 # noqa: BLE001
             pass
         t1 = self._now()
