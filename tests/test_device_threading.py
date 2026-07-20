@@ -77,3 +77,48 @@ def test_serial_drivers_share_one_port_registry():
     for drv in (TPG256ADevice, QMS200Device, Keithley6221Device):
         assert drv._active_ports is PORTS_IN_USE
         assert drv._cls_lock is SERIAL_LOCK
+
+
+def test_qms_control_write_is_lock_free_enqueue():
+    """A filament/SEM toggle must enqueue WITHOUT blocking on the io lock the poll
+    thread holds for a whole multi-second sweep — the 'toggle takes forever' fix.
+    The write lands on _write_q so the poll thread can cut the sweep short and send
+    it next cycle (see QMS200Device._drain_scan)."""
+    import threading
+    import time
+
+    from ferrodac.devices.qms200 import QMS200Device, ProbeResult
+
+    dev = QMS200Device(ProbeResult(port="COM_TEST", baud=19200, analyzer=0))
+    holding, release = threading.Event(), threading.Event()
+
+    def fake_sweep():                    # the poll thread holds the serial lock
+        with dev._io_lock:
+            holding.set()
+            release.wait(2.0)
+
+    t = threading.Thread(target=fake_sweep)
+    t.start()
+    assert holding.wait(1.0)
+    try:
+        t0 = time.monotonic()
+        dev.write("filament", True)      # must NOT wait out the "sweep"
+        dt = time.monotonic() - t0
+    finally:
+        release.set()
+        t.join()
+    assert dt < 0.1, f"control write blocked on the sweep lock ({dt:.2f}s)"
+    assert list(dev._write_q) == [("filament", True)]
+    assert dev._sink_values["filament"] is True
+
+
+def test_qms_software_sink_writes_stay_off_the_wire():
+    """Software-only sinks (average/smoothing/ref_pressure) apply inline and never
+    enqueue a serial command — unchanged by the lock-free write override."""
+    from ferrodac.devices.qms200 import QMS200Device, ProbeResult
+
+    dev = QMS200Device(ProbeResult(port="COM_TEST", baud=19200, analyzer=0))
+    dev.write("average", "8")   # ENUM sink → string option
+    dev.write("ref_pressure", 1e-6)
+    assert dev._avg_n == 8 and dev._ref_pressure == 1e-6
+    assert len(dev._write_q) == 0        # nothing queued for the serial line

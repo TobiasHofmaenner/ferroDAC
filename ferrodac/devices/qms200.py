@@ -496,6 +496,25 @@ class QMS200Device(BaseDevice):
                 pass
 
     # -- control sinks (filament / detector / SEM) ---------------------------
+    def write(self, sink_id: str, value=None) -> None:
+        """LOCK-FREE control write (overrides BaseDevice.write, which wraps `_write`
+        in the io guard). QMS `_write` never touches the serial line — it only
+        enqueues a control change (the poll thread sends it) or updates a software
+        field. Taking the io lock the poll thread holds for a WHOLE multi-second
+        sweep would delay even the enqueue by that sweep — the 'toggle takes forever'
+        latency. Enqueuing lock-free lets the poll thread SEE the pending write
+        mid-sweep (a deque length check is atomic in CPython) and cut the sweep short
+        (see _drain_scan), so the command goes out on the very next cycle instead of
+        after the current sweep completes."""
+        schema = self._sink_schema(sink_id)
+        if schema is None:
+            raise KeyError(f"no sink {sink_id!r} on {self._instance_id}")
+        if schema.kind != SinkKind.ACTION:
+            value = self._coerce(schema, value)
+        self._write(schema, value)           # queue-only / software: no serial, no lock
+        if schema.kind != SinkKind.ACTION:
+            self._sink_values[sink_id] = value
+
     def _write(self, sink, value) -> None:
         """Queue a control change; the poll thread applies it at the next safe
         serial boundary (no GUI-thread blocking on the scan). Only fires when
@@ -783,8 +802,11 @@ class QMS200Device(BaseDevice):
                 emitted += 1
 
         while self._streaming and time.monotonic() < deadline:
-            if self._reconfig_pending:              # option changed → end the sweep
-                break
+            if self._reconfig_pending or self._write_q:   # option OR control change →
+                break                                     # end the sweep early; the
+            #   partial is discarded and _read services the write at the top of the
+            #   NEXT cycle (a safe between-sweeps boundary — same path reconfig uses),
+            #   so a filament/SEM toggle lands in ~one poll instead of a full sweep.
             n0 = len(points)
             try:
                 hdr = self._link.query("MBH").split(",")
