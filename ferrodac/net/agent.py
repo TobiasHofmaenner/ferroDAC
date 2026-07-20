@@ -107,11 +107,15 @@ class HubAgent(ReconnectingClient):
             pd = convert.descriptor_to_proto(d, available=True, agent_id=self._agent_id)
             wanted[pd.uuid] = pd
         with self._lock:
-            current = set(self._devices)
-        for uuid in current - set(wanted):
+            current = dict(self._devices)
+        for uuid in set(current) - set(wanted):
             self.retire(uuid)
-        for pd in wanted.values():
-            self._announce_proto(pd)
+        for uuid, pd in wanted.items():
+            prev = current.get(uuid)
+            if prev is None or prev != pd:      # announce only NEW or genuinely
+                self._announce_proto(pd)        # CHANGED descriptors — an unchanged
+            #   set was re-broadcast to every viewer on each active_changed (fired
+            #   ~2 s by a single device's flapping sink readback → whole-catalog churn)
 
     def feed(self, readings) -> None:
         """Publish a batch of app Readings. r.device is the device's data_id

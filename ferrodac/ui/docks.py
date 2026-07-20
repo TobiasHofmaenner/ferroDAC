@@ -1115,10 +1115,29 @@ class SourcesPanel(QWidget):
         scroll.setWidget(host)
         root.addWidget(scroll, 1)
 
+        self._last_sig = None
         dashboard.ports_changed.connect(self._rebuild)
         self._rebuild()
 
+    def _signature(self):
+        """Structural identity of every card this panel would build — keys, labels,
+        routing, online state, and the sink set that drives the route menu — but NOT
+        live values (those update via update_live). A device flapping a sink-VALUE
+        readback fires the global active_changed → ports_changed every ~2 s; this
+        signature stays identical, so the panel doesn't churn its cards."""
+        d = self.dashboard
+        return (self._hide_offline.isChecked(),
+                tuple((p.key, p.name, p.origin, p.online, p.dtype, p.unit, p.kind,
+                       getattr(p, "proc_id", ""), tuple(sorted(d.routed(p.key))))
+                      for p in d.visible_source_ports()),
+                tuple((s.key, s.unit, tuple(sorted(s.accepts)), s.online)
+                      for s in d.sink_ports()))
+
     def _rebuild(self):
+        sig = self._signature()
+        if sig == self._last_sig:
+            return                    # nothing structural changed → don't rebuild
+        self._last_sig = sig
         # a ports_changed rebuild tears down + recreates every card; freeze painting so
         # the clear→refill doesn't flash a blank/half-built panel (#9, cfg-event flicker)
         self.setUpdatesEnabled(False)
@@ -1282,6 +1301,7 @@ class SinksPanel(QWidget):
         root.addWidget(scroll, 1)
 
         self._cards: dict = {}      # sink_key -> (SinkCard, port)
+        self._last_sig = None
         dashboard.ports_changed.connect(self._rebuild)
         self._rebuild()
 
@@ -1294,7 +1314,21 @@ class SinksPanel(QWidget):
                 return "(action)" if sk.value is None else fmt(sk.value, port.unit)
         return "—"
 
+    def _signature(self):
+        """Structural identity — keys/routing/online, NOT live values (update_live
+        refreshes those on the data tick). A sink-value readback flap fires
+        active_changed → ports_changed but leaves this identical → no rebuild."""
+        d = self.dashboard
+        return (self._hide_offline.isChecked(),
+                tuple((p.key, p.name, p.origin, p.online, p.dtype, p.unit, p.kind,
+                       tuple(sorted(p.accepts)), tuple(sorted(d.sources_into(p.key))))
+                      for p in d.sink_ports()))
+
     def _rebuild(self):
+        sig = self._signature()
+        if sig == self._last_sig:
+            return                    # nothing structural changed → don't rebuild
+        self._last_sig = sig
         clear_layout(self._layout)
         self._cards = {}
         ports = self.dashboard.sink_ports()

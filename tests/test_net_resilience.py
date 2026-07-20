@@ -224,3 +224,28 @@ def test_promptwatch_respond_reports_the_ack():
     w._stub = _Stub(ack=pb.Ack(ok=True))
     asyncio.run(w._respond(pb.RespondPromptRequest(id="p", boolean=True),
                            lambda ok, d: 1 / 0))
+
+
+def test_set_devices_dedups_unchanged_announces():
+    """set_devices re-announces only NEW or CHANGED descriptors. Re-pushing an
+    identical catalog (what active_changed does on every tick — a single device's
+    flapping sink readback fired it ~every 2 s) must produce ZERO announce traffic,
+    else every viewer rebuilds its whole device/source list (the flashing bug)."""
+    ag = HubAgent("127.0.0.1:1", agent_id="t")           # never started: offline
+    sent = []
+    ag._send = lambda msg: sent.append(msg)
+
+    def announces():
+        return [m for m in sent if m.WhichOneof("msg") == "announce"]
+
+    ag.set_devices([_desc(uuid="u1"), _desc(uuid="u2", name="B")])
+    assert len(announces()) == 2                         # first time → both announced
+    sent.clear()
+
+    ag.set_devices([_desc(uuid="u1"), _desc(uuid="u2", name="B")])
+    assert announces() == []                             # identical → nothing re-sent
+
+    sent.clear()
+    ag.set_devices([_desc(uuid="u1"), _desc(uuid="u2", name="B-renamed")])
+    a = announces()
+    assert len(a) == 1 and a[0].announce.uuid == "u2"    # only the CHANGED one

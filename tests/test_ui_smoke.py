@@ -2334,3 +2334,35 @@ def test_ports_changed_is_coalesced(qapp):
     finally:
         w.close()
         qapp.processEvents()
+
+
+@pytest.mark.ui
+def test_sources_panel_skips_rebuild_when_structure_unchanged(qapp):
+    """A ports_changed with no STRUCTURAL change (e.g. a device flapping a sink-value
+    readback fires active_changed → _rebuild_device_ports → ports_changed ~every 2 s)
+    must NOT tear down and recreate the source cards — that was the Sources-list
+    'flashing / empties then repopulates' bug."""
+    from ferrodac.ui.workspace import SourcePort, SinkPort
+    from ferrodac.ui.docks import SourcesPanel
+    w = _mainwindow(qapp)
+    try:
+        db = w.dashboard
+        db._sources["dev/a"] = SourcePort("dev/a", "A", "float", "K", "Dev", "device")
+        db._sinks["dev:1#s"] = SinkPort("dev:1#s", "S", "bool", "", "Dev", "device",
+                                        device_id="dev:1", sink_id="s")
+        sp = SourcesPanel(w.manager, db)
+        sp._hide_offline.setChecked(False)
+        card = sp._cards.get("dev/a")
+        assert card is not None
+
+        db.ports_changed.emit()                  # identical structure → no rebuild
+        assert sp._cards.get("dev/a") is card    # SAME widget object (not recreated)
+
+        # a real structural change (new source) DOES rebuild
+        db._sources["dev/b"] = SourcePort("dev/b", "B", "float", "K", "Dev", "device")
+        db.ports_changed.emit()
+        assert "dev/b" in sp._cards
+        assert sp._cards.get("dev/a") is not card   # rebuilt
+    finally:
+        w.close()
+        qapp.processEvents()
