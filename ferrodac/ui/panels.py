@@ -353,39 +353,21 @@ class ChartPanel(Panel):
         # (Option B). The Dashboard wires on_x_range and guards re-entrancy.
         self.on_x_range = None                # callback(t0, t1) — set by the Dashboard
         self._pi.vb.sigXRangeChanged.connect(self._emit_x_range)
-        # Marker items are WINDOWED to the visible time range (see _sync_markers):
-        # a pan/zoom must re-sync which ones exist, throttled — a drag emits range
-        # changes per frame, and a full marker diff per frame defeats the point.
-        # DURING a range gesture, marker items are HIDDEN outright (one cheap
-        # setVisible sweep on the first step) and the full re-sync + re-show runs
-        # once the range has settled for 500 ms. Measured: a zoom step at field
-        # scale is ~64 ms without marker items and ~513 ms with them — even
-        # UNCHANGED labels re-anchor their TextItem on every transform change, so
-        # no amount of sync hysteresis makes visible markers cheap mid-gesture.
-        # (_marker_win_timer remains the throttled FULL re-sync used by reconcile
-        # mode flips and other nudges.)
+        # Marker items are WINDOWED to the visible range and re-synced ONLY when the
+        # tag SET changes (markers.changed, coalesced), on a mode flip (ChartFeed.
+        # reconcile), or after a USER pan/zoom settles — NEVER on live autorange.
+        # Materialized markers ride the transform cheaply (~6 ms/tick with 150 lines
+        # + 60 labels, bench); it was re-syncing per live tick — the old
+        # sigXRangeChanged hook, ~6×/s at ~30 ms each — that churned items and made
+        # them FLASH as data streamed in. A user gesture uses sigRangeChangedManually
+        # (mouse only, never programmatic/autorange) → a 150 ms single-shot that
+        # fires on settle, so a drag re-syncs once at the end, not per frame.
         self._marker_win_timer = QTimer(self)
         self._marker_win_timer.setSingleShot(True)
         self._marker_win_timer.setInterval(150)
         self._marker_win_timer.timeout.connect(self._sync_markers)
-        self._markers_hidden = False
-        self._marker_settle_timer = QTimer(self)
-        self._marker_settle_timer.setSingleShot(True)
-        self._marker_settle_timer.setInterval(500)
-        self._marker_settle_timer.timeout.connect(self._sync_markers)
-
-        def _range_changed(*_a):
-            if not self._markers_hidden and self._marker_lines:
-                self._markers_hidden = True
-                for entry in self._marker_lines.values():
-                    # DETACH, not hide: a hidden item (and its label child) still
-                    # receives the ViewBox's per-transform callbacks — measured
-                    # ~490 ms/zoom-step with 150 hidden items vs ~64 ms with none.
-                    # Scene removal is what disconnects them (pyqtgraph re-binds
-                    # on re-add); the objects are kept for the settle re-add.
-                    self.plot.removeItem(entry[0])
-            self._marker_settle_timer.start()
-        self._pi.vb.sigXRangeChanged.connect(_range_changed)
+        self._pi.vb.sigRangeChangedManually.connect(
+            lambda *_a: self._marker_win_timer.start())
         # Live curve redraws are THROTTLED (leading + trailing edge, ~10 Hz): every
         # 50 ms drain used to setData the FULL buffer per touched curve — log remap +
         # isfinite + peak downsample over up to 120k points per curve per tick
@@ -479,29 +461,20 @@ class ChartPanel(Panel):
         # origin-rebasing to drift between platforms / live↔replay).
         return t
 
-    _LABEL_BUDGET = 40   # markers that carry a TEXT label: each label is a TextItem
-    #                      whose anchor/geometry recomputes on EVERY view-transform
-    #                      change (watchdog: per-frame cost × 150 items during
-    #                      autorange churn). Lines are cheap; labels are budgeted to
-    #                      the most recent few — zooming in re-labels what's visible.
+    _LABEL_BUDGET = 60   # markers that carry a TEXT label — budgeted to the most
+    #                      recent in view. Labels ride the view transform cheaply
+    #                      once materialized (the old cost was re-CREATING them on a
+    #                      per-tick re-sync, not drawing them); shown live AND parked.
 
     def _sync_markers(self):
         if self.markers is None:
             return
-        if self._markers_hidden:                      # gesture over → re-attach the
-            self._markers_hidden = False              # detached items, then sync
-            for entry in self._marker_lines.values():  # normally (prune/update/label)
-                self.plot.addItem(entry[0], ignoreBounds=True)
         # window + cap the materialized items (shared _budget_markers policy — see
-        # its docstring; pan/zoom re-syncs via _marker_win_timer). While FOLLOWING,
-        # the cap drops to the last few: a live grow view eventually contains the
-        # whole catalog, and ~150 items × N panels of per-paint boundingRect work +
-        # scene-index churn as the window slides was the residual ~1 s paint class.
-        cap = 20 if self.live_follow else 150
-        current = _budget_markers(self.markers.visible(), self.plot, axis=0, cap=cap)
-        budget = 0 if self.live_follow else self._LABEL_BUDGET
+        # its docstring). This runs on tag changes / mode flips / a settled user
+        # gesture, NOT per live tick, so labels are affordable while streaming.
+        current = _budget_markers(self.markers.visible(), self.plot, axis=0, cap=150)
         labeled = set(sorted(current, key=lambda mid: current[mid].t)
-                      [-budget:]) if budget else set()
+                      [-self._LABEL_BUDGET:])
         for mid in list(self._marker_lines):
             if mid not in current:
                 self.plot.removeItem(self._marker_lines.pop(mid)[0])
