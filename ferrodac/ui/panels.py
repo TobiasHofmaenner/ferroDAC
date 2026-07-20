@@ -55,6 +55,13 @@ from .widget import WIDGET_TYPES, Widget
 # zigzag masks the visual difference; text/axis rendering stays font-antialiased.
 pg.setConfigOptions(antialias=False, background="#11151c", foreground="#c7d0db")
 
+# Draw live curves EVERY drain tick (immediate, ~20 Hz) while the total drawn point
+# count across a chart's dirty curves is at or below this; above it, coalesce to the
+# ~10 Hz flush timer (see ChartPanel.feed). Sized so a below-threshold draw stays
+# well inside the ~50 ms frame budget (measured ~0.2 ms/1k pts/curve for the
+# setData log-remap + peak-downsample); only unusually long/dense charts throttle.
+_LIVE_FLUSH_MAX = 120_000
+
 
 def _budget_markers(markers, plot, axis=0, cap=150) -> dict:
     """The marker set a panel may MATERIALIZE: windowed to the visible time range
@@ -901,10 +908,16 @@ class ChartPanel(Panel):
             buf.append(tx, ty, (tlo, thi))
             self._dirty_curves.add(key)
         if self._dirty_curves:
-            now = time.monotonic()
-            if now - self._last_curve_flush >= 0.1:  # leading edge: a quiet-period
-                self._flush_dirty_curves()           # feed draws immediately
-            elif not self._flush_timer.isActive():   # sustained feed → trailing edge
+            # ADAPTIVE: draw immediately (live, every drain tick) while it's cheap —
+            # each setData re-runs pyqtgraph's log-remap + peak downsample over the
+            # WHOLE buffer, ~0.2 ms/1k points/curve. Only once the drawn total is
+            # large enough that per-tick draws would eat the frame budget do we
+            # coalesce to the ~10 Hz timer. So normal sessions feel live (every value
+            # the instant it arrives); only very long/dense charts throttle.
+            pts = sum(len(self._buf[k]) for k in self._dirty_curves if k in self._buf)
+            if pts <= _LIVE_FLUSH_MAX:
+                self._flush_dirty_curves()
+            elif not self._flush_timer.isActive():   # heavy → trailing-edge coalesce
                 self._flush_timer.start()
 
     def _flush_dirty_curves(self):
